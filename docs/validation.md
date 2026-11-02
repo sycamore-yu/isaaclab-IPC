@@ -75,9 +75,9 @@ Newton 森林的最小子步间距为 0.397 m。
 - `results/medium-failure-oracle/diagnosis.json`
 - `results/medium-failure-oracle/zero-velocity-ablation.json`
 
-建议保留严格复刻基线，另加物理可执行模式。
-该模式会调整走廊时序或不可行恢复，属于算法扩展。
-用户随后已授权实施制动重规划；新结果单独保存，见执行配置文档。
+该实验只复核了同一 QP 的可行性，未完成原版完整规划器的同输入对照。
+用户随后已授权真实配置使用制动重规划。
+新结果单独保存，见执行配置文档。
 
 ## 数值、物理与接口检查
 

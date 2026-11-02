@@ -1,0 +1,134 @@
+{
+  "recorded_on": "2026-11-02",
+  "source_revision": "0f959ca7995e71a1fcc4942bd4a86869ab6ee975",
+  "candidate_snapshot": "c22f8a9",
+  "phase_1_acceptance": "not met",
+  "original_docker": {
+    "slow-close": {
+      "passed": 10,
+      "total": 10
+    },
+    "medium-close": {
+      "passed": 8,
+      "total": 10,
+      "missing_clearance_diagnostics": 1
+    },
+    "fast-far": {
+      "passed": 0,
+      "total": 10
+    },
+    "fast-near": {
+      "passed": 0,
+      "total": 10
+    },
+    "forest": {
+      "passed": 10,
+      "total": 10
+    }
+  },
+  "ideal_profile": {
+    "slow-close": {
+      "passed": 10,
+      "total": 10
+    },
+    "medium-close": {
+      "passed": 10,
+      "total": 10
+    },
+    "fast-far": {
+      "passed": 0,
+      "total": 10
+    },
+    "fast-near": {
+      "passed": 0,
+      "total": 10
+    }
+  },
+  "real_profile": {
+    "slow-close": {
+      "passed": 10,
+      "total": 10,
+      "evidence": "results/real-brake-low/records.json"
+    },
+    "medium-close": {
+      "passed": 0,
+      "total": 10,
+      "evidence": "results/real-brake-medium/records.json"
+    },
+    "forest": {
+      "passed": 10,
+      "total": 10,
+      "evidence": "results/real-brake-forest/records.json"
+    },
+    "forest-32m": {
+      "passed": 1,
+      "total": 1,
+      "evidence": "results/real-forest-32m/records.json"
+    }
+  },
+  "long_forest_original": {
+    "goal": [
+      32.0,
+      0.0,
+      1.0
+    ],
+    "goal_crossed": true,
+    "samples": 8341,
+    "travelled_m": 32.337679989419925,
+    "clearance_lower_bound_m": 0.2003713910674847
+  },
+  "long_forest_newton": {
+    "travelled_m": 31.721395294878505,
+    "sample_clearance_m": 0.2374736007698982,
+    "polyline_clearance_lower_bound_m": 0.2239215134610041
+  },
+  "recordings": [
+    {
+      "path": "recordings/forest_32m_newton.rrd",
+      "bytes": 16620469,
+      "newton_recovery": "brake_replan"
+    },
+    {
+      "path": "recordings/forest_32m_original.rrd",
+      "bytes": 14673731,
+      "newton_recovery": null
+    },
+    {
+      "path": "recordings/forest_newton.rrd",
+      "bytes": 7193463,
+      "newton_recovery": "previous_sequence"
+    },
+    {
+      "path": "recordings/forest_original.rrd",
+      "bytes": 6674330,
+      "newton_recovery": null
+    },
+    {
+      "path": "recordings/low_newton.rrd",
+      "bytes": 5471083,
+      "newton_recovery": "previous_sequence"
+    },
+    {
+      "path": "recordings/low_original.rrd",
+      "bytes": 2507586,
+      "newton_recovery": null
+    },
+    {
+      "path": "recordings/medium_newton.rrd",
+      "bytes": 2097945,
+      "newton_recovery": "previous_sequence"
+    },
+    {
+      "path": "recordings/medium_original.rrd",
+      "bytes": 2127127,
+      "newton_recovery": null
+    }
+  ],
+  "caveats": [
+    "Original medium-close includes one unverified missing-diagnostic episode.",
+    "Fixed-condition replicas are not independent randomized-scene success rates.",
+    "32m runs and RRD recordings are separate episodes.",
+    "RRDs were decoded; not frame-by-frame viewer reviewed.",
+    "Raw results and recordings are local, ignored by Git."
+  ]
+}

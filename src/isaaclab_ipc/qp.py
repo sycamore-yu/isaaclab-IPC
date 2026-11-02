@@ -102,20 +102,18 @@ class BatchedQP:
                 self._iterations()
             solution = self.x.squeeze(-1) * scale_tensor
             # Check in original physical units, not scaled constraint units.
-            dual = (torch.bmm(self.H, self.x) + self.g + torch.bmm(self.AT, self.y)).squeeze(-1) / scale_tensor
-            primal = (
-                torch.maximum((torch.bmm(self.A, self.x) - self.hi), self.lo - torch.bmm(self.A, self.x))
-                .clamp_min(0)
-                .squeeze(-1)
-                / row_scale_tensor
-            )
+            hx_scaled = torch.bmm(self.H, self.x)
+            aty_scaled = torch.bmm(self.AT, self.y)
+            ax_scaled = torch.bmm(self.A, self.x)
+            dual = (hx_scaled + self.g + aty_scaled).squeeze(-1) / scale_tensor
+            primal = torch.maximum(ax_scaled - self.hi, self.lo - ax_scaled).clamp_min(0).squeeze(-1) / row_scale_tensor
             primal_norm = primal.amax(-1)
             dual_norm = dual.abs().amax(-1)
-            hx = torch.bmm(self.H, self.x).squeeze(-1) / scale_tensor
+            hx = hx_scaled.squeeze(-1) / scale_tensor
             gradient = self.g.squeeze(-1) / scale_tensor
-            aty = torch.bmm(self.AT, self.y).squeeze(-1) / scale_tensor
+            aty = aty_scaled.squeeze(-1) / scale_tensor
             dual_scale = torch.stack((hx.abs().amax(-1), gradient.abs().amax(-1), aty.abs().amax(-1))).amax(0)
-            ax_original = torch.bmm(self.A, self.x).squeeze(-1) / row_scale_tensor
+            ax_original = ax_scaled.squeeze(-1) / row_scale_tensor
             z_original = self.z.squeeze(-1) / row_scale_tensor
             primal_scale = torch.maximum(ax_original.abs().amax(-1), z_original.abs().amax(-1))
             good = (primal_norm <= self.eps_abs + self.eps_rel * primal_scale) & (

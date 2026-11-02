@@ -57,14 +57,15 @@ Newton 刚体环境会增加角速度跟踪、电机响应和接触效应。
 
 数值疑点已核对：OSQP-Eigen 0.7.0 丢弃下三角非对角项。
 当前 Hessian 保留原求解器实际接收的上三角语义。
-首次求解失败时原生版本明确报错，不读取未初始化历史解。
+理想配置首次求解失败时明确报错，不读取未初始化历史解。
+真实配置的故障恢复按 [ADR-0003](adr/0003-execution-profiles.md) 执行。
 证据和其余差异见 [来源记录](provenance.md)。
 
 ## 原生包结构
 
 ### 物理和控制分开
 
-采用 `physics=newton_mjwarp`。
+当前配置为 `NewtonCfg(solver_cfg=MJWarpSolverCfg())`。
 MJWarp 是 Newton 的求解器，不是另一套并列后端。
 参见 [Isaac Lab physics backends](https://docs.nvidia.com/isaaclab/concepts/physics-backends)。
 
@@ -78,7 +79,8 @@ MJWarp 是 Newton 的求解器，不是另一套并列后端。
 ### 批量计算保留硬约束
 
 先建立同输入的 CPU 数值参考，再验证批量 GPU QP。
-CPU 参考仅用于测试，不作为运行期的逐环境回退路径。
+当前默认使用 CPU OSQP，GPU QP 由 `--solver gpu` 显式选择。
+GPU 求解失败时不会静默转到 CPU。
 GPU 路径需覆盖局部地图、A*、SFC 和 MPC。
 仅加速 MPC 不能证明端到端吞吐提高。
 
@@ -94,7 +96,8 @@ V2 提供自定义 rollout、梯度求解器和粒子求解器。
 ### 使用标准包和 RL 入口
 
 采用外部模板的 `src/` 布局及 `isaaclab.tasks` entry point。
-训练、播放和 Hydra 配置复用官方 CLI。
+任务注册遵循官方外部包入口，当前评估使用本项目 CLI。
+AC-MPC 训练和播放尚未接入；后续复用官方工作流。
 不复制一套训练平台。
 
 Direct workflow 适合自定义 IPC 批量状态。

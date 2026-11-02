@@ -98,18 +98,9 @@ env -u PYTHONPATH uv run python scripts/run_reference.py \
 
 ## 选择理想配置或真实配置
 
-`--profile real` 为默认配置。
-QP 不可行时，真实配置停止沿用旧 jerk 序列，改为制动并请求 A* 重新规划。
-恢复期间仍读取实际速度，待速度低于 0.2 m/s、加速度低于 0.5 m/s²，
-且导航 QP 求解成功后恢复导航。
-制动目标加速度为 `-2v`，受原加速度界限制。
-jerk 受原 jerk 界限制，机体仍通过 Newton 电机力运动。
-制动控制不能保证在突现障碍出现后仍有足够停车距离。
-
-`--profile ideal` 复刻原避障测试：MPC 输入速度置零，
-执行器直接采用预测位置，姿态按预测加速度计算。
-理想执行器不启动 Newton 积分，也不把这种位置设置当成刚体飞行。
-修改前的上一序列回退测试和结果保留在历史证据中。
+`--profile real` 为默认配置，使用实际速度、Newton 电机力和制动重规划。
+`--profile ideal` 使用速度置零与位置直接赋值，不启动 Newton。
+恢复阈值、执行差异和测试结果统一见 [执行配置](docs/execution-profiles.md)。
 
 ```bash
 # 理想配置：中速突现障碍，一次 episode。
@@ -129,3 +120,14 @@ env -u PYTHONPATH uv run python scripts/evaluate_native.py \
 此前 8 m 森林目标来自本地 `repro/forest_monitor.py` 的测试设置。
 上游 `IPC/launch/ipc.launch` 接收外部目标，并不限制只飞 8 m。
 地图没有树木实例标签，路线长度不能直接换算为经过的树木数。
+
+## 本地 Git 基线与数据
+
+原始候选快照标签为 `ipc-reproduction-baseline-20261102`。
+收尾后的基线标签为 `ipc-reproduction-baseline-clean-20261102`。
+基线名称表示可恢复的源码版本，不表示阶段 1 已验收。
+
+Git 保存源码、配置、锁文件、测试和文档。
+`results/`、`recordings/`、`build/` 和 `.venv/` 保留在本地，不进入 Git。
+复制 Git 仓库不会复制这些数据；需要完整交接时必须同时备份结果和录制。
+录制目录与对应配置见 [执行配置](docs/execution-profiles.md#rerun-录制)。
