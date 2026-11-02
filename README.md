@@ -1,17 +1,18 @@
 # Isaac Lab IPC
 
-阶段 1 候选包已能运行。**成功率尚未达到原版水平**：
-Newton 中速突现障碍测试仍失败。
+Newton/MJWarp IPC 和 CUDA 可微 MPC 的 PPO 训练已能运行。
+**成功率尚未达到原版水平**：中速突现障碍测试仍失败。
 历史结果见 [场景验证](docs/validation.md)。
 新执行配置与复测见 [执行配置](docs/execution-profiles.md)。
 
 ## 安装与运行
 
-需要 Linux、Python 3.12、CUDA GPU、`uv`、G++ 和 Eigen3 头文件。
+需要 Linux、Python 3.12、CUDA GPU、`uv`、G++、Eigen3 和 Qhull 头文件（`libqhull-dev`）。
 依赖版本由 `uv.lock` 固定；安装不会修改其他项目的环境。
 
 ```bash
 uv sync
+uv run python scripts/prepare_mid360.py
 REF=/home/tong/tongworkspace/reference_repos/IPC/hku-mars
 uv run python scripts/build_native.py --upstream "$REF"
 
@@ -28,7 +29,8 @@ QP 失败时保存首个失败问题，供独立求解器复核。
 默认使用 CPU OSQP 作为数值基线。
 加上 `--solver gpu` 使用批量 CUDA graph ADMM。
 单环境测试宜保留默认；64 个 QP 的批处理已有加速证据。
-A*、EMVP 和 QP 组装目前仍在 CPU。
+该基线入口的 A*、PathCover/RISP 和 QP 组装仍在 CPU。
+下述 AC-MPC 入口将 QP 组装和求解放在 GPU。
 
 ## 原版森林场景
 
@@ -43,15 +45,38 @@ env -u PYTHONPATH uv run python scripts/evaluate_native.py \
   --forest build/forest --stride 6 --num-envs 10 --output results/my-forest-run
 ```
 
-森林感知使用 MiniCF 扫描方向和 Warp 首命中射线。
+真实配置默认使用 Mid-360 随机方向窗口与官方 `MultiMeshRayCasterCfg`。
 射线查询对象为 0.1 m 体素表面。
 该方式不同于 MARSIM 的点云平面插值。
 森林碰撞在每个物理子步检查，发生碰撞即终止。
 树木不提供接触反弹；避障场景的墙和障碍物由 MJWarp 处理接触。
 
+## 输入是点云和机体状态
+
+森林和突现障碍真实配置均输入模拟激光雷达点云。
+扫描模式为 **Mid-360 随机方向窗口**，每帧 20,000 条射线，10 Hz，测距 40 m。
+传感器位于机体原点、轴对齐；官方 MultiMesh 管理多环境与移动障碍网格。
+森林查询原 PCD 的 0.1 m 体素表面，突现障碍查询当前墙体和障碍物网格。
+理想配置继续使用原来的合成点云，不启动传感器或 Newton。
+当前没有深度相机、深度图或图像编码器。
+
+规划器还读取当前位置、速度、加速度、姿态和目标点。
+位置、速度和姿态来自仿真真值。
+位姿、速度读取官方 `ArticulationData`；世界系净加速度来自官方 `PvaCfg`，包含重力与接触响应。
+传感器、事件与记录迁移的行为边界和实测结果见 [官方组件迁移](docs/official-components.md)。
+当前尚未接入 SLAM、VIO 或真实状态估计器。
+
+```text
+点云 → 最近 10 帧聚合 / 0.2 m 体素 → A* → PathCover/RISP SFC
+状态 + 目标 + 参考轨迹 + SFC → MPC → 推力 / 机体角速度 → Newton
+```
+
+AC-MPC 成本网络读取由状态、目标、参考轨迹、SFC 和恢复标记组成的特征。
+网络不直接读取原始点云或相机图像。
+
 ## Isaac Lab 接口
 
-包通过 `isaaclab.tasks` entry point 注册 2 个 `DirectRLEnv`：
+包通过 `isaaclab.tasks` entry point 注册基础物理任务：
 
 - `Isaac-IPC-Avoid-Direct`
 - `Isaac-IPC-Forest-Direct`，需要先生成 `build/forest`。
@@ -72,8 +97,22 @@ env = gym.make("Isaac-IPC-Avoid-Direct", cfg=cfg)
 到达与碰撞返回 `terminated`；35 s 超时返回 `truncated`。
 标准环境自动 reset；场景测试关闭自动 reset，以保留终止状态。
 
-AC-MPC actor、可微 QP 和训练留在阶段 2。
-当前环境接口不等于已经完成 AC-MPC 训练接入。
+## CUDA AC-MPC 训练
+
+学习任务保留 IPC 的 9 维状态、三轴 jerk 和线性模型。
+成本网络通过 CUDA 可微硬约束 QP 接入标准 RSL-RL PPO。
+
+```bash
+env -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 \
+  uv run python -u scripts/acmpc.py train \
+  --num-envs 4 --iterations 32 --output results/my-acmpc
+```
+
+任务为 `Isaac-IPC-Avoid-ACMPC-Direct` 和 `Isaac-IPC-Forest-ACMPC-Direct`。
+训练、恢复、播放、约束语义和验证结果见 [AC-MPC 使用说明](docs/acmpc.md)。
+
+默认走廊为 PathCover/RISP，保留原安全距离和 IPC 走廊时序。
+设计、结果和剩余测试见 [走廊替换说明](docs/pathcover.md)。
 
 ## 复现检查
 

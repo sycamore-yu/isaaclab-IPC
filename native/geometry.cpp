@@ -3,30 +3,29 @@
 #include <pybind11/eigen.h>
 #include <pybind11/stl.h>
 #include "local_astar.cpp"
-#include "emvp.hpp"
+#include "PathCover.hpp"
 namespace py=pybind11;
 using Points=std::vector<Eigen::Vector3d>;
-Eigen::MatrixXd corridor(const Eigen::Vector3d&a,const Eigen::Vector3d&b,const Points&points,double radius){
-    if(!a.allFinite()||!b.allFinite()||!std::isfinite(radius)||radius<0) throw std::invalid_argument("Invalid corridor input");
-    Eigen::Matrix<double,6,4> bd; bd.setZero();
-    bd.block<3,3>(0,0)=Eigen::Matrix3d::Identity();
-    bd.block<3,3>(3,0)=-Eigen::Matrix3d::Identity();
-    bd.col(3)<<-a.x()-10,-a.y()-10,-3,a.x()-10,a.y()-10,-0.5;
-    if(points.empty()) return bd;
-    // EMVP's tie breaking depends on the original nonempty-cloud plane order.
-    Eigen::Matrix<double,6,4> ordered;
-    ordered<<bd.row(0),bd.row(3),bd.row(1),bd.row(4),bd.row(2),bd.row(5);
-    bd=ordered;
-    Eigen::Matrix3Xd cloud(3,points.size());
-    for(size_t i=0;i<points.size();++i){
-        if(!points[i].allFinite()) throw std::invalid_argument("Nonfinite point");
-        cloud.col(i)=points[i];
-    }
-    Polytope p;
-    if(!emvp::emvp(bd,cloud,a,b,p,radius,false,1)) return Eigen::MatrixXd(0,4);
-    return p.GetPlanes();
+struct CorridorError:std::runtime_error{using std::runtime_error::runtime_error;};
+Eigen::MatrixXd corridor(const Eigen::Vector3d&a,const Eigen::Vector3d&end,const Points&points,double radius){
+ if(!a.allFinite()||!end.allFinite()||!std::isfinite(radius)||radius<0) throw std::invalid_argument("Invalid corridor input");
+ Eigen::Matrix<double,-1,3> bounds(6,3); bounds<<1,0,0,-1,0,0,0,1,0,0,-1,0,0,0,1,0,0,-1;
+ Eigen::VectorXd limits(6); limits<<a.x()+10,10-a.x(),a.y()+10,10-a.y(),3,-.5;
+ for(const auto&p:points){if(!p.allFinite())throw std::invalid_argument("Nonfinite point");if((p-a).norm()<1e-8)throw CorridorError("Obstacle coincides with SFC seed");}
+ Eigen::Matrix<double,-1,3>A;Eigen::VectorXd b;std::vector<int> remaining;
+ if(points.empty()){A=bounds;b=limits;}
+ else{
+  try { PathCover::RISP<double,3>(points,a,bounds,limits,A,b,remaining); }
+  catch(const std::exception&e){throw CorridorError(e.what());}
+  // The IPC cloud is not inflated; preserve its metric robot clearance here.
+  b.array()-=radius*A.rowwise().norm().array();
+ }
+ if(!A.allFinite()||!b.allFinite()||((A*a-b).array()>1e-8).any())throw CorridorError("SFC seed violates clearance");
+ if(((A*end-b).array()>1e-8).any())return Eigen::MatrixXd(0,4);
+ Eigen::MatrixXd planes(A.rows(),4);planes.leftCols(3)=A;planes.col(3)=-b;return planes;
 }
 PYBIND11_MODULE(_geometry,m){
+    py::register_exception<CorridorError>(m,"CorridorError");
     m.def("corridor",&corridor,py::call_guard<py::gil_scoped_release>());
     py::class_<LoaclAstarClass>(m,"Grid")
         .def(py::init([](){auto p=std::make_unique<LoaclAstarClass>(); p->InitMap(.1,{-10,-10,0},{10,10,3});p->Reset();return p;}))

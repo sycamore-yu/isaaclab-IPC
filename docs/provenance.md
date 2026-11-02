@@ -10,14 +10,12 @@
 其 ROS 入口和证据收集脚本来自 `repro/`。
 `repro/dynipc/` 属于其他算法，未作为本次基线。
 
-`build_native.py` 从固定 Git revision 提取 A* 和 EMVP。
-构建只移除 ROS I/O，并修复 C++17 比较器和析构释放。
-生成的源码差异位于 `build/native/port.patch`。
-`native/geometry.cpp` 保留非空点云时的原始平面顺序。
-该顺序会影响 EMVP 的等值选择。
+`build_native.py` 从固定 Git revision 提取 A*，只移除 ROS I/O 并释放析构资源。
+源码差异位于 `build/native/port.patch`。
+默认走廊使用 vendored PathCover/RISP，版本、许可与适配见 [走廊说明](pathcover.md)。
+走廊输出、参考时序和 MPC 之间仍使用原来的半空间接口。
 
 IPC 根目录无许可证，`package.xml` 的 license 为 `TODO`。
-EMVP 的 MIT 声明不能覆盖全部源码。
 当前只验证本地可编辑安装，不发布带算法源码或二进制的 wheel。
 正式分发前需要澄清上游授权。
 
@@ -54,18 +52,27 @@ Newton articulation 适配保留物理状态、四电机和力矩分配。
   原代码在没有自由端点时会无限循环。
 - 原避障配置的 `perfect_simu` 会把观测速度置零。
   理想诊断脚本保留该行为，并直接采用预测位置。
-  Newton 路径使用真实速度和实际电机加速度。
+  Newton 路径使用真实速度和官方 PVA 净加速度。
 - 原森林接收 PVAJ 并使用 MARSIM 的 SO3 控制器。
   Newton 路径执行 IPC 的平坦变换和机体角速度命令。
 - 森林地图相同，感知表面重建不同。
   当前射线命中体素表面，不复刻 MARSIM 的点云平面插值。
   完整原始 PCD 独立承担碰撞判定。
 
+## Mid-360 数据来源
+
+方向表来自 AME-2 `leggedrobotics/ame2_minimal`，固定 revision
+`34b6fe9eae6ff2c599ca6ecffa24c76e9bce8148`。
+`scripts/prepare_mid360.py` 下载方向表与 GPL-3.0 许可证到被 Git 忽略的 `build/sensors/`。
+数据与来源清单保留该许可，不按本项目的 BSD 代码声明重新授权。
+未复制 AME-2 的传感器类或 `_update_buffers_impl`；射线查询由官方 MultiMesh 承担。
+实现与验收见 [官方组件迁移](official-components.md)。
+
 ## GPU 范围
 
 Newton/MJWarp、力矩计算、碰撞检查和射线查询在 GPU。
 QP 使用 Torch 批量矩阵和 CUDA graph。
-A*、EMVP、点云历史聚合、QP 组装仍在 CPU。
+A*、PathCover/RISP、点云历史聚合、QP 组装仍在 CPU。
 CPU 几何扩展内部有静态随机数状态，当前不并发调用。
 端到端 GPU 前端和消除逐环境 Python 循环尚未完成。
 

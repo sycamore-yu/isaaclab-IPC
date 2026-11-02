@@ -1,4 +1,4 @@
-"""Build the pinned IPC geometry locally; remove ROS I/O, not geometry math."""
+"""Build the pinned IPC A* and the vendored PathCover corridor kernel."""
 
 import argparse
 import difflib
@@ -42,31 +42,6 @@ def main():
         (out / name).write_text(new)
         patches.extend(difflib.unified_diff(old.splitlines(True), new.splitlines(True), fromfile=name, tofile=name))
 
-    for name in [
-        "common_type_name.hpp",
-        "ellipsoid.hpp",
-        "emvp.hpp",
-        "geo_utils.hpp",
-        "lbfgs.hpp",
-        "line_segment.hpp",
-        "polytope.hpp",
-        "quickhull.hpp",
-        "sdlp.hpp",
-    ]:
-        old = read("polytope/" + name)
-        s = old
-        if name in ("ellipsoid.hpp", "polytope.hpp", "line_segment.hpp"):
-            s = remove_block(s, "void Visualize(")
-        s = re.sub(r"^#include [<\"](?:ros/|visualization_msgs/|std_msgs/)[^\n]*\n", "", s, flags=re.M)
-        if name == "common_type_name.hpp":
-            s = s.replace('#include "fmt/color.h"\n', "").replace("using namespace fmt;\n", "")
-            s = remove_block(s, "class Color :", True)
-        if name == "geo_utils.hpp":
-            s = re.sub(
-                r"(bool operator\(\)\(const Eigen::Vector3d &l,\s*const Eigen::Vector3d &r\))\s*\{", r"\1 const {", s
-            )
-        s = re.sub(r'print\(fg\(color::gold\), ("[^\n]*?")\);', r'std::fprintf(stderr, "%s", \1);', s)
-        save(name, old, "#include <cstdio>\n" + s)
     old = read("astar.h")
     s = (
         old[: old.index("class AstarClass")].replace("#include <ros/ros.h>", "#include <cstdint>\n#include <cstring>")
@@ -103,6 +78,7 @@ def main():
             {
                 "upstream": str(args.upstream.resolve()),
                 "revision": PIN,
+                "corridor": "PathCover/RISP@8723a05d1993bf0199a453b47dc6ee167d493c23",
                 "changes": "ROS I/O removed; C++17 const comparator; release A* allocations",
             },
             indent=2,
@@ -110,6 +86,7 @@ def main():
     )
     suffix = sysconfig.get_config_var("EXT_SUFFIX")
     target = root / "src/isaaclab_ipc" / ("_geometry" + suffix)
+    compiled = target.with_name(target.name + ".tmp")
     subprocess.run(
         [
             "g++",
@@ -119,15 +96,19 @@ def main():
             "-shared",
             "-fPIC",
             f"-I{out}",
+            f"-I{root / 'third_party/pathcover'}",
             "-I/usr/include/eigen3",
             f"-I{pybind11.get_include()}",
             f"-I{sysconfig.get_path('include')}",
             str(root / "native/geometry.cpp"),
+            "-lqhullcpp",
+            "-lqhull_r",
             "-o",
-            str(target),
+            str(compiled),
         ],
         check=True,
     )
+    compiled.replace(target)
     print(target)
 
 

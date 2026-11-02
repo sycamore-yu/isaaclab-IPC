@@ -912,6 +912,11 @@ dependencies = [
     { name = "scipy" },
 ]
 
+[package.optional-dependencies]
+recording = [
+    { name = "rerun-sdk" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "pytest" },
@@ -925,8 +930,10 @@ requires-dist = [
     { name = "osqp", specifier = "==1.0.5" },
     { name = "pybind11", specifier = ">=3" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rerun-sdk", marker = "extra == 'recording'", specifier = "==0.38.1" },
     { name = "scipy", specifier = ">=1.14" },
 ]
+provides-extras = ["recording"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1751,6 +1758,16 @@ wheels = [
 ]
 
 [[package]]
+name = "pyarrow"
+version = "26.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ec/34/17c34cb38e5d940e38f0f0d9fdfa0e8a506676409ea9b85aff7e3079f831/pyarrow-26.0.0.tar.gz", hash = "sha256:0cccd36e00ea3afeb52ded61f2721ce71f604853d70c45365c58324eb773d6ae", size = 1239433, upload-time = "2026-10-09T08:26:25.315Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/88/e4/9cd356d906e71bd79b0c3fc5c9a54e01a0020dcf14c152ccfbcb503c7298/pyarrow-26.0.0-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:6a628922ba20705fa964ca73e4ef959c2fb2f14b9bbec5589a6a1e68e6257c85", size = 53931932, upload-time = "2026-10-09T08:14:24.051Z" },
+    { url = "https://files.pythonhosted.org/packages/ba/b4/ee422493bb6dafdbef776cfe2c2a73106a1063a79bf4e78d1e5f51176885/pyarrow-26.0.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:5d5768d03426abe6526d5274adefa00abf00a7f81118c46e98b5a46390f5549e", size = 57388949, upload-time = "2026-10-09T08:14:38.964Z" },
+]
+
+[[package]]
 name = "pybind11"
 version = "3.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1946,6 +1963,22 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/ac/c3/e2a2b89f2d3e2179abd6d00ebd70bff6273f37fb3e0cc209f48b39d00cbf/requests-2.34.2.tar.gz", hash = "sha256:f288924cae4e29463698d6d60bc6a4da69c89185ad1e0bcc4104f584e960b9ed", size = 142856, upload-time = "2026-05-14T19:25:27.735Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a0/f4/c67b0b3f1b9245e8d266f0f112c500d50e5b4e83cb6f3b71b6528104182a/requests-2.34.2-py3-none-any.whl", hash = "sha256:2a0d60c172f83ac6ab31e4554906c0f3b3588d37b5cb939b1c061f4907e278e0", size = 73075, upload-time = "2026-05-14T19:25:26.443Z" },
+]
+
+[[package]]
+name = "rerun-sdk"
+version = "0.38.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "numpy" },
+    { name = "pillow" },
+    { name = "psutil" },
+    { name = "pyarrow" },
+    { name = "typing-extensions" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/3d/a9/3156999af1935b85cbe3991d219255c134a008448aff76026b390171b108/rerun_sdk-0.38.1-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:5f6b16374b1af1ecdb7232ed5c7f02f77e908c7c378ce83321479d2610286c0c", size = 168444319, upload-time = "2026-09-16T17:03:26.856Z" },
 ]
 
 [[package]]

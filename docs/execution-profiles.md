@@ -1,7 +1,9 @@
 # 理想配置、真实配置与长森林测试
 
 当前执行决策见 [ADR-0003](adr/0003-execution-profiles.md)。
-本页统一维护配置含义、恢复逻辑、场景结果和录制索引。
+本页维护执行配置含义、恢复逻辑及走廊切换前的场景结果和录制索引。
+当前默认走廊为 PathCover/RISP，结果见 [走廊说明](pathcover.md)。
+真实配置现默认 Mid-360 / MultiMesh；本页旧结果保留原传感输入，新配对结果见 [官方组件迁移](official-components.md)。
 
 ## MPC 输入的速度是当前速度
 
@@ -82,7 +84,7 @@ assert cfg.profile.recovery == "previous_sequence"
 
 本轮结果与历史基线分开保存，未重定义历史成功率。
 
-## 当前配置的场景结果
+## 走廊切换前的场景结果
 
 | 测试 | 理想配置 | 默认真实配置 |
 | --- | ---: | ---: |
@@ -104,7 +106,7 @@ Newton 在 13.62 s 仿真时间内到达，未触发恢复，没有命令越界�
 
 ## Rerun 录制
 
-本地 `recordings/` 保存 8 个 RRD，全部已通过解码检查。
+本地 `recordings/` 保存下列 8 个基线 RRD，均已通过解码检查。
 
 | 路线 | 原版 Docker | Newton |
 | --- | --- | --- |
@@ -118,10 +120,19 @@ Newton 在 13.62 s 仿真时间内到达，未触发恢复，没有命令越界�
 录制是独立的新运行，不能替代上表的固定任务统计。
 原版只记录到达目标，不从录制中的到达状态推断命令界与全局碰撞验收。
 
-录制由一次性工具生成，当前没有稳定的录制 CLI。
+这 8 个基线录制由一次性工具生成。
 当时使用的生产脚本已存档在本地 `results/recording-producers/`。
 森林静态地图仅裁剪显示范围；实际传感点云和机体状态来自运行过程。
 Git 不包含 RRD 和原始结果；唯一数据副本不能作为清理候选。
+
+另有 2 个带 SFC 的 32 m 森林 RRD：
+
+- `forest_32m_fixed_cost_sfc.rrd`：固定成本，CUDA QP，Newton 真实配置。
+- `forest_32m_learned_cost_sfc.rrd`：学习成本，同一 CUDA QP 和物理配置。
+
+两次均到达目标。文件显示实际 SFC、参考轨迹、预测轨迹和制动状态。
+这类录制使用 `scripts/acmpc.py evaluate --record`。
+命令和结果见 [AC-MPC 录制说明](acmpc.md#录制带-sfc-的森林路线)。
 
 ## 执行配置重构检查
 

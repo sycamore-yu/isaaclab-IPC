@@ -1,4 +1,4 @@
-"""ROS-free IPC scheduling with the pinned A* and EMVP geometry."""
+"""ROS-free IPC scheduling with the pinned A* and PathCover corridor kernel."""
 
 from collections import deque
 from time import perf_counter
@@ -6,7 +6,7 @@ from time import perf_counter
 import numpy as np
 
 from . import _geometry
-from .execution import RecoveryPolicy
+from .execution import RecoveryPolicy, brake_jerk, next_braking
 from .mpc import MPC
 
 
@@ -26,6 +26,10 @@ def voxel_centroids(points, leaf=0.2):
 
 def contains(planes, p):
     return bool(len(planes) and np.all(planes[:, :3] @ p + planes[:, 3] <= 0))
+
+
+class InvalidCorridorError(ValueError):
+    """The geometry frontend did not produce finite SFC planes."""
 
 
 class Planner:
@@ -106,10 +110,16 @@ class Planner:
         self.replan = False
 
     def _corridor(self, a, b):
-        return np.asarray(_geometry.corridor(a, b, self.cloud, self.cfg.params["sfc_dis"])).reshape(-1, 4)
+        try:
+            planes = np.asarray(_geometry.corridor(a, b, self.cloud, self.cfg.params["sfc_dis"])).reshape(-1, 4)
+        except _geometry.CorridorError as exc:
+            raise InvalidCorridorError(str(exc)) from exc
+        if not np.isfinite(planes).all():
+            raise InvalidCorridorError("PathCover produced a nonfinite SFC plane")
+        return planes
 
-    def prepare(self, state):
-        start = perf_counter()
+    def context(self, state):
+        """Return state, reference and scheduled SFC; callers own their snapshots."""
         state = self.cfg.profile.planner_state(state)
         position = np.asarray(state[:3])
         if self.replan or not len(self.path):
@@ -164,17 +174,23 @@ class Planner:
         references = np.zeros((n, 9))
         references[:, :3] = path[indices]
         references[:, 3:6] = np.diff(np.vstack((position, references[:, :3])), axis=0) / self.mpc.dt
-        problem = self.mpc.problem(state, references, schedule)
-        return problem, (perf_counter() - start) * 1000
+        return state, references, schedule
+
+    def prepare(self, state):
+        start = perf_counter()
+        state, references, schedule = self.context(state)
+        return self.mpc.problem(state, references, schedule), (perf_counter() - start) * 1000
 
     def _brake(self, state):
         # Track a velocity-opposing acceleration, with the original jerk bounds.
-        desired = np.clip(-2.0 * state[3:6], self.mpc.lower[3:], self.mpc.upper[3:])
-        jerk = np.clip((desired - state[6:]) / self.mpc.dt, self.mpc.jlow[:3], self.mpc.jhigh[:3])
+        jerk = brake_jerk(state, self.mpc.lower, self.mpc.upper, self.mpc.jlow, self.mpc.jhigh, self.mpc.dt)
         self.brake_steps += 1
         return self.mpc.a @ state + self.mpc.b @ jerk, jerk, False
 
     def consume(self, problem, solution, status, time):
+        return self.consume_state(problem[-1], solution, status, time)
+
+    def consume_state(self, state, solution, status, time):
         success = status in ("solved", "solved inaccurate")
         if self.cfg.profile.recovery is RecoveryPolicy.BRAKE_REPLAN:
             if not success:
@@ -182,18 +198,21 @@ class Planner:
                 if not self.braking:
                     self.recovery_events += 1
                     self.replan = True
-                self.braking = True
-            if self.braking:
-                if success and np.linalg.norm(problem[-1][3:6]) < 0.2 and np.linalg.norm(problem[-1][6:]) < 0.5:
-                    self.braking = False
-                    self.replan = True
-                else:
-                    return self._brake(problem[-1])
+            braking = bool(
+                next_braking(
+                    np.bool_(self.braking), np.bool_(success), np.linalg.norm(state[3:6]), np.linalg.norm(state[6:])
+                )
+            )
+            if self.braking and not braking:
+                self.replan = True
+            self.braking = braking
+            if braking:
+                return self._brake(state)
         if success:
             self.previous = np.asarray(solution).reshape(self.mpc.n, 3).copy()
             self.last_time = time
             self.index = int(self.cfg.params["ctrl_delay"] / self.mpc.dt)
-            x = problem[-1].copy()
+            x = state.copy()
             for i in range(self.index + 1):
                 jerk = self.previous[min(i, self.mpc.n - 1)]
                 x = self.mpc.a @ x + self.mpc.b @ jerk
@@ -206,7 +225,7 @@ class Planner:
                 self.index += int(elapsed / self.mpc.dt)
                 self.last_time = time
             jerk = self.previous[min(self.index, self.mpc.n - 1)]
-            x = self.mpc.a @ problem[-1] + self.mpc.b @ jerk
+            x = self.mpc.a @ state + self.mpc.b @ jerk
         return x, jerk, success
 
     def step(self, state, time):

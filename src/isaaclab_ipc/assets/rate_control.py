@@ -152,11 +152,9 @@ def compensate_motor_lag(
 @wp.kernel
 def apply_wrench(
     body_q: wp.array(dtype=wp.transform),
-    body_qd: wp.array(dtype=wp.spatial_vector),
     body_f: wp.array(dtype=wp.spatial_vector),
     ids: wp.array(dtype=wp.int32),
     wrench: wp.array2d(dtype=wp.float32),
-    accel: wp.array(dtype=wp.vec3),
 ):
     i = wp.tid()
     body = ids[i]
@@ -165,7 +163,6 @@ def apply_wrench(
     torque = wp.quat_rotate(q, wp.vec3(wrench[i, 3], wrench[i, 4], wrench[i, 5]))
     # Newton applies gravity. This callback adds only the physical motor wrench.
     body_f[body] = body_f[body] + wp.spatial_vector(force[0], force[1], force[2], torque[0], torque[1], torque[2])
-    accel[i] = force / 0.75 - wp.vec3(0.0, 0.0, 9.81)
 
 
 class RateController:
@@ -173,10 +170,8 @@ class RateController:
         self.num_envs, self.device = num_envs, device
         self.command = torch.zeros(num_envs, 4, device=device)
         self.command[:, 0] = 9.81
-        self.accel = torch.zeros(num_envs, 3, device=device)
         self.ids = torch.zeros(num_envs, dtype=torch.int32, device=device)
         self.command_wp = wp.from_torch(self.command, dtype=wp.float32)
-        self.accel_wp = wp.from_torch(self.accel, dtype=wp.vec3)
         self.ids_wp = wp.from_torch(self.ids, dtype=wp.int32)
         self.robot = None
 
@@ -247,6 +242,6 @@ class RateController:
         wp.launch(
             apply_wrench,
             dim=self.num_envs,
-            inputs=[state.body_q, state.body_qd, state.body_f, self.ids_wp, self.robot.body_wrench_wp, self.accel_wp],
+            inputs=[state.body_q, state.body_f, self.ids_wp, self.robot.body_wrench_wp],
             device=self.device,
         )

@@ -5,6 +5,16 @@ from enum import StrEnum
 import numpy as np
 
 
+def next_braking(braking, solved, speed, acceleration):
+    """Shared scalar/array transition for real execution and its differentiable actor."""
+    return (solved ^ True) | (braking & ((speed >= 0.2) | (acceleration >= 0.5)))
+
+
+def brake_jerk(state, lower, upper, jlow, jhigh, dt):
+    desired = (-2.0 * state[..., 3:6]).clip(lower[3:], upper[3:])
+    return ((desired - state[..., 6:]) / dt).clip(jlow[:3], jhigh[:3])
+
+
 class RecoveryPolicy(StrEnum):
     BRAKE_REPLAN = "brake_replan"
     PREVIOUS_SEQUENCE = "previous_sequence"

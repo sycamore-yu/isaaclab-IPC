@@ -8,7 +8,7 @@
 ## 运行与检查
 - 技术栈为 Python 3.12、Isaac Lab 3、Newton/MJWarp、Warp、Torch 和 OSQP。
 - 依赖必须使用本项目 `.venv` 和 `uv.lock`；安装与运行见 `README.md`。
-- 几何扩展必须使用 `scripts/build_native.py` 从固定 revision 构建。
+- 几何扩展必须使用 `scripts/build_native.py` 构建固定 IPC A* 和 vendored PathCover/RISP。
 - 单测命令：`env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest -q`。
 - 代码检查：`uv run ruff check src scripts tests`。
 
@@ -27,4 +27,13 @@
 - 必须分开报告两种配置，不能把理想轨迹计入 Newton 成功率。
 - 必须保留 100 Hz 控制周期和 0.1 s MPC 预测步长的区别。
 - 中速真实配置仍为 0/10；不得将本地基线提交表述为阶段 1 验收通过。
-- 后续工作为中速失败排查、GPU 前端和传感等价；AC-MPC 留在阶段 2。
+- AC-MPC 实现、训练命令和验证结果见 `docs/acmpc.md`；使用 IPC 9 维状态、三轴 jerk 和线性模型。
+- 学习任务保留独立的状态、SFC 和恢复快照；PPO 更新不得修改在线 Planner。
+- 后续工作为中速失败排查、CPU 几何前端加速。
+
+- 默认 SFC 为 PathCover/RISP；必须保留 `[A,-b]` 接口和配置的安全半径，不得重新引入旧走廊运行后端。
+
+- 真实配置默认 Mid-360 随机方向窗口：20,000 rays、10 Hz、40 m、机体原点轴对齐。
+- 只更新官方 MultiMesh 的方向缓冲区；不得重写射线查询或绕过环境网格管理。
+- 位姿/速度使用 ArticulationData，加速度使用 PVA，事件与录制使用官方 Manager。
+- ContactSensor 统计物理接触，完整 PCD 仍独立定义森林几何碰撞；迁移结果见 `docs/official-components.md`。

@@ -23,6 +23,7 @@ def main():
     p.add_argument("--distance", type=float, default=1.0)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--num-envs", type=int, default=1)
+    p.add_argument("--device", default="cuda:0")
     p.add_argument("--solver", choices=["osqp", "gpu"], default="osqp")
     p.add_argument("--forest", type=Path)
     p.add_argument("--max-steps", type=int, default=3500)
@@ -41,6 +42,7 @@ def main():
     kind = "forest" if a.forest else "avoid"
     cfg = make_cfg(
         a.num_envs,
+        device=a.device,
         distance=a.distance,
         scenario=kind,
         forest_usd=(a.forest / "forest.usdc").resolve() if a.forest else None,
@@ -67,18 +69,12 @@ def main():
             values = obs["policy"].cpu().numpy()
             actions = []
             problems = []
-            forest_clouds = None
-            if a.forest and step % 10 == 0:
-                forest_clouds = env.forest_sensor.sense(
-                    obs["policy"][:, :3], obs["policy"][:, 9:].reshape(-1, 3, 3), step * 0.01
-                )
+            clouds = env.lidar_clouds() if step % 10 == 0 else None
             for i, (planner, scene, state) in enumerate(zip(planners, scenes, values, strict=True)):
-                if a.forest:
-                    if forest_clouds is not None:
-                        planner.update_cloud(forest_clouds[i], state[:3])
-                else:
-                    for cloud in scene.advance(step * 0.01, state[:3], np.linalg.norm(state[3:6])):
-                        planner.update_cloud(cloud, state[:3])
+                if not a.forest:
+                    scene.advance(step * 0.01, state[:3], np.linalg.norm(state[3:6]))
+                if clouds is not None:
+                    planner.update_cloud(clouds[i], state[:3])
                 problem, front_ms = planner.prepare(state[:9])
                 problems.append(problem)
             prepared = perf_counter()
@@ -186,6 +182,7 @@ def main():
                     "steps": step + 1,
                     "complete": bool(done.all()),
                     "scenario": kind,
+                    "sensor": "mid360-multimesh",
                     "profile": a.profile,
                     "goal_x": cfg.goal_x,
                     "stride": a.stride,

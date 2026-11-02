@@ -6,18 +6,23 @@ import warp as wp
 from isaaclab.assets import AssetBaseCfg, RigidObjectCfg
 from isaaclab.envs import DirectRLEnv, DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import ContactSensorCfg, PvaCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.math import matrix_from_quat
+from isaaclab.utils.math import matrix_from_quat, quat_apply
 from isaaclab_newton.physics import MJWarpSolverCfg, NewtonCfg
 
 from isaaclab_ipc.assets.quadrotor import QUADROTOR_CFG
 from isaaclab_ipc.assets.rate_control import RateController
+
+from .events import IPCEventsCfg
 
 
 @configclass
 class IPCSceneCfg(InteractiveSceneCfg):
     ground = AssetBaseCfg(prim_path="/World/ground", spawn=sim_utils.GroundPlaneCfg())
     robot = QUADROTOR_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
+    pva = PvaCfg(prim_path="{ENV_REGEX_NS}/Robot/base")
+    contacts = ContactSensorCfg(prim_path="{ENV_REGEX_NS}/Robot/base", update_period=0.0)
 
 
 @configclass
@@ -38,6 +43,10 @@ class IPCEnvCfg(DirectRLEnvCfg):
     goal_x = 10.0
     collision_radius = 0.25
     automatic_reset = True
+    events = IPCEventsCfg()
+    recorder_dir = None
+    rerun_path = None
+    rerun_label = "IPC"
 
 
 def make_cfg(num_envs=1, device="cuda:0", scenario="avoid", distance=1.0, forest_usd=None):
@@ -74,11 +83,19 @@ def make_cfg(num_envs=1, device="cuda:0", scenario="avoid", distance=1.0, forest
         )
     elif scenario != "empty":
         raise ValueError(scenario)
+    if scenario in ("forest", "avoid"):
+        from isaaclab_ipc.mid360 import mid360_config
+
+        cfg.scene.mid360 = mid360_config(scenario)
     return cfg
 
 
 class IPCEnv(DirectRLEnv):
     def _setup_scene(self):
+        if self.cfg.scenario == "forest":
+            from isaaclab_ipc.mid360 import materialize_forest_targets
+
+            materialize_forest_targets(self)
         self.controller = RateController(self.num_envs, self.device)
         self.sim.physics_manager.register_state_force_callback(self.controller.apply)
 
@@ -99,64 +116,59 @@ class IPCEnv(DirectRLEnv):
         self.hit = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.goal = torch.tensor([cfg.goal_x, 0, 1.0], device=self.device)
         self.previous_distance = torch.full((self.num_envs,), cfg.goal_x, device=self.device)
-        self.forest_sensor = None
+        from .recorders import FlightRecorderManager, recorder_config
+
+        recorder_cfg = recorder_config(cfg)
+        self.recorder_manager = FlightRecorderManager(recorder_cfg, self)
+        self.mid360_rng = torch.Generator().manual_seed(cfg.seed)
+        self.mid360_window_start = torch.full((self.num_envs,), -1, dtype=torch.int64, device=self.device)
+        self.forest_geometry = None
         if cfg.scenario == "forest":
             from pathlib import Path
 
-            from isaaclab_ipc.sensing import ForestSensor
+            from isaaclab_ipc.sensing import ForestGeometry
 
-            self.forest_sensor = ForestSensor(Path(cfg.scene.forest.spawn.usd_path).parent, self.device)
+            self.forest_geometry = ForestGeometry(
+                Path(cfg.scene.forest.spawn.usd_path).parent,
+                self.device,
+            )
         self.origin_wp = wp.from_torch(self.scene.env_origins, dtype=wp.vec3)
         self.obstacle_y_wp = wp.from_torch(self.obstacle_y)
         self.minimum_wp = wp.from_torch(self.min_clearance)
         self.hit_wp = wp.from_torch(self.hit, dtype=wp.bool)
         self.collision_points = (
-            self.forest_sensor.points if self.forest_sensor else wp.empty(1, dtype=wp.vec3, device=self.device)
+            self.forest_geometry.points if self.forest_geometry else wp.empty(1, dtype=wp.vec3, device=self.device)
         )
         self.sim.physics_manager.register_state_force_callback(self._record_clearance)
 
+    def reset(self, seed=None, options=None):
+        if seed is not None:
+            self.mid360_rng.manual_seed(seed)
+        return super().reset(seed=seed, options=options)
+
     def body_state(self):
-        # Public data access resolves Newton's deferred FK after partial resets.
+        # ArticulationData owns state bindings and deferred FK across partial resets.
         _ = self.robot.data.body_link_pose_w
-        active = self.sim.physics_manager.backend.state_0
-        indices = self.controller.ids.long()
-        return wp.to_torch(active.body_q)[indices], wp.to_torch(active.body_qd)[indices]
+        return self.robot.data.root_link_pose_w.torch, self.robot.data.root_com_vel_w.torch
+
+    def lidar_clouds(self, env_ids=None):
+        ids = slice(None) if env_ids is None else env_ids
+        sensor = self.scene["mid360"]
+        hits = sensor.data.ray_hits_w.torch[ids] - self.scene.env_origins[ids, None, :]
+        position = self.body_state()[0][ids, :3] - self.scene.env_origins[ids]
+        good = torch.isfinite(hits).all(-1) & ((hits - position[:, None, :]).norm(dim=-1) >= 0.3)
+        return [h[g].cpu().numpy() for h, g in zip(hits, good, strict=True)]
+
+    def acceleration(self):
+        data = self.scene["pva"].data
+        return quat_apply(data.quat_w.torch, data.lin_acc_b.torch)
 
     def _pre_physics_step(self, actions):
         if not torch.isfinite(actions).all():
             raise ValueError("Nonfinite physical action")
         self.controller.command.copy_(actions)
-        if self.cfg.scenario == "avoid":
-            pose, _ = self.body_state()
-            p = pose[:, :3] - self.scene.env_origins
-            near = torch.abs(p[:, 0] - 6.9) <= self.cfg.obstacle_distance
-            end = torch.round(self.elapsed * 1000).long()
-            for offset in range(-9, 1):
-                tick = end + offset
-                valid = tick >= 0
-                periodic = valid & (tick % 101 == 0)
-                activate = periodic & near & ~self.obstacle_active
-                self.target_y.copy_(torch.where(activate, p[:, 1], self.target_y))
-                self.obstacle_y.copy_(torch.where(activate, p[:, 1] + 1.0, self.obstacle_y))
-                self.obstacle_active |= activate
-                self.obstacle_y.copy_(
-                    torch.where(
-                        periodic & self.obstacle_active,
-                        torch.maximum(self.obstacle_y - 1.0, self.target_y),
-                        self.obstacle_y,
-                    )
-                )
-                first = valid & near & ~self.triggered
-                self.obstacle_y.copy_(
-                    torch.where(first, torch.maximum(self.obstacle_y - 1.0, self.target_y), self.obstacle_y)
-                )
-                self.triggered |= first
-            obs = self.scene["obstacle"]
-            obstacle_pose = obs.data.default_root_pose.torch.clone()
-            obstacle_pose[:, :3] += self.scene.env_origins
-            obstacle_pose[:, 1] = self.obstacle_y + self.scene.env_origins[:, 1]
-            obs.write_root_pose_to_sim_index(root_pose=obstacle_pose, env_ids=self.ids)
-        self.elapsed += self.step_dt
+        self.recorder_manager.record_pre_step()
+        self.event_manager.apply(mode="ipc_control")
 
     def _apply_action(self):
         pass
@@ -167,7 +179,7 @@ class IPCEnv(DirectRLEnv):
             (
                 pose[:, :3] - self.scene.env_origins,
                 twist[:, :3],
-                self.controller.accel,
+                self.acceleration(),
                 matrix_from_quat(pose[:, 3:]).reshape(self.num_envs, 9),
             ),
             dim=-1,
@@ -179,8 +191,8 @@ class IPCEnv(DirectRLEnv):
             pose, _ = self.body_state()
         p = pose[:, :3] - self.scene.env_origins
         clearance = p[:, 2] - self.cfg.collision_radius
-        if self.forest_sensor is not None:
-            clearance = torch.minimum(clearance, self.forest_sensor.clearance(p))
+        if self.forest_geometry is not None:
+            clearance = torch.minimum(clearance, self.forest_geometry.clearance(p))
         if self.cfg.scenario == "avoid":
             for center, size in [
                 (torch.tensor([5.0, 0.9, 1.5], device=self.device), torch.tensor([5.0, 0.1, 1.5], device=self.device)),
@@ -210,7 +222,7 @@ class IPCEnv(DirectRLEnv):
                 self.origin_wp,
                 self.obstacle_y_wp,
                 self.collision_points,
-                self.forest_sensor.grid.id if self.forest_sensor else 0,
+                self.forest_geometry.grid.id if self.forest_geometry else 0,
                 kind,
                 self.cfg.collision_radius,
                 self.minimum_wp,
@@ -229,6 +241,8 @@ class IPCEnv(DirectRLEnv):
         self.extras["success"] = success.clone()
         self.extras["collision"] = self.hit.clone()
         self.extras["terminal_position"] = p.clone()
+        force = self.scene["contacts"].data.net_forces_w.torch
+        self.extras["physical_contact"] = force.norm(dim=-1).amax(-1) > 1e-6
         return self.hit | success, self.episode_length_buf >= self.max_episode_length - 1
 
     def _get_rewards(self):
@@ -236,41 +250,28 @@ class IPCEnv(DirectRLEnv):
         distance = (pose[:, :3] - self.scene.env_origins - self.goal).norm(dim=-1)
         reward = self.previous_distance - distance - 10 * self.hit.float() + 10 * (distance < 0.5).float()
         self.previous_distance = distance
+        self.recorder_manager.record_post_step()
         return reward
 
     def _reset_idx(self, env_ids):
         if env_ids is None:
             env_ids = self.ids
+        if hasattr(self, "recorder_manager"):
+            self.recorder_manager.record_pre_reset(env_ids)
         super()._reset_idx(env_ids)
-        ids = env_ids.to(torch.int32)
-        pose = self.robot.data.default_root_pose.torch[env_ids].clone()
-        pose[:, :3] = self.scene.env_origins[env_ids] + torch.tensor([0, 0, 1.0], device=self.device)
-        pose[:, 3:] = torch.tensor([0, 0, 0, 1.0], device=self.device)
-        self.robot.write_root_pose_to_sim_index(root_pose=pose, env_ids=ids)
-        self.robot.write_root_velocity_to_sim_index(
-            root_velocity=torch.zeros((len(ids), 6), device=self.device), env_ids=ids
-        )
-        self.robot.reset_motor_thrust(torch.full((len(ids), 4), 0.75 * 9.81 / 4, device=self.device), ids)
-        self.controller.command[ids] = torch.tensor([9.81, 0, 0, 0], device=self.device)
-        self.controller.accel[ids] = 0
-        self.elapsed[ids] = 0
-        self.triggered[ids] = False
-        self.obstacle_active[ids] = False
-        self.obstacle_y[ids] = 1.5
-        self.target_y[ids] = 0
-        self.hit[ids] = False
-        self.min_clearance[ids] = float("inf")
-        self.previous_distance[ids] = self.cfg.goal_x
-        if self.cfg.scenario == "avoid":
-            obs = self.scene["obstacle"]
-            obstacle_pose = obs.data.default_root_pose.torch[ids].clone()
-            obstacle_pose[:, :3] += self.scene.env_origins[ids]
-            obs.write_root_pose_to_sim_index(root_pose=obstacle_pose, env_ids=ids)
+        if hasattr(self, "recorder_manager"):
+            self.recorder_manager.reset(env_ids)
+            self.recorder_manager.record_post_reset(env_ids)
 
     def _reset_envs_from_buffer(self):
         if self.cfg.automatic_reset:
             return super()._reset_envs_from_buffer()
         return self.ids[:0]
+
+    def close(self):
+        if hasattr(self, "recorder_manager"):
+            self.recorder_manager.close()
+        super().close()
 
 
 def make_forest_cfg():

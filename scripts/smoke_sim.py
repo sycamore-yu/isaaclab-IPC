@@ -29,6 +29,7 @@ with gym.make("Isaac-IPC-Avoid-Direct", cfg=cfg) as wrapped:
     untouched = env.body_state()[0][1:].clone()
     env._reset_idx(torch.tensor([0], device=env.device))
     torch.testing.assert_close(env.body_state()[0][1:], untouched)
+    torch.testing.assert_close(env.acceleration()[0], torch.zeros(3, device=env.device))
     cfg.automatic_reset = True
     env.episode_length_buf[0] = env.max_episode_length - 1
     action[:, 1:] = 0

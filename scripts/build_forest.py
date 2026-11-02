@@ -50,7 +50,6 @@ def main():
     np.save(a.output / "points.npy", points)
     voxels = np.unique(np.floor(points / 0.1).astype(np.int32), axis=0)
     vertices, faces = surface(voxels)
-    np.savez(a.output / "ray_mesh.npz", vertices=vertices, faces=faces)
     from pxr import Usd, UsdGeom, Vt
 
     stage = Usd.Stage.CreateNew(str(a.output / "forest.usdc"))
@@ -72,7 +71,7 @@ def main():
                 "vertices": len(vertices),
                 "triangles": len(faces),
                 "collision": "point-distance termination; no rigid contact response against foliage",
-                "sensor": "MiniCF directions, first ray hit of 0.1 m occupied voxels",
+                "sensor": "Mid-360 directions, MultiMesh first ray hit of 0.1 m occupied voxels",
             },
             indent=2,
         )
