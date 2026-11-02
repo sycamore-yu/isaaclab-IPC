@@ -40,7 +40,7 @@ class Mid360PatternCfg(PatternBaseCfg):
         return self._all_dirs
 
 
-def mid360_config(scenario="forest"):
+def mid360_config(scenario="forest", *, optimized=True):
     if scenario == "forest":
         targets = [
             MultiMeshRayCasterCfg.RaycastTargetCfg(
@@ -60,7 +60,7 @@ def mid360_config(scenario="forest"):
         ]
     else:
         raise ValueError(scenario)
-    return MultiMeshRayCasterCfg(
+    config = MultiMeshRayCasterCfg(
         prim_path="{ENV_REGEX_NS}/Robot/base",
         spawn=None,
         pattern_cfg=Mid360PatternCfg(),
@@ -69,6 +69,11 @@ def mid360_config(scenario="forest"):
         ray_alignment="base",
         mesh_prim_paths=targets,
     )
+    if optimized:
+        from .compact_sensor import SharedMid360RayCaster
+
+        config.class_type = SharedMid360RayCaster
+    return config
 
 
 def update_mid360_directions(env, env_ids):
@@ -78,8 +83,12 @@ def update_mid360_directions(env, env_ids):
     cfg = sensor.cfg.pattern_cfg
     table = cfg.load_table(env.device)
     start = int(torch.randint(len(table) - cfg.rays_per_scan + 1, (1,), generator=env.mid360_rng))
-    window = table[start : start + cfg.rays_per_scan : cfg.ray_decimation]
-    sensor.ray_directions.torch[env_ids] = window
+    if hasattr(sensor, "window_start"):
+        sensor.window_start.torch[env_ids] = start
+    else:
+        # Explicit official-reference mode used by paired validation.
+        window = table[start : start + cfg.rays_per_scan : cfg.ray_decimation]
+        sensor.ray_directions.torch[env_ids] = window
     env.mid360_window_start[env_ids] = start
 
 

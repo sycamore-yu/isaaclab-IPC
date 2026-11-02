@@ -55,6 +55,7 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 "src/isaaclab_ipc/collision.py" = ["UP018"]
 "src/isaaclab_ipc/sensing.py" = ["UP018"]
+"src/isaaclab_ipc/compact_sensor.py" = ["UP018"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

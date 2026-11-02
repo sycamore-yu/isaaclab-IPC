@@ -130,6 +130,8 @@ def test_braking_is_a_deterministic_atom_with_no_cost_gradient():
 def test_invalid_corridor_is_rejected_and_only_valid_batch_members_solve(monkeypatch):
     planner, obs, _ = context()
     monkeypatch.setattr("isaaclab_ipc.planner._geometry.corridor", lambda *args: np.full((1, 4), np.nan))
+    # A new observed map invalidates the previously valid cached polytope.
+    planner.update_cloud([], obs["mpc_state"][0, :3].cpu().numpy())
     with pytest.raises(InvalidCorridorError):
         planner.context(obs["mpc_state"][0].cpu().numpy())
     obs = torch.cat((obs, obs.clone()), dim=0)

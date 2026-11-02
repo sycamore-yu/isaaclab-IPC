@@ -1,6 +1,6 @@
 """ROS-free IPC scheduling with the pinned A* and PathCover corridor kernel."""
 
-from collections import deque
+from collections import OrderedDict, deque
 from time import perf_counter
 
 import numpy as np
@@ -33,7 +33,7 @@ class InvalidCorridorError(ValueError):
 
 
 class Planner:
-    def __init__(self, cfg, goal):
+    def __init__(self, cfg, goal, *, cache_corridors=True):
         self.cfg = cfg
         self.mpc = MPC(cfg)
         self.grid = _geometry.Grid()
@@ -41,6 +41,11 @@ class Planner:
         self.goal[2] = np.clip(self.goal[2], 0.5, 2.5)
         self.frames = deque(maxlen=10)
         self.cloud = np.empty((0, 3))
+        self.cache_corridors = cache_corridors
+        self._corridor_cache = OrderedDict()
+        self._corridor_cloud = self.cloud
+        self.corridor_evaluations = 0
+        self.corridor_cache_hits = 0
         self.path = np.empty((0, 3))
         self.nearest = 0
         self.replan = True
@@ -61,6 +66,8 @@ class Planner:
         points = np.concatenate(self.frames)
         valid = (np.abs(points[:, :2] - position[:2]) <= 9.5).all(1) & (points[:, 2] >= 0.2) & (points[:, 2] <= 3.0)
         self.cloud = voxel_centroids(points[valid])
+        self._corridor_cache.clear()
+        self._corridor_cloud = self.cloud
         self.grid.center([*position[:2], 0.0])
         self.grid.cloud(self.cloud, self.cfg.params["astar"]["expand_fix"])
         if len(self.path) and not self.grid.path_free(self.path[self.nearest :]):
@@ -110,8 +117,42 @@ class Planner:
         self.replan = False
 
     def _corridor(self, a, b):
+        a, b = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
+        radius = float(self.cfg.params["sfc_dis"])
+        if a.shape != (3,) or b.shape != (3,) or not np.isfinite(a).all() or not np.isfinite(b).all():
+            raise ValueError("Invalid corridor endpoints")
+        if not np.isfinite(radius) or radius < 0:
+            raise ValueError("Invalid corridor radius")
+        if not self.cache_corridors:
+            return self._generate_corridor(a, b, radius)
+        if self.cloud is not self._corridor_cloud:
+            self._corridor_cache.clear()
+            self._corridor_cloud = self.cloud
+        key = (a.tobytes(), radius)
+        if key in self._corridor_cache:
+            self.corridor_cache_hits += 1
+            self._corridor_cache.move_to_end(key)
+        else:
+            # RISP depends on the seed/map/radius. The native end argument only checks
+            # containment after generating the same polytope; reuse it for candidate ends.
+            try:
+                self._corridor_cache[key] = self._generate_corridor(a, a, radius)
+            except InvalidCorridorError as exc:
+                self._corridor_cache[key] = str(exc)
+            if len(self._corridor_cache) > 32:
+                self._corridor_cache.popitem(last=False)
+        planes = self._corridor_cache[key]
+        if isinstance(planes, str):
+            raise InvalidCorridorError(planes)
+        # Keep the native binding's exact end-containment tolerance.
+        if (planes[:, :3] @ b + planes[:, 3] > 1e-8).any():
+            return np.empty((0, 4))
+        return planes.copy()
+
+    def _generate_corridor(self, a, b, radius):
+        self.corridor_evaluations += 1
         try:
-            planes = np.asarray(_geometry.corridor(a, b, self.cloud, self.cfg.params["sfc_dis"])).reshape(-1, 4)
+            planes = np.asarray(_geometry.corridor(a, b, self.cloud, radius)).reshape(-1, 4)
         except _geometry.CorridorError as exc:
             raise InvalidCorridorError(str(exc)) from exc
         if not np.isfinite(planes).all():

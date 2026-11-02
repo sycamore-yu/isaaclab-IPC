@@ -8,8 +8,10 @@ import gymnasium as gym
 import numpy as np
 import torch
 
+from isaaclab_ipc.corridor_storage import pack_corridors
+from isaaclab_ipc.frontend import PlanningBatch
 from isaaclab_ipc.mpc import Config
-from isaaclab_ipc.planner import InvalidCorridorError, Planner
+from isaaclab_ipc.planner import Planner
 
 from .env import IPCEnv, make_cfg
 
@@ -42,8 +44,9 @@ class IPCMPCEnv(IPCEnv):
         shapes = dict(
             mpc_state=(9,),
             reference=(15, 9),
-            planes=(15, self.cfg.max_planes, 4),
-            plane_mask=(15, self.cfg.max_planes),
+            planes=(2, self.cfg.max_planes, 4),
+            plane_mask=(2, self.cfg.max_planes),
+            corridor_index=(15,),
             rotation=(9,),
             braking=(1,),
             yaw_target=(1,),
@@ -52,6 +55,8 @@ class IPCMPCEnv(IPCEnv):
         for name, shape in shapes.items():
             if name in ("plane_mask", "braking", "sfc_valid"):
                 space = gym.spaces.Box(0, 1, shape=shape, dtype=np.bool_)
+            elif name == "corridor_index":
+                space = gym.spaces.Box(-1, 1, shape=shape, dtype=np.int64)
             else:
                 dtype = np.float32 if name == "rotation" else np.float64
                 space = gym.spaces.Box(-np.inf, np.inf, shape=shape, dtype=dtype)
@@ -61,6 +66,7 @@ class IPCMPCEnv(IPCEnv):
     def __init__(self, cfg, render_mode=None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
         self.planners = [None] * self.num_envs
+        self.planning_batch = PlanningBatch(cfg.planner_workers)
         self.records = []
         self.frontend_times = []
         self._pending = None
@@ -88,38 +94,28 @@ class IPCMPCEnv(IPCEnv):
     def _get_observations(self):
         tick = perf_counter()
         physical = super()._get_observations()["policy"]
-        values = physical.cpu().numpy()
-        elapsed = self.elapsed.cpu().numpy()
+        host_state = torch.cat((physical, self.elapsed[:, None]), -1).cpu().numpy()
+        values, elapsed = host_state[:, :18], host_state[:, 18]
         clouds = {}
         ticks = np.rint(elapsed * 100).astype(int)
-        for tick_id in np.unique(ticks[ticks % 10 == 0]):
-            ids = np.flatnonzero(ticks == tick_id)
+        ids = np.flatnonzero(ticks % 10 == 0)
+        if len(ids):
             clouds.update(zip(ids, self.lidar_clouds(ids), strict=True))
-        planes = np.zeros((self.num_envs, 15, self.cfg.max_planes, 4))
+        planes = np.zeros((self.num_envs, 2, self.cfg.max_planes, 4))
         valid = np.zeros(planes.shape[:-1], bool)
+        corridor_indices = np.full((self.num_envs, 15), -1, dtype=np.int64)
         sfc_valid = np.ones((self.num_envs, 1), bool)
         refs, states, margins, braking, yaw = [], [], [], [], []
-        for i, (planner, state) in enumerate(zip(self.planners, values, strict=True)):
-            if i in clouds:
-                planner.update_cloud(clouds[i], state[:3])
-            try:
-                x, ref, corridor = planner.context(state[:9])
-            except InvalidCorridorError:
-                planner.frontend_failures += 1
-                planner.replan = True
-                sfc_valid[i] = False
-                x = planner.cfg.profile.planner_state(state[:9])
-                ref = np.zeros((15, 9))
-                ref[:, :3] = x[:3]
-                corridor = []  # Invalid contexts execute braking, never this placeholder QP.
+        contexts = self.planning_batch.contexts(self.planners, values, clouds)
+        for i, (planner, state, context) in enumerate(zip(self.planners, values, contexts, strict=True)):
+            x, ref, corridor = context.state, context.reference, context.corridors
+            sfc_valid[i] = context.valid
             clearance = np.full(15, 10.0)
+            if corridor:
+                planes[i], valid[i], corridor_indices[i] = pack_corridors(corridor, self.cfg.max_planes)
             for k, faces in enumerate(corridor):
-                if len(faces) > self.cfg.max_planes:
-                    raise ValueError(f"SFC has {len(faces)} planes; increase max_planes={self.cfg.max_planes}")
                 if len(faces):
                     faces = np.asarray(faces)[::-1]
-                    planes[i, k, : len(faces)] = faces
-                    valid[i, k, : len(faces)] = True
                     clearance[k] = np.min(
                         -(faces[:, :3] @ ref[k, :3] + faces[:, 3])
                         / np.maximum(np.linalg.norm(faces[:, :3], axis=-1), 1e-12)
@@ -160,6 +156,7 @@ class IPCMPCEnv(IPCEnv):
             reference=reference,
             planes=tensor(planes),
             plane_mask=tensor(valid, torch.bool),
+            corridor_index=tensor(corridor_indices, torch.int64),
             rotation=physical[:, 9:].clone(),
             braking=tensor(braking, torch.bool),
             yaw_target=tensor(yaw),
@@ -168,6 +165,11 @@ class IPCMPCEnv(IPCEnv):
         self.current_context = result
         self.frontend_times.append((perf_counter() - tick) * 1000)
         return result
+
+    def close(self):
+        if hasattr(self, "planning_batch"):
+            self.planning_batch.close()
+        super().close()
 
     def record_mpc_result(self, result):
         """Supply diagnostics for the next env.step; PPO updates never call this."""

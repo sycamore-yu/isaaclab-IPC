@@ -5,6 +5,7 @@ import torch
 from rsl_rl.models import MLPModel
 from rsl_rl.modules import MLP
 
+from isaaclab_ipc.corridor_storage import expand_corridors
 from isaaclab_ipc.execution import brake_jerk, next_braking
 from isaaclab_ipc.mpc import MPC, Config
 
@@ -77,12 +78,13 @@ class MPCActor(MLPModel):
         h = torch.einsum("bk,kij->bij", weights, self.hgroups)
         q = weights[:, :3] @ self.qgroups
         g = (q * error) @ self.C - 0.2 * costs[:, 4:].double().tanh() @ self.linear_bias.T
-        planes = obs["planes"].double()
+        planes, face_mask = expand_corridors(obs)
+        planes = planes.double()
         normals = planes[..., :3]
         positions = self.C.reshape(15, 9, 45)[:, :3]
         sfc_a = torch.einsum("btki,tij->btkj", normals, positions).flatten(1, 2)
         sfc_upper = -planes[..., 3] - (normals * offset.reshape(-1, 15, 9)[:, :, None, :3]).sum(-1)
-        mask = obs["plane_mask"].bool().flatten(1)
+        mask = face_mask.bool().flatten(1)
         sfc_upper = sfc_upper.flatten(1).masked_fill(~mask, torch.inf)
         acceleration = offset.reshape(-1, 15, 9)[:, :, 6:].flatten(1)
         velocity = offset.reshape(-1, 15, 9)[:, :, 3:6].flatten(1)

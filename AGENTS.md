@@ -34,6 +34,6 @@
 - 默认 SFC 为 PathCover/RISP；必须保留 `[A,-b]` 接口和配置的安全半径，不得重新引入旧走廊运行后端。
 
 - 真实配置默认 Mid-360 随机方向窗口：20,000 rays、10 Hz、40 m、机体原点轴对齐。
-- 只更新官方 MultiMesh 的方向缓冲区；不得重写射线查询或绕过环境网格管理。
+- 官方 MultiMesh 管理环境网格与位姿；ADR-0006 允许为共享显存融合射线查询，不得绕过环境隔离或修改安装包。
 - 位姿/速度使用 ArticulationData，加速度使用 PVA，事件与录制使用官方 Manager。
 - ContactSensor 统计物理接触，完整 PCD 仍独立定义森林几何碰撞；迁移结果见 `docs/official-components.md`。

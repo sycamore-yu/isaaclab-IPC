@@ -47,6 +47,7 @@ class IPCEnvCfg(DirectRLEnvCfg):
     recorder_dir = None
     rerun_path = None
     rerun_label = "IPC"
+    planner_workers = 1
 
 
 def make_cfg(num_envs=1, device="cuda:0", scenario="avoid", distance=1.0, forest_usd=None):
@@ -152,12 +153,13 @@ class IPCEnv(DirectRLEnv):
         return self.robot.data.root_link_pose_w.torch, self.robot.data.root_com_vel_w.torch
 
     def lidar_clouds(self, env_ids=None):
+        from isaaclab_ipc.frontend import batch_clouds_to_host
+
         ids = slice(None) if env_ids is None else env_ids
         sensor = self.scene["mid360"]
         hits = sensor.data.ray_hits_w.torch[ids] - self.scene.env_origins[ids, None, :]
         position = self.body_state()[0][ids, :3] - self.scene.env_origins[ids]
-        good = torch.isfinite(hits).all(-1) & ((hits - position[:, None, :]).norm(dim=-1) >= 0.3)
-        return [h[g].cpu().numpy() for h, g in zip(hits, good, strict=True)]
+        return batch_clouds_to_host(hits, position)
 
     def acceleration(self):
         data = self.scene["pva"].data

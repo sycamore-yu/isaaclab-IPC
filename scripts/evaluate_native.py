@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from isaaclab_ipc.execution import ExecutionProfile
+from isaaclab_ipc.frontend import PlanningBatch
 from isaaclab_ipc.mpc import Config
 from isaaclab_ipc.planner import Planner, flatness
 from isaaclab_ipc.scenes import AvoidScene
@@ -23,6 +24,7 @@ def main():
     p.add_argument("--distance", type=float, default=1.0)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--num-envs", type=int, default=1)
+    p.add_argument("--planner-workers", type=int, default=1)
     p.add_argument("--device", default="cuda:0")
     p.add_argument("--solver", choices=["osqp", "gpu"], default="osqp")
     p.add_argument("--forest", type=Path)
@@ -61,22 +63,18 @@ def main():
     violations = np.zeros(a.num_envs, int)
     min_clear = np.full(a.num_envs, np.inf)
     solver = None
-    with IPCEnv(cfg) as env:
+    with IPCEnv(cfg) as env, PlanningBatch(a.planner_workers) as frontend:
         obs, _ = env.reset(seed=0)
         start = perf_counter()
         for step in range(a.max_steps):
             tick_start = perf_counter()
             values = obs["policy"].cpu().numpy()
             actions = []
-            problems = []
-            clouds = env.lidar_clouds() if step % 10 == 0 else None
-            for i, (planner, scene, state) in enumerate(zip(planners, scenes, values, strict=True)):
+            clouds = dict(enumerate(env.lidar_clouds())) if step % 10 == 0 else {}
+            for scene, state in zip(scenes, values, strict=True):
                 if not a.forest:
                     scene.advance(step * 0.01, state[:3], np.linalg.norm(state[3:6]))
-                if clouds is not None:
-                    planner.update_cloud(clouds[i], state[:3])
-                problem, front_ms = planner.prepare(state[:9])
-                problems.append(problem)
+            problems = frontend.problems(planners, values, clouds)
             prepared = perf_counter()
             if a.solver == "gpu":
                 from isaaclab_ipc.qp import BatchedQP
@@ -179,6 +177,7 @@ def main():
                 {
                     "wall_s": perf_counter() - start,
                     "num_envs": a.num_envs,
+                    "planner_workers": a.planner_workers,
                     "steps": step + 1,
                     "complete": bool(done.all()),
                     "scenario": kind,

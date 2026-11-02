@@ -9,9 +9,9 @@ from time import perf_counter
 import gymnasium as gym
 import numpy as np
 import torch
-from tensordict import TensorDict
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper, create_rsl_rl_runner, handle_deprecated_rsl_rl_cfg
 from isaaclab_tasks.utils.hydra import resolve_task_config
+from tensordict import TensorDict
 
 import isaaclab_ipc.tasks  # noqa: F401
 

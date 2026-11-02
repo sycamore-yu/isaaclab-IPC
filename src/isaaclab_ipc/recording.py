@@ -7,6 +7,8 @@ import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
 
+from isaaclab_ipc.corridor_storage import expand_corridors
+
 
 def corridor_edges(planes):
     """Intersect the logged half-spaces without expanding or clipping the SFC."""
@@ -120,8 +122,9 @@ class ForestRecording:
         reference = obs["reference"][0].cpu().numpy()[:, :3]
         if mode[0]:
             r.log("world/reference", rr.LineStrips3D([reference], radii=0.018, colors=[230, 230, 230]))
-            planes = obs["planes"][0].cpu().numpy()
-            masks = obs["plane_mask"][0].cpu().numpy()
+            plane_tensor, mask_tensor = expand_corridors(obs)
+            planes = plane_tensor[0].cpu().numpy()
+            masks = mask_tensor[0].cpu().numpy()
             unique = []
             for k in range(15):
                 faces = planes[k, masks[k]]

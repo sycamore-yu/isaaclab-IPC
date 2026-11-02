@@ -1,5 +1,7 @@
 """Batched CUDA ADMM forward and active-constraint implicit cost derivatives."""
 
+from collections import OrderedDict
+
 import torch
 
 
@@ -69,13 +71,16 @@ class DifferentiableQP:
     for absent sides. A failed solve returns solved=False and zero cost derivatives.
     """
 
-    def __init__(self, max_iterations=4096, eps_abs=1e-5, eps_rel=1e-5):
+    def __init__(self, max_iterations=4096, eps_abs=1e-5, eps_rel=1e-5, max_cached_shapes=4):
         if max_iterations < 32 or max_iterations % 32:
             raise ValueError("max_iterations must be a positive multiple of 32")
+        if max_cached_shapes < 1:
+            raise ValueError("max_cached_shapes must be positive")
         self.max_iterations = max_iterations
         self.eps_abs = eps_abs
         self.eps_rel = eps_rel
-        self._work = {}
+        self.max_cached_shapes = max_cached_shapes
+        self._work = OrderedDict()
 
     @staticmethod
     def _iterate(w):
@@ -137,6 +142,11 @@ class DifferentiableQP:
                     with torch.cuda.graph(graph):
                         self._iterate(w)
                 self._work[key] = (w, graph)
+                # Invalid-SFC filtering changes the batch shape. Do not retain one graph
+                # and its dense workspaces for every historical number of valid samples.
+                if len(self._work) > self.max_cached_shapes:
+                    self._work.popitem(last=False)
+            self._work.move_to_end(key)
             w, graph = self._work[key]
             for dst, src in zip(w[:5], (inverse, sa.transpose(-1, -2), sg, slo, shi), strict=True):
                 dst.copy_(src)

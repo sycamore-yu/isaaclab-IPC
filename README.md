@@ -4,6 +4,7 @@ Newton/MJWarp IPC 和 CUDA 可微 MPC 的 PPO 训练已能运行。
 **成功率尚未达到原版水平**：中速突现障碍测试仍失败。
 历史结果见 [场景验证](docs/validation.md)。
 新执行配置与复测见 [执行配置](docs/execution-profiles.md)。
+共享森林 BVH、紧凑 Mid-360 与规划缓存已默认启用；实测与边界见 [规模优化](docs/scale-optimization.md)。
 
 ## 安装与运行
 
@@ -46,6 +47,7 @@ env -u PYTHONPATH uv run python scripts/evaluate_native.py \
 ```
 
 真实配置默认使用 Mid-360 随机方向窗口与官方 `MultiMeshRayCasterCfg`。
+Newton 使用项目内的紧凑实现，保留官方目标与位姿管理，共享相同森林几何。
 射线查询对象为 0.1 m 体素表面。
 该方式不同于 MARSIM 的点云平面插值。
 森林碰撞在每个物理子步检查，发生碰撞即终止。
