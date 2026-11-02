@@ -1,0 +1,222 @@
+#usda 1.0
+# Copyright (c) 2026, FREE Project Developers. All rights reserved.
+# SPDX-License-Identifier: BSD-3-Clause
+(
+    defaultPrim = "Quadrotor"
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Xform "Quadrotor" (
+    prepend apiSchemas = ["PhysicsArticulationRootAPI"]
+    kind = "component"
+)
+{
+    # Floating articulation: no joint connects base to the world.
+    # The fixed rotor links remain explicit bodies for thruster bindings.
+    def Xform "base" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        bool physics:rigidBodyEnabled = true
+        bool physics:kinematicEnabled = false
+        float physics:mass = 0.746
+        point3f physics:centerOfMass = (0, 0, 0)
+        float3 physics:diagonalInertia = (0.011916, 0.011916, 0.011836)
+        quatf physics:principalAxes = (1, 0, 0, 0)
+        double3 xformOp:translate = (0, 0, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Sphere "base_collision" (
+            prepend apiSchemas = ["PhysicsCollisionAPI"]
+        )
+        {
+            double radius = 0.25
+            bool physics:collisionEnabled = true
+            color3f[] primvars:displayColor = [(0.35, 0.40, 0.45)]
+            float[] primvars:displayOpacity = [0.15]
+        }
+
+        # Visual-only arms: no PhysicsCollisionAPI or mass properties.
+        def Capsule "arm_0_visual"
+        {
+            uniform token axis = "Z"
+            double radius = 0.009
+            double height = 0.2
+            double3 xformOp:translate = (0.07071067811865475, 0.07071067811865475, 0)
+            quatd xformOp:orient = (0.7071067811865476, -0.5, 0.5, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+            color3f[] primvars:displayColor = [(0.18, 0.20, 0.22)]
+        }
+        def Capsule "arm_1_visual"
+        {
+            uniform token axis = "Z"
+            double radius = 0.009
+            double height = 0.2
+            double3 xformOp:translate = (-0.07071067811865475, 0.07071067811865475, 0)
+            quatd xformOp:orient = (0.7071067811865476, -0.5, -0.5, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+            color3f[] primvars:displayColor = [(0.18, 0.20, 0.22)]
+        }
+        def Capsule "arm_2_visual"
+        {
+            uniform token axis = "Z"
+            double radius = 0.009
+            double height = 0.2
+            double3 xformOp:translate = (-0.07071067811865475, -0.07071067811865475, 0)
+            quatd xformOp:orient = (0.7071067811865476, 0.5, -0.5, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+            color3f[] primvars:displayColor = [(0.18, 0.20, 0.22)]
+        }
+        def Capsule "arm_3_visual"
+        {
+            uniform token axis = "Z"
+            double radius = 0.009
+            double height = 0.2
+            double3 xformOp:translate = (0.07071067811865475, -0.07071067811865475, 0)
+            quatd xformOp:orient = (0.7071067811865476, 0.5, 0.5, 0)
+            uniform token[] xformOpOrder = ["xformOp:translate", "xformOp:orient"]
+            color3f[] primvars:displayColor = [(0.18, 0.20, 0.22)]
+        }
+    }
+
+    def Xform "rotor_0" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        bool physics:rigidBodyEnabled = true
+        bool physics:kinematicEnabled = false
+        float physics:mass = 0.001
+        point3f physics:centerOfMass = (0, 0, 0)
+        float3 physics:diagonalInertia = (0.000001, 0.000001, 0.000001)
+        quatf physics:principalAxes = (1, 0, 0, 0)
+        double3 xformOp:translate = (0.1414213562373095, 0.1414213562373095, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cylinder "rotor_0_visual"
+        {
+            uniform token axis = "Z"
+            double radius = 0.055
+            double height = 0.005
+            color3f[] primvars:displayColor = [(0.15, 0.50, 0.85)]
+        }
+    }
+
+    def Xform "rotor_1" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        bool physics:rigidBodyEnabled = true
+        bool physics:kinematicEnabled = false
+        float physics:mass = 0.001
+        point3f physics:centerOfMass = (0, 0, 0)
+        float3 physics:diagonalInertia = (0.000001, 0.000001, 0.000001)
+        quatf physics:principalAxes = (1, 0, 0, 0)
+        double3 xformOp:translate = (-0.1414213562373095, 0.1414213562373095, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cylinder "rotor_1_visual"
+        {
+            uniform token axis = "Z"
+            double radius = 0.055
+            double height = 0.005
+            color3f[] primvars:displayColor = [(0.95, 0.45, 0.10)]
+        }
+    }
+
+    def Xform "rotor_2" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        bool physics:rigidBodyEnabled = true
+        bool physics:kinematicEnabled = false
+        float physics:mass = 0.001
+        point3f physics:centerOfMass = (0, 0, 0)
+        float3 physics:diagonalInertia = (0.000001, 0.000001, 0.000001)
+        quatf physics:principalAxes = (1, 0, 0, 0)
+        double3 xformOp:translate = (-0.1414213562373095, -0.1414213562373095, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cylinder "rotor_2_visual"
+        {
+            uniform token axis = "Z"
+            double radius = 0.055
+            double height = 0.005
+            color3f[] primvars:displayColor = [(0.15, 0.50, 0.85)]
+        }
+    }
+
+    def Xform "rotor_3" (
+        prepend apiSchemas = ["PhysicsRigidBodyAPI", "PhysicsMassAPI"]
+    )
+    {
+        bool physics:rigidBodyEnabled = true
+        bool physics:kinematicEnabled = false
+        float physics:mass = 0.001
+        point3f physics:centerOfMass = (0, 0, 0)
+        float3 physics:diagonalInertia = (0.000001, 0.000001, 0.000001)
+        quatf physics:principalAxes = (1, 0, 0, 0)
+        double3 xformOp:translate = (0.1414213562373095, -0.1414213562373095, 0)
+        uniform token[] xformOpOrder = ["xformOp:translate"]
+
+        def Cylinder "rotor_3_visual"
+        {
+            uniform token axis = "Z"
+            double radius = 0.055
+            double height = 0.005
+            color3f[] primvars:displayColor = [(0.95, 0.45, 0.10)]
+        }
+    }
+
+    def PhysicsFixedJoint "fixed_rotor_0"
+    {
+        rel physics:body0 = </Quadrotor/base>
+        rel physics:body1 = </Quadrotor/rotor_0>
+        point3f physics:localPos0 = (0.1414213562373095, 0.1414213562373095, 0)
+        point3f physics:localPos1 = (0, 0, 0)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+        bool physics:jointEnabled = true
+        bool physics:collisionEnabled = false
+        bool physics:excludeFromArticulation = false
+    }
+    def PhysicsFixedJoint "fixed_rotor_1"
+    {
+        rel physics:body0 = </Quadrotor/base>
+        rel physics:body1 = </Quadrotor/rotor_1>
+        point3f physics:localPos0 = (-0.1414213562373095, 0.1414213562373095, 0)
+        point3f physics:localPos1 = (0, 0, 0)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+        bool physics:jointEnabled = true
+        bool physics:collisionEnabled = false
+        bool physics:excludeFromArticulation = false
+    }
+    def PhysicsFixedJoint "fixed_rotor_2"
+    {
+        rel physics:body0 = </Quadrotor/base>
+        rel physics:body1 = </Quadrotor/rotor_2>
+        point3f physics:localPos0 = (-0.1414213562373095, -0.1414213562373095, 0)
+        point3f physics:localPos1 = (0, 0, 0)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+        bool physics:jointEnabled = true
+        bool physics:collisionEnabled = false
+        bool physics:excludeFromArticulation = false
+    }
+    def PhysicsFixedJoint "fixed_rotor_3"
+    {
+        rel physics:body0 = </Quadrotor/base>
+        rel physics:body1 = </Quadrotor/rotor_3>
+        point3f physics:localPos0 = (0.1414213562373095, -0.1414213562373095, 0)
+        point3f physics:localPos1 = (0, 0, 0)
+        quatf physics:localRot0 = (1, 0, 0, 0)
+        quatf physics:localRot1 = (1, 0, 0, 0)
+        bool physics:jointEnabled = true
+        bool physics:collisionEnabled = false
+        bool physics:excludeFromArticulation = false
+    }
+}
+
+

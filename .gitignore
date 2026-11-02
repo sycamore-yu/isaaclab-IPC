@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+build/
+*.so
+*.egg-info/
+
+# Local experiment evidence and recordings are retained, not source-controlled.
+results/
+recordings/
