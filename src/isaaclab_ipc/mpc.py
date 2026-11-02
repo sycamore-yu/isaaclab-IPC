@@ -8,25 +8,28 @@ import osqp
 import yaml
 from scipy import sparse
 
+from .execution import ExecutionProfile
 
-@dataclass
+
+@dataclass(frozen=True)
 class Config:
     params: dict
-    profile: str = "real"
+    profile: ExecutionProfile = ExecutionProfile.REAL
+
+    def __post_init__(self):
+        profile = ExecutionProfile(self.profile)
+        if {"execution_profile", "recovery", "perfect_simu"} & self.params.keys():
+            raise ValueError("Execution settings belong to Config.profile, not Config.params")
+        object.__setattr__(self, "profile", profile)
 
     @classmethod
     def load(cls, name="forest", ref_dis=None, profile="real"):
-        if profile not in ("real", "ideal"):
-            raise ValueError("Unknown execution profile: " + profile)
+        profile = ExecutionProfile(profile)
         p = yaml.safe_load((Path(__file__).parent / "config" / f"{name}.yaml").read_text())
         if ref_dis is not None:
             p["fsm"]["ref_dis"] = int(ref_dis)
-        p["execution_profile"] = profile
-        p["recovery"] = "brake_replan" if profile == "real" else "previous_sequence"
-        if profile == "real":
-            p["perfect_simu"] = False
-        elif profile == "ideal":
-            p["perfect_simu"] = True
+        # Source YAML retains upstream test switches; runtime behavior comes only from profile.
+        p.pop("perfect_simu", None)
         return cls(p, profile)
 
 

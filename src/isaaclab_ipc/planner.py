@@ -6,6 +6,7 @@ from time import perf_counter
 import numpy as np
 
 from . import _geometry
+from .execution import RecoveryPolicy
 from .mpc import MPC
 
 
@@ -109,6 +110,7 @@ class Planner:
 
     def prepare(self, state):
         start = perf_counter()
+        state = self.cfg.profile.planner_state(state)
         position = np.asarray(state[:3])
         if self.replan or not len(self.path):
             self._replan(position)
@@ -174,10 +176,7 @@ class Planner:
 
     def consume(self, problem, solution, status, time):
         success = status in ("solved", "solved inaccurate")
-        if (
-            self.cfg.params.get("recovery", "brake_replan" if self.cfg.profile == "real" else "previous_sequence")
-            == "brake_replan"
-        ):
+        if self.cfg.profile.recovery is RecoveryPolicy.BRAKE_REPLAN:
             if not success:
                 self.failures += 1
                 if not self.braking:

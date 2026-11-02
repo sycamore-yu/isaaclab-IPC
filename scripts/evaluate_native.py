@@ -8,6 +8,7 @@ from time import perf_counter
 import numpy as np
 import torch
 
+from isaaclab_ipc.execution import ExecutionProfile
 from isaaclab_ipc.mpc import Config
 from isaaclab_ipc.planner import Planner, flatness
 from isaaclab_ipc.scenes import AvoidScene
@@ -16,7 +17,7 @@ from isaaclab_ipc.tasks.env import IPCEnv, make_cfg
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument("--profile", choices=["real", "ideal"], default="real")
+    p.add_argument("--profile", choices=list(ExecutionProfile), default=ExecutionProfile.REAL.value)
     p.add_argument("--goal-x", type=float)
     p.add_argument("--stride", type=int, default=10)
     p.add_argument("--distance", type=float, default=1.0)
@@ -26,9 +27,12 @@ def main():
     p.add_argument("--forest", type=Path)
     p.add_argument("--max-steps", type=int, default=3500)
     a = p.parse_args()
-    if a.profile == "ideal":
-        if a.forest or a.goal_x is not None or a.num_envs != 1:
-            p.error("Ideal uses one avoid episode with goal (10,0,1); use run_ideal_campaign.py for repeats")
+    profile = ExecutionProfile(a.profile)
+    try:
+        profile.validate_evaluation(forest=a.forest, goal_x=a.goal_x, num_envs=a.num_envs)
+    except ValueError as error:
+        p.error(str(error))
+    if not profile.uses_newton:
         from evaluate_ideal import run
 
         run(a.stride, a.distance, a.output)
@@ -45,7 +49,7 @@ def main():
     if a.goal_x is not None:
         cfg.goal_x = a.goal_x
         cfg.episode_length_s = 90.0
-    planners = [Planner(Config.load(kind, a.stride, profile=a.profile), [cfg.goal_x, 0, 1]) for _ in range(a.num_envs)]
+    planners = [Planner(Config.load(kind, a.stride, profile=profile), [cfg.goal_x, 0, 1]) for _ in range(a.num_envs)]
     scenes = [AvoidScene(a.distance) for _ in planners]
     traces = [[] for _ in planners]
     done = np.zeros(a.num_envs, bool)

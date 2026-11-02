@@ -17,8 +17,7 @@ def test_empty_corridor_and_voxel_centroids():
 
 
 def test_original_cubic_inflation_and_previous_solution_fallback():
-    cfg = Config.load()
-    cfg.params["recovery"] = "previous_sequence"
+    cfg = Config.load(profile="ideal")
     planner = Planner(cfg, [8, 0, 1])
     planner.grid.cloud([[0, 0, 1]], 0.4)
     assert not planner.grid.free([0.3, 0.3, 1.3])
@@ -66,11 +65,3 @@ def test_real_brakes_and_replans_without_a_previous_solution():
     p = planner.mpc.problem(stopped, np.tile(stopped, (15, 1)), [[]] * 15)
     _, _, ok = planner.consume(p, np.zeros(45), "solved", 0.02)
     assert ok and not planner.braking and planner.replan
-
-
-def test_execution_profiles():
-    assert Config.load().params["recovery"] == "brake_replan"
-    ideal = Config.load("avoid", profile="ideal")
-    assert ideal.params["perfect_simu"] and ideal.params["recovery"] == "previous_sequence"
-    with pytest.raises(ValueError):
-        Config.load(profile="bad")

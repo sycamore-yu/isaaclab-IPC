@@ -27,7 +27,7 @@ def run(stride, distance, output):
         t = step * 0.01
         for cloud in scene.advance(t, x[:3], speed):
             planner.update_cloud(cloud, x[:3])
-        state = np.r_[x[:3], np.zeros(3), rot[:, 2] * thrust - [0, 0, 9.81]]
+        state = np.r_[x[:3], x[3:6], rot[:, 2] * thrust - [0, 0, 9.81]]
         command, jerk, ok, info = planner.step(state, t)
         infos.append(info)
         action = flatness(command[6:], jerk, rot)

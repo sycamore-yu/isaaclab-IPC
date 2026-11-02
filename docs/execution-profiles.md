@@ -16,6 +16,27 @@ MPC 用当前位置、当前速度和当前加速度预测后续轨迹。
 - `real`：默认配置。读取实际速度，用 Newton 电机力推进。
 - `ideal`：复刻原避障测试。把 MPC 输入速度置零，直接采用规划位置。
 
+执行约定统一由 `src/isaaclab_ipc/execution.py` 的 `ExecutionProfile` 定义。
+`Config.profile` 固定选择其中一种；恢复策略由 `profile.recovery` 推导。
+`Planner.prepare` 在该约定下处理速度输入，评估入口据此选择执行器。
+两种执行器保持独立，不把理想执行器包装成 Newton 物理。
+
+```python
+from isaaclab_ipc.mpc import Config
+
+cfg = Config.load("avoid", profile="ideal")
+assert cfg.profile == "ideal"
+assert cfg.profile.recovery == "previous_sequence"
+```
+
+`Config.load` 的参数和 CLI 的 `--profile real|ideal` 保持不变。
+结果 JSON 中的 `profile` 也仍为字符串。
+`Config.profile` 不能原地改写；切换执行约定时重新创建配置与规划器。
+`Config.params` 只保留算法参数，数值调参方式保持不变。
+旧的 `execution_profile`、`recovery`、`perfect_simu` 执行元数据不再存入该字典。
+直接构造含这些执行键的配置会报错，不能再用字典覆盖恢复策略。
+上游 YAML 中的 `perfect_simu` 只作源码记录，加载时移除，由执行约定取代。
+
 理想执行器由 `scripts/evaluate_ideal.py` 提供。
 统一入口为 `scripts/evaluate_native.py --profile ideal`。
 理想执行器不启动 Newton，避免把位置赋值误记为刚体飞行。
@@ -101,3 +122,14 @@ Newton 在 13.62 s 仿真时间内到达，未触发恢复，没有命令越界�
 当时使用的生产脚本已存档在本地 `results/recording-producers/`。
 森林静态地图仅裁剪显示范围；实际传感点云和机体状态来自运行过程。
 Git 不包含 RRD 和原始结果；唯一数据副本不能作为清理候选。
+
+## 执行配置重构检查
+
+本次集中配置选择、速度输入规则和恢复策略选择，没有改变制动公式或 QP 数学问题。
+固定输入下，理想与真实配置的 QP、控制输出和恢复状态均与 `66432fa` 一致。
+两条中速 CLI 冒烟测试分别保存在：
+
+- `results/execution-contract-ideal/`：理想配置到达，无命令越界。
+- `results/execution-contract-real/`：真实配置触发 1 次恢复、21 个制动步后碰撞。
+
+这些检查覆盖重构后的入口与执行选择，不替代既有成功率统计。
