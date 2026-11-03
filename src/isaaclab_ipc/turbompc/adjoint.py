@@ -91,8 +91,8 @@ class SparseAdjoint:
         """Solve the same KKT matrix with explicit residuals in every block.
 
         This is used by numerical solution refinement. The caller supplies the
-        signs of the Newton right-hand side; inactive inequality entries must
-        be zero. The adjoint-only ``solve`` path above remains unchanged.
+        signs of every residual, including inactive multiplier identity rows.
+        The adjoint-only ``solve`` path above remains unchanged.
         """
         if primal_rhs.shape != (self.batch, self.stages, self.n):
             raise ValueError("KKT primal RHS shape differs from the fixed pattern")

@@ -176,9 +176,16 @@ class CTBRPolisher:
     same original matrix to correct b-K*delta. These are additional native
     numerical factorizations, not an increase to the Newton or ADMM budget.
     Neither the matrix nor its original RHS changes during these corrections.
+
+    Adjoint solves use the fixed upstream infinity norm for RHS homogeneity,
+    then certify the original KKT residual after at most four corrections.
+    Normalization alone is not a precision guarantee. Detached diagnostics
+    describe only the last adjoint call, not historical MPCResult objects.
     """
 
-    def __init__(self, max_iter=4, tolerance=1e-11, max_linear_refinements=2):
+    adjoint_tolerance = 1e-11
+
+    def __init__(self, max_iter=4, tolerance=1e-11, max_linear_refinements=2, max_adjoint_refinements=4):
         if isinstance(max_iter, bool) or not isinstance(max_iter, int) or max_iter < 1:
             raise ValueError("CTBR polishing needs a positive integer iteration budget")
         if not math.isfinite(tolerance) or tolerance <= 0:
@@ -191,6 +198,135 @@ class CTBRPolisher:
             raise ValueError("CTBR polishing linear refinement budget must be 0, 1, or 2")
         self.max_iter, self.tolerance = max_iter, float(tolerance)
         self.max_linear_refinements = max_linear_refinements
+        if (
+            isinstance(max_adjoint_refinements, bool)
+            or not isinstance(max_adjoint_refinements, int)
+            or max_adjoint_refinements not in range(5)
+        ):
+            raise ValueError("CTBR adjoint refinement budget must be an integer from 0 to 4")
+        self.max_adjoint_refinements = max_adjoint_refinements
+        self.last_adjoint_diagnostics = None
+
+    @torch.no_grad()
+    def solve_adjoint(self, adjoint, qp, hessian, active, upstream):
+        """Return v/w/wg only after original-system relative residual checks.
+
+        The original per-row upstream infinity norm is fixed for the initial
+        solve and every correction (zero norm uses scale 1). No row transform,
+        regularizer, Hessian/active-set update, or gradient sanitation occurs.
+        Previously certified rows receive zero correction RHS and retain their
+        complete direction while other rows use the remaining bounded budget.
+        """
+        self.last_adjoint_diagnostics = None
+        if upstream.ndim != 3 or not upstream.shape[0] or upstream.dtype != torch.float64:
+            raise ValueError("CTBR adjoint requires nonempty float64 upstream[B,T,14]")
+        batch, stages, width = upstream.shape
+        if width != 14 or qp.A0.shape[-2] != 10 or qp.A_minus.shape[-2] != 10:
+            raise ValueError("CTBR adjoint requires the canonical 10-state/4-control layout")
+        if active.dtype != torch.bool or active.shape != qp.G.shape[:-1]:
+            raise ValueError("CTBR adjoint active mask does not match the original inequalities")
+
+        magnitudes = upstream.abs().flatten(1).amax(-1)
+        scales = torch.where(magnitudes == 0, torch.ones_like(magnitudes), magnitudes)
+        history_shape = (batch, self.max_adjoint_refinements + 1, 3)
+        diagnostics = {
+            "scope": "Last adjoint call only; detached and not bound to MPCResult history",
+            "tolerance": self.adjoint_tolerance,
+            "max_refinements": self.max_adjoint_refinements,
+            "upstream_inf_norm": magnitudes.detach().clone(),
+            "scales": scales.detach().clone(),
+            "normalized_residual_history": upstream.new_full(history_shape, torch.inf),
+            "actual_residual_history": upstream.new_full(history_shape, torch.inf),
+            "scaled_actual_residual_history": upstream.new_full(history_shape, torch.inf),
+            "correction_counts": torch.zeros(batch, dtype=torch.int32, device=upstream.device),
+            "batched_correction_calls": 0,
+            "passed_rows": torch.zeros(batch, dtype=torch.bool, device=upstream.device),
+            "passed": False,
+            "error": None,
+        }
+        self.last_adjoint_diagnostics = diagnostics
+
+        def reject(message):
+            diagnostics["error"] = message
+            raise RuntimeError(f"CTBR adjoint failed: {message}")
+
+        def row_scale(value):
+            return scales.reshape((batch,) + (1,) * (value.ndim - 1))
+
+        def select(mask, selected, previous):
+            return torch.where(mask.reshape((batch,) + (1,) * (selected.ndim - 1)), selected, previous)
+
+        original_parts = (upstream, hessian, qp.E, qp.A0, qp.A_minus, qp.A_plus, qp.G)
+        if not bool(torch.stack([torch.isfinite(part).all() for part in original_parts]).all()):
+            reject("nonfinite original matrix or upstream")
+
+        unit_upstream = upstream / row_scale(upstream)
+        equality_rhs = upstream.new_zeros((batch, stages * 10))
+        inequality_rhs = upstream.new_zeros(active.shape)
+        try:
+            unit_solution = adjoint.solve(qp, hessian, active, unit_upstream)
+        except RuntimeError as error:
+            diagnostics["error"] = f"initial native solve: {error}"
+            raise RuntimeError(f"CTBR adjoint failed: {diagnostics['error']}") from error
+        # Multiplication owns fresh storage even if a backend returns workspace views.
+        v, w, wg = (value * row_scale(value) for value in unit_solution)
+
+        def measure(index):
+            actual_defect = _linear_defect(qp, hessian, active, v, w, wg, upstream, equality_rhs, inequality_rhs)
+            normalized_defect = _linear_defect(
+                qp,
+                hessian,
+                active,
+                v / row_scale(v),
+                w / row_scale(w),
+                wg / row_scale(wg),
+                unit_upstream,
+                equality_rhs,
+                inequality_rhs,
+            )
+            actual_error = torch.stack(tuple(_maximum(part) for part in actual_defect), -1)
+            normalized_error = torch.stack(tuple(_maximum(part) for part in normalized_defect), -1)
+            relative_error = actual_error / scales[:, None]
+            finite_rows = torch.stack([torch.isfinite(part).flatten(1).all(-1) for part in (v, w, wg)], -1).all(-1)
+            finite_rows &= torch.isfinite(normalized_error).all(-1) & torch.isfinite(relative_error).all(-1)
+            passed = finite_rows & (normalized_error <= self.adjoint_tolerance).all(-1)
+            passed &= (relative_error <= self.adjoint_tolerance).all(-1)
+            diagnostics["normalized_residual_history"][:, index] = normalized_error
+            diagnostics["actual_residual_history"][:, index] = actual_error
+            diagnostics["scaled_actual_residual_history"][:, index] = relative_error
+            diagnostics["actual_residuals"] = actual_error.detach().clone()
+            diagnostics["scaled_actual_residuals"] = relative_error.detach().clone()
+            diagnostics["normalized_residuals"] = normalized_error.detach().clone()
+            diagnostics["actual_defect"] = tuple(part.detach().clone() for part in actual_defect)
+            diagnostics["finite_rows"] = finite_rows.detach().clone()
+            diagnostics["passed_rows"] = passed.detach().clone()
+            if not bool(finite_rows.all()):
+                reject("nonfinite adjoint direction or original-system residual")
+            return actual_defect, passed
+
+        defect, passed = measure(0)
+        for refinement in range(self.max_adjoint_refinements):
+            if bool(passed.all()):
+                break
+            pending = ~passed
+            correction_rhs = tuple(select(pending, part / row_scale(part), torch.zeros_like(part)) for part in defect)
+            diagnostics["correction_counts"] += pending.to(torch.int32)
+            diagnostics["batched_correction_calls"] += 1
+            try:
+                cv, cw, cwg = adjoint.solve_full(qp, hessian, active, *correction_rhs)
+            except RuntimeError as error:
+                diagnostics["error"] = f"native correction {refinement + 1}: {error}"
+                raise RuntimeError(f"CTBR adjoint failed: {diagnostics['error']}") from error
+            v = select(pending, v + cv * row_scale(cv), v)
+            w = select(pending, w + cw * row_scale(cw), w)
+            wg = select(pending, wg + cwg * row_scale(cwg), wg)
+            defect, passed = measure(refinement + 1)
+
+        if not bool(passed.all()):
+            failed = (~passed).nonzero().flatten().cpu().tolist()
+            reject(f"original-system residual exceeded 1e-11 after bounded refinement; rows={failed}")
+        diagnostics["passed"] = True
+        return v, w, wg
 
     def validate_inputs(self, inputs, dynamics):
         """Call BEFORE detaching inputs to enforce the cost-only contract."""

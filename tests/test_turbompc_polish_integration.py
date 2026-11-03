@@ -290,3 +290,43 @@ def test_validator_sees_original_physical_requires_grad_before_numerical_detach(
         assert not case.calls and not polisher.results
     finally:
         case.solver.close()
+
+
+@pytest.mark.parametrize("reject", [False, True], ids=["certified-vjp", "certificate-failure"])
+def test_optional_certified_adjoint_controls_gradient_or_propagates_failure(monkeypatch, reject):
+    """A successful forward cannot bypass a polisher's backward certificate."""
+
+    class CertifiedAnalyticPolisher(AnalyticPolisher):
+        def __init__(self):
+            super().__init__()
+            self.adjoint_calls = []
+            self.exact = DenseKKTReference()
+
+        def solve_adjoint(self, backend, qp, hessian, active, upstream):
+            self.adjoint_calls.append((backend, upstream.clone()))
+            if reject:
+                raise RuntimeError("original KKT certificate failed")
+            # Independent exact solve of the analytic nonlinear problem. The
+            # supplied raw backend is deliberately inaccurate in this fixture.
+            return self.exact.solve(qp, hessian, active, upstream)
+
+    polisher = CertifiedAnalyticPolisher()
+    case = scalar_case(monkeypatch, polisher=polisher)
+    original_solve = case.reference.solve
+    monkeypatch.setattr(case.reference, "solve", lambda *args: tuple(value * 0.5 for value in original_solve(*args)))
+    try:
+        result = case.solver.solve(case.inputs, case.raw.x)
+        assert result.status.item() == result.polish.status.item() == 0
+        if reject:
+            with pytest.raises(RuntimeError, match="original KKT certificate failed"):
+                torch.autograd.grad(result.controls[:, 0].sum(), (case.inputs.q,))
+            assert case.inputs.q.grad is None and not polisher.exact.calls
+        else:
+            (gradient,) = torch.autograd.grad(result.controls[:, 0].sum(), (case.inputs.q,))
+            assert gradient[0, 1, 0].item() == pytest.approx(-0.5, abs=1e-13)
+            assert len(polisher.exact.calls) == 1
+        assert len(polisher.adjoint_calls) == 1
+        assert polisher.adjoint_calls[0][0] is case.reference
+        assert not case.reference.calls
+    finally:
+        case.solver.close()

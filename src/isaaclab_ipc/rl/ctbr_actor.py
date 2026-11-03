@@ -33,6 +33,7 @@ class CTBRMPCActor(MPCActor):
         polish_iterations=4,
         polish_tolerance=1e-11,
         polish_linear_refinements=2,
+        polish_adjoint_refinements=4,
         **kwargs,
     ):
         super().__init__(*args, qp_iterations=qp_iterations, **kwargs)
@@ -59,6 +60,7 @@ class CTBRMPCActor(MPCActor):
             max_iter=polish_iterations,
             tolerance=polish_tolerance,
             max_linear_refinements=polish_linear_refinements,
+            max_adjoint_refinements=polish_adjoint_refinements,
         )
         self._model = self.ctbr_problem.dynamics()
         self._native_solver = None
@@ -206,6 +208,8 @@ class CTBRMPCActor(MPCActor):
                 "max_iter": self.polisher.max_iter,
                 "tolerance": self.polisher.tolerance,
                 "max_linear_refinements": self.polisher.max_linear_refinements,
+                "adjoint_tolerance": self.polisher.adjoint_tolerance,
+                "max_adjoint_refinements": self.polisher.max_adjoint_refinements,
                 "gradient_scope": "cost parameters D/E/q",
             },
         }

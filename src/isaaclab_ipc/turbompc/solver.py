@@ -182,7 +182,11 @@ class _ImplicitTrajectory(torch.autograd.Function):
             solver._adjoint_data(*arguments) if active_mask is None else solver._adjoint_data(*arguments, active_mask)
         )
         adjoint = solver._adjoint(qp)
-        v, w, wg = adjoint.solve(qp, hessian, active, masked_upstream)
+        certified_solve = getattr(solver.polisher, "solve_adjoint", None)
+        if certified_solve is None:
+            v, w, wg = adjoint.solve(qp, hessian, active, masked_upstream)
+        else:
+            v, w, wg = certified_solve(adjoint, qp, hessian, active, masked_upstream)
         if not (torch.isfinite(v).all() & torch.isfinite(w).all() & torch.isfinite(wg).all()):
             raise RuntimeError("Nonfinite MPC adjoint: the active KKT system may be singular")
         gradients = solver._parameter_gradients(
