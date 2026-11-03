@@ -234,7 +234,19 @@ class TorchMPC:
     def _qp(self, inputs, z):
         b, t, n = z.shape
         nx = self.dynamics.nx
-        value, jacobian = self.dynamics.linearize(z[:, :-1])
+        if type(self.dynamics) is LinearDynamics:
+            # For f(z)=M z+b, the equality is M z[k]-x[k+1]=-b.
+            # Reuse the exact Jacobian and offset instead of two cancelling
+            # matrix products at every SQP expansion and backward preparation.
+            jacobian = self.dynamics.matrix.expand(b, t - 1, nx, n)
+            c_dyn = z.new_zeros((b, t - 1, nx))
+            if self.dynamics.offset is not None:
+                # Preserve Torch's original dtype promotion and broadcasting,
+                # including a CPU scalar offset for CUDA trajectories.
+                c_dyn = c_dyn - self.dynamics.offset
+        else:
+            value, jacobian = self.dynamics.linearize(z[:, :-1])
+            c_dyn = _matvec(jacobian, z[:, :-1]) - value
         eye = torch.eye(nx, n, device=z.device, dtype=z.dtype)
         g, lower, upper = inputs.G, inputs.lower, inputs.upper
         if self.constraints is not None:
@@ -254,7 +266,7 @@ class TorchMPC:
             jacobian,
             -eye.expand(b, t - 1, nx, n),
             inputs.initial_state,
-            _matvec(jacobian, z[:, :-1]) - value,
+            c_dyn,
             g,
             lower,
             upper,
