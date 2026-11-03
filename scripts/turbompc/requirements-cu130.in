@@ -1,0 +1,14 @@
+# JAX-free Torch environment matching the Isaac Lab CUDA major version.
+torch==2.11.0+cu130
+cuda-toolkit[cublas,nvrtc]==13.0.2
+nvidia-cudss-cu13==1.0.0.35
+numpy
+scipy
+pyyaml
+pytest
+scikit-build-core
+pybind11
+ninja
+packaging
+setuptools
+wheel

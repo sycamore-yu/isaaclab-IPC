@@ -1,0 +1,50 @@
+{
+  "repository": "https://github.com/ToyotaResearchInstitute/turbompc",
+  "commit": "7050a4f367d08504ecb6f5820d9161e704df5816",
+  "files": {
+    "admm/admm_cudss.cu": {
+      "upstream": "turbompc/solvers/admm/csrc/admm_cudss.cu",
+      "sha256": "2c05577773d22e638081a0fa7d95c19f7cb4b7aa90b98fbf37607b0b4ac78212"
+    },
+    "admm/admm_cudss.cuh": {
+      "upstream": "turbompc/solvers/admm/csrc/admm_cudss.cuh",
+      "sha256": "15399ff401415795f86b251e37f8ff9dd689b1064652aadfba5c6daac6729edd"
+    },
+    "admm/admm_infeasibility.cuh": {
+      "upstream": "turbompc/solvers/admm/csrc/admm_infeasibility.cuh",
+      "sha256": "f8b0627f9d8835892087e77191dda602e4c6e8baf4bc956b6776c5d1fca01687"
+    },
+    "admm/admm_status.cuh": {
+      "upstream": "turbompc/solvers/admm/csrc/admm_status.cuh",
+      "sha256": "947da2b6a662a73abad1bc0c2718918faf5c3e40c0b84b771d17b1402d3aacc6"
+    },
+    "admm/admm_math.cuh": {
+      "upstream": "turbompc/solvers/admm/csrc/admm_math.cuh",
+      "sha256": "f294f35bac97f62c0cdf88f412a28a5ea4d18ca136551500d1ed4afffb8e725b"
+    },
+    "admm/admm_reductions.cuh": {
+      "upstream": "turbompc/solvers/admm/csrc/admm_reductions.cuh",
+      "sha256": "9d110fbaef3872e677105456e8914114f3ab1bc53614f9629fea38ef2ed7dd94"
+    },
+    "admm/constraint_handling.cuh": {
+      "upstream": "turbompc/solvers/admm/csrc/constraint_handling.cuh",
+      "sha256": "29c83872aa4419b04ae93b8736abf662cdf886b6d0baf7f96cdc01811c172d09"
+    },
+    "common/block_tridi.cu": {
+      "upstream": "turbompc/solvers/csrc/common/block_tridi.cu",
+      "sha256": "de32c39abbe9dc15f3d35f8174c57bbd66f106c619364cd3b01e6ab27e60f16b"
+    },
+    "common/block_tridi.cuh": {
+      "upstream": "turbompc/solvers/csrc/common/block_tridi.cuh",
+      "sha256": "60b325bc69a3c543a765af970be9140519ca29f88c1be4ad820bdfa3d5d3fd19"
+    },
+    "backward/cudss_sparse_kkt.cu": {
+      "upstream": "turbompc/solvers/backward/csrc/cudss_sparse_kkt.cu",
+      "sha256": "bd7d17a54f88ca5ef5d64170549d4b6045d66519319008be5d53c25449f4799d"
+    },
+    "backward/cudss_sparse_kkt.cuh": {
+      "upstream": "turbompc/solvers/backward/csrc/cudss_sparse_kkt.cuh",
+      "sha256": "a21f320868983c22619e14d67a160e0288aedc0f72a0375e31761ef8e66de90f"
+    }
+  }
+}
