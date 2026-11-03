@@ -1,9 +1,10 @@
 """Isaac Lab task adapting physical XYZW state to native CTBR MPC."""
 
+import math
+
 import gymnasium as gym
 import numpy as np
 import torch
-import warp as wp
 
 from isaaclab_ipc.assets.quadrotor import MASS, MAX_THRUST
 from isaaclab_ipc.turbompc.ctbr import CTBRConfig
@@ -12,6 +13,34 @@ from isaaclab_ipc.turbompc.quadrotor import body_rates_from_isaac, reference_fro
 from .mpc_env import FEATURES, IPCMPCEnv, make_forest_mpc_cfg, make_mpc_cfg
 
 CTBR_FEATURES = FEATURES + 3
+
+
+@torch.no_grad()
+def checked_articulation_mass(robot, expected_mass: float) -> torch.Tensor:
+    """Check each complete robot's mass, including its fixed rotor links.
+
+    ArticulationData exposes masses in public body order as
+    ``[num_instances, num_bodies]``. The controller's root-body index identifies
+    only the base link; its mass alone is not the quadrotor's total mass.
+    """
+    link_masses = robot.data.body_mass.torch
+    expected_shape = (robot.num_instances, robot.num_bodies)
+    if tuple(link_masses.shape) != expected_shape:
+        raise ValueError(
+            f"Newton articulation mass shape: actual={tuple(link_masses.shape)}, expected={expected_shape}"
+        )
+    if not math.isfinite(expected_mass) or expected_mass <= 0:
+        raise ValueError(f"Expected articulation mass must be finite and positive: expected={expected_mass!r} kg")
+    masses = link_masses.sum(dim=-1)
+    if not bool(torch.isfinite(link_masses).all()) or not torch.allclose(
+        masses, torch.full_like(masses, expected_mass), atol=1e-6, rtol=0
+    ):
+        raise ValueError(
+            "Newton articulation, RateController and CTBR mass must agree: "
+            f"actual={masses.cpu().tolist()} kg, expected={expected_mass} kg; "
+            f"link_masses={link_masses.cpu().tolist()}"
+        )
+    return masses
 
 
 def make_ctbr_cfg():
@@ -45,16 +74,19 @@ class CTBRMPCEnv(IPCMPCEnv):
         if cfg.observation_space != CTBR_FEATURES:
             raise ValueError("CTBR task uses the 127-feature observation and a separate checkpoint")
         super().__init__(cfg, render_mode, **kwargs)
-        masses = wp.to_torch(self.sim.physics_manager.backend.model.body_mass)[self.controller.ids.long()]
-        if not torch.allclose(masses, torch.full_like(masses, self.ctbr_config.mass), atol=1e-6, rtol=0):
+        try:
+            masses = checked_articulation_mass(self.robot, self.ctbr_config.mass)
+        except Exception:
             self.close()
-            raise ValueError("Newton body mass, RateController mass and CTBR mass must agree")
+            raise
         self.ctbr_runtime_contract = {
             "state_quaternion": "Isaac Lab XYZW -> CTBR WXYZ",
             "position_frame": "world axes, translated by environment origin",
             "linear_velocity_frame": "world",
             "angular_velocity_frame": "body",
-            "newton_body_mass_kg": masses.cpu().tolist(),
+            "newton_articulation_mass_kg": masses.cpu().tolist(),
+            "body_names": list(self.robot.body_names),
+            "link_masses_kg": self.robot.data.body_mass.torch.cpu().tolist(),
             "controller_mass_kg": MASS,
             "model_mass_kg": self.ctbr_config.mass,
             "gravity_m_s2": self.ctbr_config.gravity,

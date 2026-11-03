@@ -20,7 +20,7 @@ from isaaclab_ipc.mpc import Config
 from isaaclab_ipc.planner import Planner
 from isaaclab_ipc.rl.actor import MPCActor
 from isaaclab_ipc.rl.ctbr_actor import CTBRMPCActor
-from isaaclab_ipc.tasks.ctbr_env import CTBRMPCEnv, make_ctbr_cfg
+from isaaclab_ipc.tasks.ctbr_env import CTBRMPCEnv, checked_articulation_mass, make_ctbr_cfg
 from isaaclab_ipc.tasks.env import IPCEnv
 from isaaclab_ipc.tasks.mpc_env import IPCMPCEnv
 from isaaclab_ipc.turbompc.ctbr import CTBRConfig
@@ -81,6 +81,51 @@ def bare_environment(num_envs=1):
     env.scene = SimpleNamespace(num_envs=num_envs, env_origins=torch.zeros((num_envs, 3), dtype=torch.float64))
     env._pending = None
     return env
+
+
+def mass_robot(link_masses):
+    return SimpleNamespace(
+        num_instances=link_masses.shape[0],
+        num_bodies=5,
+        body_names=["base", "rotor_0", "rotor_1", "rotor_2", "rotor_3"],
+        data=SimpleNamespace(body_mass=SimpleNamespace(torch=link_masses)),
+    )
+
+
+def test_articulation_mass_includes_all_four_fixed_rotor_links():
+    link_masses = torch.tensor([[0.746, 0.001, 0.001, 0.001, 0.001]] * 2, requires_grad=True)
+    before = link_masses.detach().clone()
+    masses = checked_articulation_mass(mass_robot(link_masses), 0.75)
+    torch.testing.assert_close(masses, torch.full((2,), 0.75), atol=1e-6, rtol=0)
+    torch.testing.assert_close(link_masses, before, atol=0, rtol=0)
+    assert not masses.requires_grad
+
+
+@pytest.mark.parametrize("second_base_mass", [0.756, float("nan")])
+def test_articulation_mass_rejects_wrong_or_nonfinite_mass_per_instance(second_base_mass):
+    link_masses = torch.tensor(
+        [[0.746, 0.001, 0.001, 0.001, 0.001], [second_base_mass, 0.001, 0.001, 0.001, 0.001]]
+    )
+    with pytest.raises(ValueError, match=r"actual=.*expected=0\.75 kg"):
+        checked_articulation_mass(mass_robot(link_masses), 0.75)
+
+
+def test_articulation_mass_rejects_incomplete_body_axis():
+    with pytest.raises(ValueError, match=r"actual=\(2, 1\), expected=\(2, 5\)"):
+        checked_articulation_mass(mass_robot(torch.full((2, 1), 0.75)), 0.75)
+
+
+def test_environment_closes_after_articulation_mass_check_fails(monkeypatch):
+    closed = []
+
+    def fake_initialize(env, cfg, render_mode=None, **kwargs):
+        env.robot = mass_robot(torch.tensor([[0.756, 0.001, 0.001, 0.001, 0.001]]))
+
+    monkeypatch.setattr(IPCMPCEnv, "__init__", fake_initialize)
+    monkeypatch.setattr(CTBRMPCEnv, "close", lambda env: closed.append(env))
+    with pytest.raises(ValueError, match=r"actual=.*expected=0\.75 kg"):
+        CTBRMPCEnv(make_ctbr_cfg())
+    assert len(closed) == 1
 
 
 def test_all_invalid_context_skips_both_solvers_and_has_zero_cost_gradient(monkeypatch):
