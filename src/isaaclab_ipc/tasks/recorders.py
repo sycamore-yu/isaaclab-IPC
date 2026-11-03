@@ -23,7 +23,7 @@ class FlightRecorder(RecorderTerm):
         if hasattr(env, "command_violations"):
             success &= torch.as_tensor(env.command_violations == 0, device=env.device)
         env.recorder_manager.set_success_to_episodes(None, success[:, None])
-        return "outputs", dict(
+        values = dict(
             pose=pose,
             twist=twist,
             acceleration=env.acceleration(),
@@ -32,6 +32,9 @@ class FlightRecorder(RecorderTerm):
             collision=env.hit,
             physical_contact=env.extras["physical_contact"],
         )
+        if "reward_terms" in env.extras:
+            values["reward_terms"] = env.extras["reward_terms"]
+        return "outputs", values
 
 
 class RerunRecorder(RecorderTerm):

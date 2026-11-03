@@ -120,6 +120,7 @@ def main():
                 values, _ = env.unwrapped.reset(seed=seed)
                 obs = TensorDict(values, batch_size=[env.num_envs])
                 first_record = len(env.unwrapped.records)
+                failure_saved = False
                 for _ in range(env.max_episode_length + 1):
                     with torch.inference_mode():
                         torch.cuda.synchronize()
@@ -131,6 +132,22 @@ def main():
                             raise
                         torch.cuda.synchronize()
                         solve_ms = (perf_counter() - tick) * 1000
+                        unsolved = ~actor.last_result["solved"] & actor.last_result["sfc_valid"]
+                        if unsolved.any() and not failure_saved:
+                            costs = actor.mlp(actor.get_latent(obs))
+                            problem = actor.problem(obs, costs)
+                            torch.save(
+                                dict(
+                                    observation=obs.cpu(),
+                                    problem=[v.cpu() for v in problem],
+                                    result={
+                                        k: v.cpu() if isinstance(v, torch.Tensor) else v
+                                        for k, v in actor.last_result.items()
+                                    },
+                                ),
+                                args.output / f"first-unsolved-seed-{seed}.pt",
+                            )
+                            failure_saved = True
                         env.unwrapped.record_mpc_result(actor.last_result)
                         obs, _, _, _ = env.step(actions)
                         torch.cuda.synchronize()

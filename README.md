@@ -112,6 +112,7 @@ env -u PYTHONPATH PYTHONDONTWRITEBYTECODE=1 OMP_NUM_THREADS=1 \
 
 任务为 `Isaac-IPC-Avoid-ACMPC-Direct` 和 `Isaac-IPC-Forest-ACMPC-Direct`。
 训练、恢复、播放、约束语义和验证结果见 [AC-MPC 使用说明](docs/acmpc.md)。
+MPC 学习任务使用进度、时间、平滑、终端四项奖励；权重和新一轮调试见 [奖励与重训](docs/reward.md)。
 
 默认走廊为 PathCover/RISP，保留原安全距离和 IPC 走廊时序。
 设计、结果和剩余测试见 [走廊替换说明](docs/pathcover.md)。

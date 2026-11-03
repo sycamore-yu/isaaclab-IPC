@@ -27,8 +27,11 @@ def constraint_basis(a, active):
     return rows, norm, projector, inverse
 
 
-def polish(h, g, a, lower, upper, y):
-    active = y.abs() > 1e-7
+def polish(h, g, a, lower, upper, x, y):
+    ax = (a @ x.unsqueeze(-1)).squeeze(-1)
+    slack = torch.minimum((ax - lower).abs(), (upper - ax).abs()) / a.norm(dim=-1).clamp_min(1e-12)
+    # ADMM can retain small duals on slack rows; they are not active equalities.
+    active = (y.abs() > 1e-7) & (slack < 1e-4)
     rows, norm, projector, inverse = constraint_basis(a, active)
     bounds = torch.where(active, torch.where(y > 0, upper, lower), 0.0) / norm
     particular = inverse @ (rows.transpose(-1, -2) @ bounds.unsqueeze(-1))
@@ -164,7 +167,7 @@ class DifferentiableQP:
                 primal, dual, dual_scale = residuals(h, g, a, lower, upper, x, y)
                 solved = (primal <= self.eps_abs) & (dual <= self.eps_abs + self.eps_rel * dual_scale)
                 if _iterations == 32 or _iterations % 256 == 0:
-                    px, py, signs = polish(h, g, a, lower, upper, y)
+                    px, py, signs = polish(h, g, a, lower, upper, x, y)
                     pp, pd, ps = residuals(h, g, a, lower, upper, px, py)
                     good = signs & (pp <= self.eps_abs) & (pd <= self.eps_abs + self.eps_rel * ps)
                     x = torch.where(good[:, None], px, x)

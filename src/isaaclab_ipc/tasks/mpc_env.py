@@ -14,14 +14,16 @@ from isaaclab_ipc.mpc import Config
 from isaaclab_ipc.planner import Planner
 
 from .env import IPCEnv, make_cfg
+from .rewards import NavigationRewardCfg, navigation_reward
 
 FEATURES = 124
-MAX_PLANES = 32
+MAX_PLANES = 64
 
 
 def make_mpc_cfg():
     cfg = make_cfg(num_envs=4)
     cfg.reference_strides = (10, 20)
+    cfg.reward = NavigationRewardCfg()
     cfg.max_planes = MAX_PLANES
     cfg.observation_space = FEATURES
     return cfg
@@ -33,6 +35,7 @@ def make_forest_mpc_cfg():
         raise FileNotFoundError("Build the forest with scripts/build_forest.py first")
     cfg = make_cfg(num_envs=4, scenario="forest", forest_usd=path)
     cfg.reference_strides = (6,)
+    cfg.reward = NavigationRewardCfg()
     cfg.max_planes = MAX_PLANES
     cfg.observation_space = FEATURES
     return cfg
@@ -78,10 +81,24 @@ class IPCMPCEnv(IPCEnv):
         self.reported = np.zeros(self.num_envs, bool)
         self.episode_ids = np.zeros(self.num_envs, int)
         self.current_context = None
+        weights = [getattr(cfg.reward, key) for key in ("progress", "time", "smooth", "goal", "collision", "failure")]
+        if not np.isfinite(weights).all() or np.any(np.asarray(weights) < 0):
+            raise ValueError("Reward weights must be finite and nonnegative")
+        scales = np.asarray(cfg.reward.action_scale)
+        if scales.shape != (4,) or not np.isfinite(scales).all() or np.any(scales <= 0):
+            raise ValueError("Reward action_scale must contain four finite positive values")
+        self.previous_action = self.controller.command.clone()
+        self.reward_sums = torch.zeros(self.num_envs, 4, device=self.device)
+        self.reward_active = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+        self.episode_record_index = np.full(self.num_envs, -1, dtype=int)
 
     def _reset_idx(self, env_ids):
         super()._reset_idx(env_ids)
         ids = self.ids if env_ids is None else env_ids
+        self.previous_action[ids] = self.controller.command[ids]
+        self.reward_sums[ids] = 0
+        self.reward_active[ids] = True
+        self.episode_record_index[ids.cpu().numpy()] = -1
         for i in ids.cpu().tolist():
             stride = self.cfg.reference_strides[i % len(self.cfg.reference_strides)]
             self.planners[i] = Planner(Config.load(self.cfg.scenario, stride, profile="real"), [self.cfg.goal_x, 0, 1])
@@ -208,6 +225,53 @@ class IPCMPCEnv(IPCEnv):
                     self.qp_residual_max[i] = max(self.qp_residual_max[i], float(data["primal"][i]))
         super()._pre_physics_step(actions)
 
+    def _get_rewards(self):
+        pose, _ = self.body_state()
+        distance = (pose[:, :3] - self.scene.env_origins - self.goal).norm(dim=-1)
+        collision = self.hit & self.reward_active
+        success = (
+            self.extras["success"] & ~collision & torch.as_tensor(self.command_violations == 0, device=self.device)
+        )
+        done = self.reset_terminated | self.reset_time_outs
+        failure = done & ~success & ~collision
+        terms = (
+            navigation_reward(
+                self.cfg.reward,
+                self.previous_distance,
+                distance,
+                self.controller.command,
+                self.previous_action,
+                self.step_dt,
+                success,
+                collision,
+                failure,
+            )
+            * self.reward_active[:, None]
+        )
+        self.reward_sums += terms
+        names = ("progress", "time", "smooth", "terminal")
+        self.extras["reward_terms"] = dict(zip(names, terms.unbind(-1), strict=True))
+        self.extras.setdefault("log", {}).update(
+            {"Reward/" + name: value.mean() for name, value in self.extras["reward_terms"].items()}
+        )
+        self.extras["log"].update(
+            {"Control/" + key: self.last_mpc_result[key].float().mean() for key in ("solved", "braking", "sfc_valid")}
+        )
+        for i in (done & self.reward_active).nonzero().flatten().cpu().tolist():
+            record = self.records[self.episode_record_index[i]]
+            record["reward_terms"] = dict(zip(names, self.reward_sums[i].cpu().tolist(), strict=True))
+            record["episode_return"] = float(self.reward_sums[i].sum())
+        if (done & self.reward_active).any() and self.cfg.log_dir:
+            path = Path(self.cfg.log_dir) / "records.json"
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(self.records, indent=2))
+            temporary.replace(path)
+        self.previous_distance.copy_(distance)
+        self.previous_action.copy_(self.controller.command)
+        self.reward_active &= ~done
+        self.recorder_manager.record_post_step()
+        return terms.sum(-1)
+
     def _get_dones(self):
         term, trunc = super()._get_dones()
         pose, twist = self.body_state()
@@ -225,6 +289,7 @@ class IPCMPCEnv(IPCEnv):
             reached = bool(self.extras["success"][i])
             collision = bool(self.extras["collision"][i])
             planner = self.planners[i]
+            self.episode_record_index[i] = len(self.records)
             self.records.append(
                 dict(
                     env_id=i,
@@ -249,11 +314,6 @@ class IPCMPCEnv(IPCEnv):
                 )
             )
         if (term | trunc).any():
-            if self.cfg.log_dir:
-                path = Path(self.cfg.log_dir) / "records.json"
-                temporary = path.with_suffix(".tmp")
-                temporary.write_text(json.dumps(self.records, indent=2))
-                temporary.replace(path)
             recent = [r for r in self.records[-self.num_envs :] if r["success"]]
             self.extras["log"] = {"Episode/success_fraction": len(recent) / min(len(self.records), self.num_envs)}
         return term, trunc

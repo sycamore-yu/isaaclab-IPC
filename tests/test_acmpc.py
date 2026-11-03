@@ -152,3 +152,40 @@ def test_invalid_corridor_is_rejected_and_only_valid_batch_members_solve(monkeyp
     actor.output_mean[0, 2].backward()
     assert actor.mlp[-1].bias.grad.abs().max() > 1e-6
     actor(obs[1:])  # Entirely invalid batches must skip the solver too.
+
+
+def test_sfc_capacity_expansion_preserves_constraints_and_action():
+    _, obs, _ = context()
+    actor = MPCActor(obs, {"actor": ["policy"]}, "actor", 4).to(DEVICE)
+    expanded = obs.clone()
+    expanded["planes"] = torch.nn.functional.pad(obs["planes"], (0, 0, 0, 32))
+    expanded["plane_mask"] = torch.nn.functional.pad(obs["plane_mask"], (0, 32))
+    costs = torch.zeros((1, 7), device=DEVICE)
+    original = actor.problem(obs, costs)
+    larger = actor.problem(expanded, costs)
+    for values, data in ((original, obs), (larger, expanded)):
+        active = torch.cat((torch.ones(135, dtype=torch.bool, device=DEVICE), data["plane_mask"].flatten()))
+        if values is original:
+            reference = [v[0, active] for v in values[2:5]]
+        else:
+            for actual, expected in zip(values[2:5], reference, strict=True):
+                torch.testing.assert_close(actual[0, active], expected, atol=0, rtol=0)
+    with torch.no_grad():
+        before = actor(obs)
+        after = actor(expanded)
+    torch.testing.assert_close(after, before, atol=2e-6, rtol=0)
+
+
+def test_polish_ignores_stale_duals_on_slack_constraints():
+    from isaaclab_ipc.rl.qp import polish, residuals
+
+    h = torch.eye(2, dtype=torch.float64, device=DEVICE)[None]
+    g = torch.tensor([[-0.2, 0.0]], dtype=torch.float64, device=DEVICE)
+    a = h.clone()
+    lower = torch.full_like(g, -torch.inf)
+    upper = torch.ones_like(g)
+    stale_dual = torch.full_like(g, 0.001)
+    x, dual, signs = polish(h, g, a, lower, upper, -g, stale_dual)
+    primal, stationarity, _ = residuals(h, g, a, lower, upper, x, dual)
+    assert signs.all() and (primal < 1e-12).all() and (stationarity < 1e-12).all()
+    torch.testing.assert_close(x, -g)

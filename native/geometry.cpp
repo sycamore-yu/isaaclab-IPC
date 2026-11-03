@@ -10,7 +10,7 @@ struct CorridorError:std::runtime_error{using std::runtime_error::runtime_error;
 Eigen::MatrixXd corridor(const Eigen::Vector3d&a,const Eigen::Vector3d&end,const Points&points,double radius){
  if(!a.allFinite()||!end.allFinite()||!std::isfinite(radius)||radius<0) throw std::invalid_argument("Invalid corridor input");
  Eigen::Matrix<double,-1,3> bounds(6,3); bounds<<1,0,0,-1,0,0,0,1,0,0,-1,0,0,0,1,0,0,-1;
- Eigen::VectorXd limits(6); limits<<a.x()+10,10-a.x(),a.y()+10,10-a.y(),3,-.5;
+ Eigen::VectorXd limits(6); limits<<a.x()+10,10-a.x(),a.y()+10,10-a.y(),3,.5;
  for(const auto&p:points){if(!p.allFinite())throw std::invalid_argument("Nonfinite point");if((p-a).norm()<1e-8)throw CorridorError("Obstacle coincides with SFC seed");}
  Eigen::Matrix<double,-1,3>A;Eigen::VectorXd b;std::vector<int> remaining;
  if(points.empty()){A=bounds;b=limits;}
