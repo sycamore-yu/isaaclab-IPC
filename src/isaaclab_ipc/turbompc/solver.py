@@ -14,6 +14,7 @@ from torch.autograd.function import once_differentiable
 
 from .adjoint import SparseAdjoint
 from .constraints import PathConstraints
+from .dynamics import LinearDynamics
 from .native import ADMMConfig, ADMMResult, NativeADMM, QPData
 
 
@@ -153,34 +154,9 @@ class _ImplicitTrajectory(torch.autograd.Function):
             safe_inputs = MPCInputs(*[safe(getattr(inputs, f.name)) for f in fields(inputs)])
             z_safe, ld_safe, y_safe = safe(z), safe(lambda_dyn), safe(y)
         solver = ctx.solver
-        qp = solver._qp(safe_inputs, z_safe)
-        hessian = qp.D.clone()
-        hessian[:, :-1] += solver._dynamics_hessian(z_safe[:, :-1], ld_safe)
-        parameter_y = y_safe
-        if solver.constraints is None:
-            active, active_lower, active_upper = solver._active_sets(
-                qp.G, qp.lower, qp.upper, z_safe, y_safe, solver.admm.config.eps_abs, solver.admm.config.eps_rel
-            )
-            parameter_active = active
-        else:
-            linear_rows = safe_inputs.G.shape[-2]
-            parameter_y, path_y = y_safe[..., :linear_rows], y_safe[..., linear_rows:]
-            parameter_active, active_lower, active_upper = solver._active_sets(
-                safe_inputs.G,
-                safe_inputs.lower,
-                safe_inputs.upper,
-                z_safe,
-                parameter_y,
-                solver.admm.config.eps_abs,
-                solver.admm.config.eps_rel,
-            )
-            path_active, _, _ = solver._path_active_sets(
-                z_safe, path_y, max(solver.admm.config.eps_abs, solver.config.tolerance), solver.admm.config.eps_rel
-            )
-            # A stale inactive multiplier cannot contribute constraint curvature.
-            hessian += solver._constraint_hessian(z_safe, torch.where(path_active, path_y, 0.0))
-            active = torch.cat((parameter_active, path_active), -1)
-        masked_upstream = _choose(good, upstream, torch.zeros_like(upstream))
+        qp, hessian, active, parameter_active, active_lower, active_upper, parameter_y, masked_upstream = (
+            solver._adjoint_data(safe_inputs, z_safe, ld_safe, y_safe, good, upstream)
+        )
         adjoint = solver._adjoint(qp)
         v, w, wg = adjoint.solve(qp, hessian, active, masked_upstream)
         if not (torch.isfinite(v).all() & torch.isfinite(w).all() & torch.isfinite(wg).all()):
@@ -190,7 +166,7 @@ class _ImplicitTrajectory(torch.autograd.Function):
             parameter_y,
             v,
             w,
-            wg if solver.constraints is None else wg[..., :linear_rows],
+            wg if solver.constraints is None else wg[..., : safe_inputs.G.shape[-2]],
             good,
             parameter_active,
             active_lower,
@@ -245,6 +221,7 @@ class TorchMPC:
             self._errors = torch.compile(self._errors, fullgraph=True, dynamic=False)
             self._line_search = torch.compile(self._line_search, fullgraph=True, dynamic=False)
             self._advance = torch.compile(self._advance, fullgraph=True, dynamic=False)
+            self._adjoint_data = torch.compile(self._adjoint_data, fullgraph=True, dynamic=False)
             self.admm._schur = torch.compile(self.admm._schur, fullgraph=True, dynamic=False)
             self._dynamics_hessian = torch.compile(self._dynamics_hessian, fullgraph=True, dynamic=False)
             self._active_sets = torch.compile(self._active_sets, fullgraph=True, dynamic=False)
@@ -369,6 +346,44 @@ class TorchMPC:
         status = torch.where(running & (~finite | (candidate.status == 4)), 3, status)
         return z, admm, qp, status, iterations, errors, normal_cone, (status != -1).all()
 
+    def _adjoint_data(self, inputs, z, lambda_dyn, y, good, upstream):
+        """Assemble exact curvature and active rows before the native KKT solve."""
+        qp = self._qp(inputs, z)
+        # This exact class has zero curvature. Keep its cost storage read-only;
+        # nonlinear models and subclasses retain their full dynamics Hessian.
+        if type(self.dynamics) is LinearDynamics:
+            hessian = qp.D
+        else:
+            hessian = qp.D.clone()
+            hessian[:, :-1] += self._dynamics_hessian(z[:, :-1], lambda_dyn)
+        parameter_y = y
+        if self.constraints is None:
+            active, active_lower, active_upper = self._active_sets(
+                qp.G, qp.lower, qp.upper, z, y, self.admm.config.eps_abs, self.admm.config.eps_rel
+            )
+            parameter_active = active
+        else:
+            linear_rows = inputs.G.shape[-2]
+            parameter_y, path_y = y[..., :linear_rows], y[..., linear_rows:]
+            parameter_active, active_lower, active_upper = self._active_sets(
+                inputs.G,
+                inputs.lower,
+                inputs.upper,
+                z,
+                parameter_y,
+                self.admm.config.eps_abs,
+                self.admm.config.eps_rel,
+            )
+            path_active, _, _ = self._path_active_sets(
+                z, path_y, max(self.admm.config.eps_abs, self.config.tolerance), self.admm.config.eps_rel
+            )
+            # Do not mutate qp.D when affine dynamics share its storage. An
+            # inactive multiplier cannot contribute constraint curvature.
+            hessian = hessian + self._constraint_hessian(z, torch.where(path_active, path_y, 0.0))
+            active = torch.cat((parameter_active, path_active), -1)
+        masked_upstream = _choose(good, upstream, torch.zeros_like(upstream))
+        return qp, hessian, active, parameter_active, active_lower, active_upper, parameter_y, masked_upstream
+
     def _adjoint(self, qp):
         b, t, n = qp.q.shape
         key = (b, t, n, self.dynamics.nx, qp.G.shape[-2], qp.q.device)
@@ -385,6 +400,11 @@ class TorchMPC:
             raise ValueError("Expected q[B,N+1,nx+nu]")
         inputs = replace(inputs, D=0.5 * (inputs.D + inputs.D.transpose(-1, -2)))
         with torch.inference_mode(False), torch.no_grad():
+            # SQP is a numerical forward; derivatives enter only through the
+            # custom implicit function below, which keeps the original inputs.
+            # Detaching here also gives training and finite-difference calls
+            # the same compilation metadata instead of duplicate graph variants.
+            forward_inputs = MPCInputs(*[getattr(inputs, f.name).detach() for f in fields(inputs)])
             b, t, n = inputs.q.shape
             if initial_guess is None:
                 z = inputs.q.new_zeros((b, t, n))
@@ -400,11 +420,11 @@ class TorchMPC:
             iterations = torch.zeros_like(status)
             errors = z.new_full((b, 3), torch.inf)
             normal_cone = z.new_full((b,), torch.inf) if self.constraints is not None else None
-            qp = self._qp(inputs, z)
+            qp = self._qp(forward_inputs, z)
             for _ in range(self.config.max_iter):
                 candidate = self.admm.solve(qp, admm)
                 z, admm, qp, status, iterations, errors, normal_cone, done = self._advance(
-                    inputs, z, admm, candidate, status, iterations, errors, normal_cone
+                    forward_inputs, z, admm, candidate, status, iterations, errors, normal_cone
                 )
                 if done:
                     break
