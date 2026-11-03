@@ -1,4 +1,4 @@
-"""Projection SQP with quadratic costs, nonlinear dynamics and linear constraints.
+"""Projection SQP with quadratic costs, nonlinear dynamics and stage constraints.
 
 The forward uses TurboMPC's CUDA ADMM; backward solves the full Lagrangian KKT
 system rather than differentiating through SQP/ADMM iterations. Only regular
@@ -13,6 +13,7 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from .adjoint import SparseAdjoint
+from .constraints import PathConstraints
 from .native import ADMMConfig, ADMMResult, NativeADMM, QPData
 
 
@@ -46,6 +47,8 @@ class MPCResult:
     errors: torch.Tensor
     admm: ADMMResult
     nx: int
+    # errors[:, 2] remains the original physical inequality violation.
+    normal_cone_error: torch.Tensor | None = None
 
     @property
     def states(self):
@@ -151,9 +154,30 @@ class _ImplicitTrajectory(torch.autograd.Function):
         qp = solver._qp(safe_inputs, z_safe)
         hessian = qp.D.clone()
         hessian[:, :-1] += solver._dynamics_hessian(z_safe[:, :-1], ld_safe)
-        active, active_lower, active_upper = solver._active_sets(
-            qp.G, qp.lower, qp.upper, z_safe, y_safe, solver.admm.config.eps_abs, solver.admm.config.eps_rel
-        )
+        parameter_y = y_safe
+        if solver.constraints is None:
+            active, active_lower, active_upper = solver._active_sets(
+                qp.G, qp.lower, qp.upper, z_safe, y_safe, solver.admm.config.eps_abs, solver.admm.config.eps_rel
+            )
+            parameter_active = active
+        else:
+            linear_rows = safe_inputs.G.shape[-2]
+            parameter_y, path_y = y_safe[..., :linear_rows], y_safe[..., linear_rows:]
+            parameter_active, active_lower, active_upper = solver._active_sets(
+                safe_inputs.G,
+                safe_inputs.lower,
+                safe_inputs.upper,
+                z_safe,
+                parameter_y,
+                solver.admm.config.eps_abs,
+                solver.admm.config.eps_rel,
+            )
+            path_active, _, _ = solver._path_active_sets(
+                z_safe, path_y, max(solver.admm.config.eps_abs, solver.config.tolerance), solver.admm.config.eps_rel
+            )
+            # A stale inactive multiplier cannot contribute constraint curvature.
+            hessian += solver._constraint_hessian(z_safe, torch.where(path_active, path_y, 0.0))
+            active = torch.cat((parameter_active, path_active), -1)
         masked_upstream = _choose(good, upstream, torch.zeros_like(upstream))
         adjoint = solver._adjoint(qp)
         v, w, wg = adjoint.solve(qp, hessian, active, masked_upstream)
@@ -161,12 +185,12 @@ class _ImplicitTrajectory(torch.autograd.Function):
             raise RuntimeError("Nonfinite MPC adjoint: the active KKT system may be singular")
         gradients = solver._parameter_gradients(
             z_safe,
-            y_safe,
+            parameter_y,
             v,
             w,
-            wg,
+            wg if solver.constraints is None else wg[..., :linear_rows],
             good,
-            active,
+            parameter_active,
             active_lower,
             active_upper,
             solver.dynamics.nx,
@@ -179,14 +203,23 @@ class TorchMPC:
     """Batched multiple-shooting MPC with a fixed dynamics object.
 
     Stage cost is 0.5*z[k].T*D[k]*z[k] + q[k].T*z[k], plus
-    z[k+1].T*E[k]*z[k]. Bounds are lower <= G[k]*z[k] <= upper.
+    z[k+1].T*E[k]*z[k]. Bounds are lower <= G[k]*z[k] <= upper;
+    optional fixed PathConstraints add smooth nonlinear stage bounds.
     All tensors include a batch axis and terminal control, as in TurboMPC.
     Costs must be convex in the forward QP. Only projection without relaxation
     is supported here; unsupported modes fail rather than silently softening constraints.
     """
 
-    def __init__(self, dynamics, config: SQPConfig | None = None, admm_config: ADMMConfig | None = None):
+    def __init__(
+        self,
+        dynamics,
+        config: SQPConfig | None = None,
+        admm_config: ADMMConfig | None = None,
+        *,
+        constraints: PathConstraints | None = None,
+    ):
         self.dynamics = dynamics
+        self.constraints = constraints
         self.config = config or SQPConfig()
         self.admm = NativeADMM(admm_config)
         if self.config.max_iter < 1 or self.config.tolerance <= 0:
@@ -199,6 +232,10 @@ class TorchMPC:
         self._dynamics_hessian = self.dynamics.lagrangian_hessian
         self._active_sets = _active_sets
         self._parameter_gradients = _parameter_gradients
+        if constraints is not None:
+            self._constraint_hessian = constraints.lagrangian_hessian
+            self._path_active_sets = constraints.active_sets
+            self._path_normal_cone = constraints.normal_cone_residual
         if self.config.compile_kernels:
             # Compile only tensor algebra. cuDSS workspaces and convergence
             # decisions remain outside graph capture; saved outputs stay owned.
@@ -209,12 +246,26 @@ class TorchMPC:
             self._dynamics_hessian = torch.compile(self._dynamics_hessian, fullgraph=True, dynamic=False)
             self._active_sets = torch.compile(self._active_sets, fullgraph=True, dynamic=False)
             self._parameter_gradients = torch.compile(self._parameter_gradients, fullgraph=True, dynamic=False)
+            if constraints is not None:
+                self._constraint_hessian = torch.compile(self._constraint_hessian, fullgraph=True, dynamic=False)
+                self._path_active_sets = torch.compile(self._path_active_sets, fullgraph=True, dynamic=False)
+                self._path_normal_cone = torch.compile(self._path_normal_cone, fullgraph=True, dynamic=False)
 
     def _qp(self, inputs, z):
         b, t, n = z.shape
         nx = self.dynamics.nx
         value, jacobian = self.dynamics.linearize(z[:, :-1])
         eye = torch.eye(nx, n, device=z.device, dtype=z.dtype)
+        g, lower, upper = inputs.G, inputs.lower, inputs.upper
+        if self.constraints is not None:
+            path_value, path_jacobian = self.constraints.linearize(z)
+            enabled = self.constraints.enabled(z)
+            path_jacobian = torch.where(enabled[..., None], path_jacobian, 0.0)
+            offset = torch.where(enabled, path_value - _matvec(path_jacobian, z), 0.0)
+            path_lower, path_upper = self.constraints.bounds(z)
+            g = torch.cat((g, path_jacobian), -2)
+            lower = torch.cat((lower, path_lower - offset), -1)
+            upper = torch.cat((upper, path_upper - offset), -1)
         return QPData(
             inputs.D,
             inputs.E,
@@ -224,9 +275,9 @@ class TorchMPC:
             -eye.expand(b, t - 1, nx, n),
             inputs.initial_state,
             _matvec(jacobian, z[:, :-1]) - value,
-            inputs.G,
-            inputs.lower,
-            inputs.upper,
+            g,
+            lower,
+            upper,
         )
 
     def _violations(self, inputs, z):
@@ -234,6 +285,8 @@ class TorchMPC:
         eq = self.dynamics(z[:, :-1]) - z[:, 1:, : self.dynamics.nx]
         gx = _matvec(inputs.G, z)
         violation = torch.maximum(inputs.lower - gx, gx - inputs.upper).clamp_min(0)
+        if self.constraints is not None:
+            violation = torch.cat((violation, self.constraints.violations(z)), -1)
         return torch.cat((eq0, eq.flatten(1)), -1), violation
 
     def _errors(self, inputs, qp, z, admm):
@@ -309,6 +362,7 @@ class TorchMPC:
             status = torch.full((b,), -1, dtype=torch.int32, device=z.device)
             iterations = torch.zeros_like(status)
             errors = z.new_full((b, 3), torch.inf)
+            normal_cone = z.new_full((b,), torch.inf) if self.constraints is not None else None
             qp = self._qp(inputs, z)
             for _ in range(self.config.max_iter):
                 running = status == -1
@@ -325,7 +379,14 @@ class TorchMPC:
                 errors = _choose(running, next_errors, errors)
                 iterations += running.to(iterations.dtype)
                 finite = torch.isfinite(z).flatten(1).all(-1) & torch.isfinite(errors).all(-1)
+                if self.constraints is not None:
+                    path_y = admm.y[..., inputs.G.shape[-2] :]
+                    next_normal_cone = self._path_normal_cone(z, path_y).flatten(1).amax(-1)
+                    normal_cone = _choose(running, next_normal_cone, normal_cone)
+                    finite = finite & torch.isfinite(normal_cone)
                 solved = running & ~fatal & finite & (errors.amax(-1) <= self.config.tolerance)
+                if self.constraints is not None:
+                    solved = solved & (normal_cone <= self.config.tolerance)
                 status = torch.where(solved, 0, status)
                 status = torch.where(running & fatal, 2, status)
                 status = torch.where(running & (~finite | (candidate.status == 4)), 3, status)
@@ -348,7 +409,7 @@ class TorchMPC:
             status,
             self,
         )
-        return MPCResult(trajectory, status, iterations, errors, admm, self.dynamics.nx)
+        return MPCResult(trajectory, status, iterations, errors, admm, self.dynamics.nx, normal_cone)
 
     def close(self):
         self.admm.close()

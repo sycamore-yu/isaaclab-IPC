@@ -1,0 +1,11 @@
+{
+  "repository": "prisma-lab/CA-AC-MPC",
+  "commit": "14aa349bb1f509c529bf3662c7feb72db68f1cb7",
+  "source": "build/ca-acmpc-reference/differentialMPCPerformance/dynamics/drone_ts.py",
+  "source_sha256": "090d99a39f2cfccf98ae872486f01fbe6a0976c2a3bf499550b7b34379759246",
+  "fixture_sha256": "2b5691c389f79dc29da64e5415d5ab2ff0423f70f238a12925be93309cb58e90",
+  "seed": 411,
+  "samples": 96,
+  "includes_zero_and_near_zero_rates": true,
+  "purpose": "Forward reference data, not copied algorithm code"
+}
