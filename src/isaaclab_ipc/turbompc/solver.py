@@ -244,6 +244,7 @@ class TorchMPC:
             self._qp = torch.compile(self._qp, fullgraph=True, dynamic=False)
             self._errors = torch.compile(self._errors, fullgraph=True, dynamic=False)
             self._line_search = torch.compile(self._line_search, fullgraph=True, dynamic=False)
+            self._advance = torch.compile(self._advance, fullgraph=True, dynamic=False)
             self.admm._schur = torch.compile(self.admm._schur, fullgraph=True, dynamic=False)
             self._dynamics_hessian = torch.compile(self._dynamics_hessian, fullgraph=True, dynamic=False)
             self._active_sets = torch.compile(self._active_sets, fullgraph=True, dynamic=False)
@@ -334,6 +335,40 @@ class TorchMPC:
         selected = torch.where(largest >= 0, largest, fallback)
         return current + alphas[selected, None, None] * delta
 
+    def _advance(self, inputs, z, admm, candidate, status, iterations, errors, normal_cone):
+        """Accept one QP and check the real problem in one tensor-only region.
+
+        The CUDA solve and host termination decision stay outside compilation.
+        Keeping selection, residuals and status together avoids launching each
+        batch mask separately while retaining the upstream warm-start buffers.
+        """
+        running = status == -1
+        fatal = candidate.status >= 2
+        next_z = self._line_search(inputs, z, candidate.x)
+        accept = running & ~fatal
+        z = _choose(accept, next_z, z)
+        admm = _choose_admm(accept, candidate, admm)
+        # Re-evaluate real nonlinear dynamics and stationarity at acceptance,
+        # including the budget limit: a stale residual must not certify a plan.
+        qp = self._qp(inputs, z)
+        errors = _choose(running, self._errors(inputs, qp, z, admm), errors)
+        iterations = iterations + running.to(iterations.dtype)
+        finite = torch.isfinite(z).flatten(1).all(-1) & torch.isfinite(errors).all(-1)
+        if self.constraints is not None:
+            path_y = admm.y[..., inputs.G.shape[-2] :]
+            next_normal_cone = self._path_normal_cone(z, path_y).flatten(1).amax(-1)
+            normal_cone = _choose(running, next_normal_cone, normal_cone)
+            finite = finite & torch.isfinite(normal_cone)
+        solved = running & ~fatal & finite & (errors.amax(-1) <= self.config.tolerance)
+        if self.config.require_qp_convergence:
+            solved = solved & (candidate.status == 0)
+        if self.constraints is not None:
+            solved = solved & (normal_cone <= self.config.tolerance)
+        status = torch.where(solved, 0, status)
+        status = torch.where(running & fatal, 2, status)
+        status = torch.where(running & (~finite | (candidate.status == 4)), 3, status)
+        return z, admm, qp, status, iterations, errors, normal_cone, (status != -1).all()
+
     def _adjoint(self, qp):
         b, t, n = qp.q.shape
         key = (b, t, n, self.dynamics.nx, qp.G.shape[-2], qp.q.device)
@@ -367,35 +402,11 @@ class TorchMPC:
             normal_cone = z.new_full((b,), torch.inf) if self.constraints is not None else None
             qp = self._qp(inputs, z)
             for _ in range(self.config.max_iter):
-                running = status == -1
                 candidate = self.admm.solve(qp, admm)
-                fatal = candidate.status >= 2
-                next_z = self._line_search(inputs, z, candidate.x)
-                z = _choose(running & ~fatal, next_z, z)
-                admm = _choose_admm(running & ~fatal, candidate, admm)
-                # Re-evaluate real nonlinear dynamics and stationarity at acceptance.
-                # This is also done at the budget limit, unlike upstream's skipped
-                # final check. It prevents a stale residual from certifying a plan.
-                next_qp = self._qp(inputs, z)
-                next_errors = self._errors(inputs, next_qp, z, admm)
-                errors = _choose(running, next_errors, errors)
-                iterations += running.to(iterations.dtype)
-                finite = torch.isfinite(z).flatten(1).all(-1) & torch.isfinite(errors).all(-1)
-                if self.constraints is not None:
-                    path_y = admm.y[..., inputs.G.shape[-2] :]
-                    next_normal_cone = self._path_normal_cone(z, path_y).flatten(1).amax(-1)
-                    normal_cone = _choose(running, next_normal_cone, normal_cone)
-                    finite = finite & torch.isfinite(normal_cone)
-                solved = running & ~fatal & finite & (errors.amax(-1) <= self.config.tolerance)
-                if self.config.require_qp_convergence:
-                    solved = solved & (candidate.status == 0)
-                if self.constraints is not None:
-                    solved = solved & (normal_cone <= self.config.tolerance)
-                status = torch.where(solved, 0, status)
-                status = torch.where(running & fatal, 2, status)
-                status = torch.where(running & (~finite | (candidate.status == 4)), 3, status)
-                qp = next_qp
-                if (status != -1).all():
+                z, admm, qp, status, iterations, errors, normal_cone, done = self._advance(
+                    inputs, z, admm, candidate, status, iterations, errors, normal_cone
+                )
+                if done:
                     break
             status = torch.where(status == -1, 1, status)
         trajectory = _ImplicitTrajectory.apply(
