@@ -9,8 +9,9 @@ import torch
 from .planner import InvalidCorridorError
 
 
-def batch_clouds_to_host(hits, positions):
-    valid = torch.isfinite(hits).all(-1) & ((hits - positions[:, None, :]).norm(dim=-1) >= 0.3)
+def batch_clouds_to_host(hits, positions, blind=0.3, maximum=float("inf")):
+    distance = (hits - positions[:, None, :]).norm(dim=-1)
+    valid = torch.isfinite(hits).all(-1) & (distance >= blind) & (distance < maximum)
     # One transfer, rather than one synchronizing boolean selection/transfer per environment.
     values = hits.masked_fill(~valid[..., None], torch.inf).cpu().numpy()
     mask = np.isfinite(values).all(-1)

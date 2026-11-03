@@ -13,6 +13,9 @@ class MPCActorCfg(RslRlMLPModelCfg):
     qp_iterations = 4096
     # MPCActor supplies its fixed Gaussian/point-mass distribution.
     distribution_cfg = None
+    planner_params = None
+    thrust_limits = (0.08 * 9.81 / 0.7, 0.9 * 9.81 / 0.7)
+    rate_limit = None
 
 
 @configclass

@@ -173,3 +173,5 @@ Git 保存源码、配置、锁文件、测试和文档。
 `results/`、`recordings/`、`build/` 和 `.venv/` 保留在本地，不进入 Git。
 复制 Git 仓库不会复制这些数据；需要完整交接时必须同时备份结果和录制。
 录制目录与对应配置见 [执行配置](docs/execution-profiles.md#rerun-录制)。
+
+SUPER High-speed / Dense 场景、参数对应与录制命令见 [SUPER 场景](docs/super-benchmarks.md)。

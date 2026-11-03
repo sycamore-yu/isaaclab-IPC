@@ -1,5 +1,7 @@
 """Official EventManager terms retaining IPC's reset and obstacle timing."""
 
+import math
+
 import torch
 from isaaclab.managers import EventTermCfg
 from isaaclab.utils import configclass
@@ -40,8 +42,9 @@ def advance_scene(env, env_ids):
 def reset_flight(env, env_ids):
     ids = env_ids.to(torch.int32)
     pose = env.robot.data.default_root_pose.torch[env_ids].clone()
-    pose[:, :3] = env.scene.env_origins[env_ids] + torch.tensor([0, 0, 1.0], device=env.device)
-    pose[:, 3:] = torch.tensor([0, 0, 0, 1.0], device=env.device)
+    pose[:, :3] = env.scene.env_origins[env_ids] + torch.tensor(env.cfg.initial_position, device=env.device)
+    yaw = env.cfg.initial_yaw / 2
+    pose[:, 3:] = torch.tensor([0, 0, math.sin(yaw), math.cos(yaw)], device=env.device)
     env.robot.write_root_pose_to_sim_index(root_pose=pose, env_ids=ids)
     env.robot.write_root_velocity_to_sim_index(root_velocity=torch.zeros((len(ids), 6), device=env.device), env_ids=ids)
     env.robot.reset_motor_thrust(torch.full((len(ids), 4), 0.75 * 9.81 / 4, device=env.device), ids)

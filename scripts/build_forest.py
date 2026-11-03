@@ -43,9 +43,10 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--pcd", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
+    p.add_argument("--drop-nan", action="store_true", help="Explicitly discard unlocated NaN rows in SUPER PCDs")
     a = p.parse_args()
     a.output.mkdir(parents=True, exist_ok=False)
-    points = read_pcd(a.pcd)
+    points = read_pcd(a.pcd, drop_nan=a.drop_nan)
     # Entire original map remains the independent collision authority.
     np.save(a.output / "points.npy", points)
     voxels = np.unique(np.floor(points / 0.1).astype(np.int32), axis=0)
@@ -67,11 +68,12 @@ def main():
             {
                 "pcd": str(a.pcd.resolve()),
                 "points": len(points),
+                "drop_nan": a.drop_nan,
                 "voxel_leaf_m": 0.1,
                 "vertices": len(vertices),
                 "triangles": len(faces),
                 "collision": "point-distance termination; no rigid contact response against foliage",
-                "sensor": "Mid-360 directions, MultiMesh first ray hit of 0.1 m occupied voxels",
+                "sensor": "Task-configured directions; first ray hit of 0.1 m occupied voxels",
             },
             indent=2,
         )

@@ -26,3 +26,14 @@ for scenario in ("Avoid", "Forest"):
             "rsl_rl_cfg_entry_point": "isaaclab_ipc.rl.config:MPCTrainCfg",
         },
     )
+
+for name, factory in (("HighSpeed", "high_speed"), ("Dense", "dense")):
+    gym.register(
+        id=f"Isaac-IPC-SUPER-{name}-ACMPC-Direct",
+        entry_point="isaaclab_ipc.tasks.super_env:SuperMPCEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"isaaclab_ipc.tasks.super_env:make_{factory}_cfg",
+            "rsl_rl_cfg_entry_point": f"isaaclab_ipc.tasks.super_env:make_{factory}_agent_cfg",
+        },
+    )

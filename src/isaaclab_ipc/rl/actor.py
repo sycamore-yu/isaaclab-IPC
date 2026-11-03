@@ -12,7 +12,7 @@ from isaaclab_ipc.mpc import MPC, Config
 from .qp import DifferentiableQP
 
 
-def flatness_torch(acceleration, jerk, rotation, yaw_target):
+def flatness_torch(acceleration, jerk, rotation, yaw_target, thrust_limits=(0.08 * 9.81 / 0.7, 0.9 * 9.81 / 0.7), rate_limit=None):
     acc = acceleration + acceleration.new_tensor([0, 0, 9.81])
     magnitude = acc.norm(dim=-1, keepdim=True).clamp_min(1e-9)
     yaw = torch.atan2(rotation[:, 1, 0], rotation[:, 0, 0])
@@ -23,8 +23,11 @@ def flatness_torch(acceleration, jerk, rotation, yaw_target):
     x = torch.linalg.cross(y, z)
     hw = (jerk - (z * jerk).sum(-1, keepdim=True) * z) / magnitude
     error = (yaw_target - yaw + torch.pi) % (2 * torch.pi) - torch.pi
-    thrust = (acc * rotation[:, :, 2]).sum(-1).clamp(0.08 * 9.81 / 0.7, 0.9 * 9.81 / 0.7)
-    return torch.stack((thrust, -(hw * y).sum(-1), (hw * x).sum(-1), error * 0.5 * z[:, 2]), -1)
+    thrust = (acc * rotation[:, :, 2]).sum(-1).clamp(*thrust_limits)
+    rates = torch.stack((-(hw * y).sum(-1), (hw * x).sum(-1), error * 0.5 * z[:, 2]), -1)
+    if rate_limit is not None:
+        rates = rates * (rate_limit / rates.norm(dim=-1, keepdim=True).clamp_min(1e-9)).clamp_max(1)
+    return torch.cat((thrust[:, None], rates), -1)
 
 
 class MPCActor(MLPModel):
@@ -39,6 +42,9 @@ class MPCActor(MLPModel):
         obs_normalization=False,
         distribution_cfg=None,
         qp_iterations=4096,
+        planner_params=None,
+        thrust_limits=(0.08 * 9.81 / 0.7, 0.9 * 9.81 / 0.7),
+        rate_limit=None,
     ):
         if output_dim != 4 or obs_normalization:
             raise ValueError("MPCActor needs four physical actions and fixed feature scaling")
@@ -51,7 +57,8 @@ class MPCActor(MLPModel):
         self.mlp = MLP(self.obs_dim, 7, hidden_dims, activation)
         torch.nn.init.zeros_(self.mlp[-1].weight)
         torch.nn.init.zeros_(self.mlp[-1].bias)
-        m = MPC(Config.load("avoid"))  # Avoid and forest share the published MPC parameters.
+        self.thrust_limits, self.rate_limit = thrust_limits, rate_limit
+        m = MPC(Config(planner_params) if planner_params else Config.load("avoid"))
         for name in ("M", "C", "q", "A0", "lower", "upper", "jlow", "jhigh", "a", "b"):
             self.register_buffer(name, torch.as_tensor(getattr(m, name), dtype=torch.float64))
         groups = []
@@ -132,9 +139,9 @@ class MPCActor(MLPModel):
         predicted = state @ self.a.T + jerk @ self.b.T
         rotation = obs["rotation"].reshape(-1, 3, 3).double()
         yaw = obs["yaw_target"].flatten().double()
-        mean = flatness_torch(predicted[:, 6:], jerk, rotation, yaw).float()
+        mean = flatness_torch(predicted[:, 6:], jerk, rotation, yaw, self.thrust_limits, self.rate_limit).float()
         backup_state = state @ self.a.T + backup @ self.b.T
-        self._backup = flatness_torch(backup_state[:, 6:], backup, rotation, yaw).float().detach()
+        self._backup = flatness_torch(backup_state[:, 6:], backup, rotation, yaw, self.thrust_limits, self.rate_limit).float().detach()
         self._braking = braking
         self.distribution.update(mean)
         self.last_result = dict(

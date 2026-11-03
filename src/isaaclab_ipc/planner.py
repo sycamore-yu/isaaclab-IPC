@@ -36,7 +36,14 @@ class Planner:
     def __init__(self, cfg, goal, *, cache_corridors=True):
         self.cfg = cfg
         self.mpc = MPC(cfg)
-        self.grid = _geometry.Grid()
+        frontend = cfg.params.get("frontend")
+        if frontend:
+            half = np.asarray(frontend["size"]) / 2
+            self.grid = _geometry.Grid(frontend["resolution"], -half, half, heuristic=0)
+            self.grid.center(frontend["center"])
+            self.grid.height_limits(frontend["workspace"][0][2], frontend["workspace"][1][2])
+        else:
+            self.grid = _geometry.Grid()
         self.goal = np.asarray(goal, dtype=float)
         self.goal[2] = np.clip(self.goal[2], 0.5, 2.5)
         self.frames = deque(maxlen=10)
@@ -44,6 +51,8 @@ class Planner:
         self.cache_corridors = cache_corridors
         self._corridor_cache = OrderedDict()
         self._corridor_cloud = self.cloud
+        self._grid_cloud = None
+        self._grid_radius = None
         self.corridor_evaluations = 0
         self.corridor_cache_hits = 0
         self.path = np.empty((0, 3))
@@ -62,14 +71,23 @@ class Planner:
         cloud = np.asarray(cloud, dtype=float).reshape(-1, 3)
         if not np.isfinite(cloud).all():
             raise ValueError("Point cloud must be finite")
-        self.frames.append(cloud.copy())
-        points = np.concatenate(self.frames)
-        valid = (np.abs(points[:, :2] - position[:2]) <= 9.5).all(1) & (points[:, 2] >= 0.2) & (points[:, 2] <= 3.0)
-        self.cloud = voxel_centroids(points[valid])
+        frontend = self.cfg.params.get("frontend")
+        if frontend:
+            # Fixed SUPER maps retain observed occupancy; never preload the full collision PCD.
+            points = np.vstack((self.cloud, cloud))
+            low, high = np.asarray(frontend["workspace"])
+            valid = ((points >= low) & (points <= high)).all(1)
+            self.cloud = voxel_centroids(points[valid], frontend["cloud_leaf"])
+        else:
+            self.frames.append(cloud.copy())
+            points = np.concatenate(self.frames)
+            valid = (np.abs(points[:, :2] - position[:2]) <= 9.5).all(1) & (points[:, 2] >= 0.2) & (points[:, 2] <= 3.0)
+            self.cloud = voxel_centroids(points[valid])
         self._corridor_cache.clear()
         self._corridor_cloud = self.cloud
-        self.grid.center([*position[:2], 0.0])
-        self.grid.cloud(self.cloud, self.cfg.params["astar"]["expand_fix"])
+        if not frontend:
+            self.grid.center([*position[:2], 0.0])
+        self._refresh_grid(self.cfg.params["astar"]["expand_fix"])
         if len(self.path) and not self.grid.path_free(self.path[self.nearest :]):
             self.replan = True
 
@@ -88,14 +106,29 @@ class Planner:
                 return p
         raise RuntimeError("No free A* endpoint in the local map")
 
+    def _refresh_grid(self, radius):
+        if self.cfg.params.get("frontend"):
+            if self.cloud is self._grid_cloud and radius == self._grid_radius:
+                return
+            self.grid.cloud_fast(self.cloud, radius)
+            self._grid_cloud, self._grid_radius = self.cloud, radius
+        else:
+            self.grid.cloud(self.cloud, radius)
+
     def _replan(self, position):
-        self.grid.cloud(self.cloud, self.cfg.params["astar"]["expand_dyn"])
+        self._refresh_grid(self.cfg.params["astar"]["expand_dyn"])
         start = position.copy()
         goal = self.goal.copy()
         delta = goal - position
-        extended = np.max(np.abs(delta[:2])) > 10
+        frontend = self.cfg.params.get("frontend")
+        extent = frontend["planning_horizon"] if frontend else 9.9
+        distance = np.linalg.norm(delta) if frontend else np.max(np.abs(delta[:2]))
+        extended = distance > (extent if frontend else 10)
         if extended:
-            goal[:2] = position[:2] + delta[:2] * 9.9 / np.max(np.abs(delta[:2]))
+            if frontend:
+                goal = position + delta * extent / distance
+            else:
+                goal[:2] = position[:2] + delta[:2] * extent / distance
         start = self._move_endpoint(start)
         goal = self._move_endpoint(goal)
         path = np.asarray(self.grid.search(start, goal))
@@ -104,7 +137,7 @@ class Planner:
             self.path = position[None].copy()
             self.replan = False
             return
-        if extended and self.grid.free(self.goal):
+        if extended and not frontend and self.grid.free(self.goal):
             path = np.vstack((path, self.goal))
         spacing = self.cfg.params["fsm"]["path_dis"]
         points = []
@@ -152,7 +185,12 @@ class Planner:
     def _generate_corridor(self, a, b, radius):
         self.corridor_evaluations += 1
         try:
-            planes = np.asarray(_geometry.corridor(a, b, self.cloud, radius)).reshape(-1, 4)
+            frontend = self.cfg.params.get("frontend")
+            if frontend:
+                planes = _geometry.corridor_numpy(a, b, self.cloud, radius, frontend["workspace"])
+            else:
+                planes = _geometry.corridor(a, b, self.cloud, radius)
+            planes = np.asarray(planes).reshape(-1, 4)
         except _geometry.CorridorError as exc:
             raise InvalidCorridorError(str(exc)) from exc
         if not np.isfinite(planes).all():
@@ -163,7 +201,12 @@ class Planner:
         """Return state, reference and scheduled SFC; callers own their snapshots."""
         state = self.cfg.profile.planner_state(state)
         position = np.asarray(state[:3])
-        if self.replan or not len(self.path):
+        frontend = self.cfg.params.get("frontend")
+        advance = (
+            frontend and len(self.path) and np.linalg.norm(self.path[-1] - self.goal) > 0.1
+            and np.linalg.norm(position - self.path[-1]) < frontend["receding_distance"]
+        )
+        if self.replan or not len(self.path) or advance:
             self._replan(position)
         path = self.path
         self.nearest = near = int(np.argmin(np.linalg.norm(path - position, axis=1)))

@@ -1,5 +1,6 @@
 """Standard DirectRLEnv task exposing immutable IPC context to the MPC actor."""
 
+import copy
 import json
 from pathlib import Path
 from time import perf_counter
@@ -101,7 +102,14 @@ class IPCMPCEnv(IPCEnv):
         self.episode_record_index[ids.cpu().numpy()] = -1
         for i in ids.cpu().tolist():
             stride = self.cfg.reference_strides[i % len(self.cfg.reference_strides)]
-            self.planners[i] = Planner(Config.load(self.cfg.scenario, stride, profile="real"), [self.cfg.goal_x, 0, 1])
+            if self.cfg.planner_params:
+                params = copy.deepcopy(self.cfg.planner_params)
+                params["fsm"]["ref_dis"] = stride
+                config = Config(params)
+            else:
+                config = Config.load(self.cfg.scenario, stride, profile="real")
+            goal = self.goal[i] if self.goal.ndim == 2 else self.goal
+            self.planners[i] = Planner(config, goal.cpu().numpy())
             self.command_violations[i] = self.thrust_violations[i] = self.state_violations[i] = 0
             self.qp_residual_max[i] = 0
             self.qp_failures[i] = 0
@@ -126,6 +134,12 @@ class IPCMPCEnv(IPCEnv):
         contexts = self.planning_batch.contexts(self.planners, values, clouds)
         for i, (planner, state, context) in enumerate(zip(self.planners, values, contexts, strict=True)):
             x, ref, corridor = context.state, context.reference, context.corridors
+            if elapsed[i] < self.cfg.mission_start_delay:
+                ref = np.zeros_like(ref)
+                ref[:, :3] = self.cfg.initial_position
+                # No waypoint is published yet: hold within the current SFC, including the feature snapshot.
+                current = next((faces for faces in corridor if len(faces)), np.empty((0, 4)))
+                corridor = [current] * len(ref)
             sfc_valid[i] = context.valid
             clearance = np.full(15, 10.0)
             if corridor:
@@ -219,7 +233,7 @@ class IPCMPCEnv(IPCEnv):
                 self.command_violations[i] += bool(
                     np.any((val < low - 0.001 - 0.001 * abs(low)) | (val > high + 0.001 + 0.001 * abs(high)))
                 )
-                self.thrust_violations[i] += not (0.08 * 9.81 / 0.7 <= sampled[i, 0] <= 0.9 * 9.81 / 0.7)
+                self.thrust_violations[i] += not (self.cfg.thrust_limits[0] <= sampled[i, 0] <= self.cfg.thrust_limits[1])
                 if data["sfc_valid"][i]:
                     self.qp_failures[i] += not data["solved"][i]
                     self.qp_residual_max[i] = max(self.qp_residual_max[i], float(data["primal"][i]))

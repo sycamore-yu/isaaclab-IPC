@@ -64,7 +64,7 @@ class AvoidScene:
         return float(np.linalg.norm(self.obstacle[:, :2] - position[:2], axis=1).min() - 0.25)
 
 
-def read_pcd(path):
+def read_pcd(path, *, drop_nan=False):
     with Path(path).open("rb") as f:
         header = {}
         while True:
@@ -79,12 +79,25 @@ def read_pcd(path):
             if key == "DATA":
                 break
         offset = f.tell()
-    if header["DATA"] != "binary" or set(header["TYPE"].split()) != {"F"} or set(header["SIZE"].split()) != {"4"}:
-        raise ValueError("Expected binary float32 PCD")
+    if set(header["TYPE"].split()) != {"F"} or set(header["SIZE"].split()) != {"4"}:
+        raise ValueError("Expected float32 PCD")
     fields = header["FIELDS"].split()
     count = int(header["POINTS"])
-    data = np.memmap(path, dtype=np.float32, mode="r", offset=offset, shape=(count, len(fields)))
+    if header.get("COUNT", " ".join(["1"] * len(fields))).split() != ["1"] * len(fields):
+        raise ValueError("Expected scalar PCD fields")
+    if header["DATA"] == "binary":
+        data = np.memmap(path, dtype=np.float32, mode="r", offset=offset, shape=(count, len(fields)))
+    elif header["DATA"] == "ascii":
+        with Path(path).open("rb") as f:
+            f.seek(offset)
+            data = np.loadtxt(f, dtype=np.float32, ndmin=2)
+        if data.shape != (count, len(fields)):
+            raise ValueError("PCD point count does not match header")
+    else:
+        raise ValueError("Expected binary or ASCII PCD")
     xyz = np.array(data[:, [fields.index(k) for k in "xyz"]])
+    if drop_nan:
+        xyz = xyz[~np.isnan(xyz).any(axis=1)]
     if not np.isfinite(xyz).all():
         raise ValueError("Nonfinite map")
     return xyz

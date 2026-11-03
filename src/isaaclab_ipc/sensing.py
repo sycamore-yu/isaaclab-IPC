@@ -25,8 +25,9 @@ def point_clearance(
 
 
 class ForestGeometry:
-    def __init__(self, folder, device="cuda:0"):
+    def __init__(self, folder, device="cuda:0", radius=0.25):
         self.device = device
+        self.radius = radius
         self.points = wp.array(np.load(Path(folder) / "points.npy"), dtype=wp.vec3, device=device)
         self.grid = wp.HashGrid(128, 128, 128, device=device)
         self.grid.build(self.points, 1.0)
@@ -37,7 +38,7 @@ class ForestGeometry:
         wp.launch(
             point_clearance,
             dim=len(positions),
-            inputs=[self.points, self.grid.id, wp.from_torch(positions, dtype=wp.vec3), 0.25, wp.from_torch(out)],
+            inputs=[self.points, self.grid.id, wp.from_torch(positions, dtype=wp.vec3), self.radius, wp.from_torch(out)],
             device=self.device,
         )
         return out

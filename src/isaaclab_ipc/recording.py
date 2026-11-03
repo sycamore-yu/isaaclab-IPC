@@ -41,13 +41,28 @@ def corridor_edges(planes):
     return vertices[np.array(sorted(edges), dtype=int)].reshape(-1, 2, 3)
 
 
-def forest_blueprint(goal_x):
+def forest_blueprint(goal_x, route=None, map_colors=None):
+    eye, target = (goal_x / 2, -12, 14), (goal_x / 2, 0, 1)
+    up, overrides = (0, 0, 1), {}
+    if route is not None:
+        route = np.asarray(route)
+        center = (route.min(0) + route.max(0)) / 2
+        extent = max(np.ptp(route, axis=0).max(), 10)
+        target, eye, up = center, center + extent * np.array([0, 0, .55]), (1, 0, 0)
+        overrides = {
+            "/world/map": rr.Points3D.from_fields(radii=rr.Radius.ui_points(.65), colors=map_colors),
+            "/world/trajectory": rr.LineStrips3D.from_fields(radii=rr.Radius.ui_points(1.8)),
+            "/world/start_goal": rr.Points3D.from_fields(radii=rr.Radius.ui_points(3)),
+            "/world/active_goal": rr.Points3D.from_fields(radii=rr.Radius.ui_points(4)),
+        }
     overview = rrb.Spatial3DView(
         origin="/world",
-        name="Whole route",
+        name="Whole map · green: z≥0.2 m" if route is not None else "Whole route",
         contents=["/world/**", "-/world/sfc/**", "-/world/reference/**", "-/world/prediction/**"],
+        overrides=overrides,
+        line_grid=False if route is not None else True,
         eye_controls=rrb.EyeControls3D(
-            position=(goal_x / 2, -12, 14), look_target=(goal_x / 2, 0, 1), eye_up=(0, 0, 1)
+            position=eye, look_target=target, eye_up=up
         ),
     )
     return rrb.Blueprint(
@@ -55,6 +70,7 @@ def forest_blueprint(goal_x):
             rrb.Spatial3DView(
                 origin="/world",
                 name="SFC · follow drone",
+                overrides={"/world/map": rr.Points3D.from_fields(colors=map_colors)} if map_colors is not None else None,
                 eye_controls=rrb.EyeControls3D(
                     position=(3, -8, 6), look_target=(0, 0, 1), eye_up=(0, 0, 1), tracking_entity="/world/drone/body"
                 ),
@@ -62,7 +78,7 @@ def forest_blueprint(goal_x):
             rrb.Vertical(
                 overview,
                 rrb.TimeSeriesView(origin="/metrics", name="Speed / clearance / braking"),
-                rrb.TextDocumentView(origin="/status", name="Controller and legend"),
+                rrb.TextDocumentView(origin="/status/current", name="Controller / result"),
                 row_shares=[3, 2, 2],
             ),
             column_shares=[3, 2],
@@ -81,18 +97,33 @@ class ForestRecording:
             raise ValueError("Forest recording requires one forest environment")
         path.parent.mkdir(parents=True, exist_ok=True)
         self.env, self.policy = env, policy
+        route = None
+        self.route_label = f"{env.cfg.goal_x:g} m"
+        if hasattr(env.cfg, "super_case"):
+            route = np.vstack((env.cfg.initial_position, env.waypoints.cpu().numpy()))
+            self.route_label = f"SUPER {env.cfg.super_case} · out-and-back"
         self.trail = []
         self.mode = None
-        self.stream = rr.RecordingStream(f"IPC forest {env.cfg.goal_x:g}m — {policy}")
-        self.stream.save(path, default_blueprint=forest_blueprint(env.cfg.goal_x))
-        self.stream.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+        self.active_waypoint = None
         points = np.load(Path(env.cfg.scene.forest.spawn.usd_path).parent / "points.npy", mmap_mode="r")
+        map_colors = None
+        if route is not None:
+            map_colors = np.where((points[:, 2] >= .2)[:, None], [100, 165, 120], [40, 48, 44]).astype(np.uint8)
+        self.stream = rr.RecordingStream(f"IPC {self.route_label} — {policy}")
+        self.stream.save(path, default_blueprint=forest_blueprint(env.cfg.goal_x, route, map_colors))
+        self.stream.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
+        if map_colors is not None:
+            self.stream.log("status/map_legend", rr.TextDocument("Map: gray z<0.2 m; green elevated map points."), static=True)
         crop = (points[:, 0] > -2) & (points[:, 0] < env.cfg.goal_x + 3) & (abs(points[:, 1]) < 5)
+        if route is not None:
+            crop = np.ones(len(points), dtype=bool)
         self.stream.log("world/map", rr.Points3D(points[crop], radii=0.015, colors=[95, 118, 105]), static=True)
         self.stream.log(
             "world/start_goal",
             rr.Points3D(
-                [[0, 0, 1], [env.cfg.goal_x, 0, 1]], radii=0.16, colors=[255, 230, 90], labels=["Start", "Goal"]
+                [[0, 0, 1], [env.cfg.goal_x, 0, 1]] if route is None else route[:2],
+                radii=0.16, colors=[255, 230, 90],
+                labels=["Start", "Goal"] if route is None else ["Start / Return", "Outbound"],
             ),
             static=True,
         )
@@ -158,7 +189,7 @@ class ForestRecording:
         r.log(
             "status/current",
             rr.TextDocument(
-                f"{self.policy} | Newton real | {env.cfg.goal_x:g} m\n"
+                f"{self.policy} | Newton real | {self.route_label}\n"
                 f"SFC valid: {mode[0]} | QP solved: {mode[1]} | braking: {mode[2]}\n"
                 f"Frontend failures: {planner.frontend_failures} | recoveries: {planner.recovery_events}\n\n"
                 "Blue: actual flight\nWhite: reference\nMagenta: accepted QP prediction\n"
@@ -173,6 +204,12 @@ class ForestRecording:
         r.set_time("sim_time", duration=t)
         pose, twist = env.body_state()
         position = (pose[0, :3] - env.scene.env_origins[0]).cpu().numpy()
+        if hasattr(env, "waypoint_ids"):
+            waypoint = int(env.waypoint_ids[0])
+            if waypoint != self.active_waypoint:
+                self.active_waypoint = waypoint
+                r.log("world/active_goal", rr.Points3D(
+                    env.goal[:1].cpu().numpy(), radii=.3, colors=[255, 230, 90], labels=[f"Waypoint {waypoint + 1}"]))
         self.trail.append(position)
         r.log(
             "world/drone", rr.Transform3D(translation=position, rotation=rr.Quaternion(xyzw=pose[0, 3:].cpu().numpy()))
@@ -186,12 +223,14 @@ class ForestRecording:
         r.log("metrics/braking", rr.Scalars(float(env.planners[0].braking)))
         if env.reported[0]:
             row = env.records[-1]
-            r.log(
-                "status/outcome",
-                rr.TextDocument(
-                    f"Reached: {row['success']}\nCollision: {row['collision']}\nTime: {t:.2f} s\nMinimum clearance: {clearance:.3f} m"
-                ),
+            mission = ""
+            if "waypoints_reached" in row:
+                mission = f"\nWaypoints: {row['waypoints_reached']}/2\nPeak speed: {row['peak_actual_speed_mps']:.2f} m/s"
+            outcome = rr.TextDocument(
+                f"Reached: {row['success']}\nCollision: {row['collision']}\nTime: {t:.2f} s\nMinimum clearance: {clearance:.3f} m{mission}"
             )
+            r.log("status/outcome", outcome)
+            r.log("status/current", outcome)
 
     def close(self):
         self.stream.flush()

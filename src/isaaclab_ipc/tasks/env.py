@@ -41,6 +41,14 @@ class IPCEnvCfg(DirectRLEnvCfg):
     scenario = "avoid"
     obstacle_distance = 1.0
     goal_x = 10.0
+    initial_position = (0.0, 0.0, 1.0)
+    initial_yaw = 0.0
+    mission_start_delay = 0.0
+    goal_tolerance = 0.5
+    sensor_blind = 0.3
+    sensor_return_max = float("inf")
+    planner_params = None
+    thrust_limits = (0.08 * 9.81 / 0.7, 0.9 * 9.81 / 0.7)
     collision_radius = 0.25
     automatic_reset = True
     events = IPCEventsCfg()
@@ -132,6 +140,7 @@ class IPCEnv(DirectRLEnv):
             self.forest_geometry = ForestGeometry(
                 Path(cfg.scene.forest.spawn.usd_path).parent,
                 self.device,
+                radius=cfg.collision_radius,
             )
         self.origin_wp = wp.from_torch(self.scene.env_origins, dtype=wp.vec3)
         self.obstacle_y_wp = wp.from_torch(self.obstacle_y)
@@ -159,7 +168,7 @@ class IPCEnv(DirectRLEnv):
         sensor = self.scene["mid360"]
         hits = sensor.data.ray_hits_w.torch[ids] - self.scene.env_origins[ids, None, :]
         position = self.body_state()[0][ids, :3] - self.scene.env_origins[ids]
-        return batch_clouds_to_host(hits, position)
+        return batch_clouds_to_host(hits, position, self.cfg.sensor_blind, self.cfg.sensor_return_max)
 
     def acceleration(self):
         data = self.scene["pva"].data
@@ -239,7 +248,7 @@ class IPCEnv(DirectRLEnv):
         self.hit |= clearance <= 0
         pose, _ = self.body_state()
         p = pose[:, :3] - self.scene.env_origins
-        success = (p - self.goal).norm(dim=-1) < 0.5
+        success = (p - self.goal).norm(dim=-1) < self.cfg.goal_tolerance
         self.extras["success"] = success.clone()
         self.extras["collision"] = self.hit.clone()
         self.extras["terminal_position"] = p.clone()
