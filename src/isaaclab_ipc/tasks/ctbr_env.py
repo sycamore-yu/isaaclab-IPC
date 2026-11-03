@@ -12,7 +12,7 @@ from isaaclab_ipc.corridor_storage import pack_corridors
 from isaaclab_ipc.ctbr_reference import (
     REFERENCE_DIAGNOSTIC_FIELDS as REFERENCE_DIAGNOSTICS,
 )
-from isaaclab_ipc.ctbr_reference import CTBRReferenceConfig, adapt_ctbr_reference
+from isaaclab_ipc.ctbr_reference import REFERENCE_GOVERNOR_VERSION, CTBRReferenceConfig, adapt_ctbr_reference
 from isaaclab_ipc.turbompc.ctbr import CTBRConfig
 from isaaclab_ipc.turbompc.quadrotor import body_rates_from_isaac, reference_from_ipc, state_from_isaac
 
@@ -118,12 +118,17 @@ class CTBRMPCEnv(IPCMPCEnv):
             "model_body_rate_limits_rad_s": self.ctbr_config.body_rate_limits,
             "model_specific_thrust_limits_m_s2": self.ctbr_config.specific_thrust_limits,
             "reference_adaptation": {
-                "version": 1,
+                "version": REFERENCE_GOVERNOR_VERSION,
                 "options": asdict(CTBRReferenceConfig()),
                 "diagnostic_fields": list(REFERENCE_DIAGNOSTICS),
                 "policy_features": CTBR_FEATURES,
                 "scope": "Frozen rollout reference adaptation; actual measured state and original physical bounds are unchanged",
-                "backup_scope": "A bounded constructive backup in one original polytope; virtual-speed checks do not certify the actual state or the returned multi-polytope schedule",
+                "backup_scope": (
+                    "Actual-state backups check the full original polytope. Virtual-speed backups additionally "
+                    "stay within that same polytope's current horizontal clearance radius. These finite witnesses "
+                    "do not certify the returned multi-polytope schedule, Newton tracking or future geometry."
+                ),
+                "reference_policy": "Conservative local horizontal maneuver reserve derived only from currently observed original SFC faces",
                 "not_certified_meaning": "The particular backup was not certified, not a proof that the original problem is infeasible",
                 "geometry_validity_unchanged": True,
             },

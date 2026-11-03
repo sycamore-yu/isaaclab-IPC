@@ -11,9 +11,13 @@ import torch
 
 from isaaclab_ipc.ctbr_reference import (
     REFERENCE_DIAGNOSTIC_FIELDS,
+    REFERENCE_GOVERNOR_VERSION,
     CTBRReferenceConfig,
     ReferenceReason,
+    _backup,
     _ctbr_step,
+    _horizontal_radius,
+    _policy_table,
     adapt_ctbr_reference,
 )
 from isaaclab_ipc.frontend import PlanningContext
@@ -77,11 +81,14 @@ def test_numpy_discrete_map_preserves_canonical_raw_quaternion_semantics(rate_sc
 @pytest.mark.parametrize("speed", [2.0, 4.0])
 def test_open_geometry_identity_has_complete_actual_and_distinct_virtual_witnesses(speed):
     context, state, path = straight_context(speed=speed)
+    # V2's wide-open identity has large clearance in every horizontal direction.
+    context.corridors = [box(10, xmin=-10, ymin=-10, ymax=10)] * 15
     original = [a.tobytes() for a in (context.state, context.reference, state, path, context.corridors[0])]
     for value in (context.state, context.reference, state, path, context.corridors[0]):
         value.flags.writeable = False
     adapted, diagnostics = adapt_ctbr_reference(context, state, CTBRConfig(), path=path, nearest=0)
     assert adapted is context and diagnostics["reason_code"] == ReferenceReason.IDENTITY_CERTIFIED
+    assert diagnostics["version"] == REFERENCE_GOVERNOR_VERSION == 2
     assert diagnostics["reference_scale"] == 1 and diagnostics["actual_backup_matches_returned_schedule"]
     assert diagnostics["actual_backup"]["state_kind"] == "measured"
     assert diagnostics["selected_backup"]["state_kind"] == "virtual_path_speed_at_measured_pose"
@@ -93,6 +100,10 @@ def test_open_geometry_identity_has_complete_actual_and_distinct_virtual_witness
     assert adapted.reference[0, 0] < state[0] and adapted.reference[0, 3] < 0
     for name in ("actual_backup", "selected_backup"):
         assert_original_witness(diagnostics[name], CTBRConfig(), context.corridors[0])
+    selected = diagnostics["selected_backup"]
+    assert not diagnostics["actual_backup"]["horizontal_reserve_required"]
+    assert selected["horizontal_reserve_required"]
+    assert selected["horizontal_max_excursion"] <= selected["horizontal_clearances"][selected["corridor"]]
     assert original == [a.tobytes() for a in (context.state, context.reference, state, path, context.corridors[0])]
     assert np.isfinite([diagnostics[k] for k in REFERENCE_DIAGNOSTIC_FIELDS]).all()
 
@@ -214,6 +225,9 @@ def test_saved_infeasible_nav_state_is_not_certified_or_rewritten():
     assert not diagnostics["actual_backup_matches_returned_schedule"]
     assert diagnostics["evaluated_speeds"] == []
     assert diagnostics["actual_backup"]["reason"] in ("left_every_single_polytope", "physical_bound_or_nonfinite")
+    backup = diagnostics["actual_backup"]
+    assert not backup["horizontal_reserve_required"]
+    assert backup["horizontal_max_excursion"] == np.linalg.norm(backup["states"][:, :2] - state[:2], axis=1).max()
     np.testing.assert_array_equal(state, original[0])
     np.testing.assert_array_equal(context.state, original[1])
     np.testing.assert_array_equal(context.reference, original[2])
@@ -238,3 +252,71 @@ def test_unavailable_certificate_preserves_geometry_and_identity(mode):
     assert result is context and diagnostics["reason_code"] == expected
     assert not diagnostics["applied"] and result.valid == context.valid
     assert before == (context.state.tobytes(), context.reference.tobytes(), context.corridors[0].tobytes())
+
+
+def test_horizontal_disc_uses_all_faces_at_actual_height_and_ignores_caps():
+    position = np.array([1.0, 2.0, 3.0])
+    planes = np.array([[3.0, 4, 0, -17], [0, -2, 0, 1], [1, 0, 2, -8], [2, 0, 4, -16], [0, 0, 1, -3.0000001]])
+    # Horizontal distances are 6/5, 3/2, 1, 1; the close ceiling imposes no horizontal cap.
+    assert _horizontal_radius(planes, position) == 1.0
+    assert _horizontal_radius(planes * np.array([2, 3, 0.5, 7, 9])[:, None], position) == 1.0
+    circle = position + np.column_stack(
+        (np.cos(np.linspace(0, 2 * np.pi, 33)), np.sin(np.linspace(0, 2 * np.pi, 33)), np.zeros(33))
+    )
+    assert (circle @ planes[:, :3].T + planes[:, 3] <= 0).all()
+    assert ((position + [1.01, 0, 0]) @ planes[:, :3].T + planes[:, 3] > 0).any()
+
+
+def test_reference_reserve_does_not_reclassify_actual_full_face_backup():
+    context, state, path = straight_context()
+    state[7] = context.state[3] = 2.0
+    context.corridors = [box(10, xmin=-10, ymin=-0.3, ymax=0.3)] * 15
+    result, diagnostics = adapt_ctbr_reference(context, state, CTBRConfig(), path=path, nearest=0)
+    actual, virtual = diagnostics["actual_backup"], diagnostics["selected_backup"]
+    assert result is not context and diagnostics["actual_backup_certified"]
+    assert not actual["horizontal_reserve_required"] and actual["horizontal_clearances"] is None
+    assert actual["horizontal_max_excursion"] > 0.3
+    assert virtual["horizontal_reserve_required"] and virtual["horizontal_max_excursion"] <= 0.3
+    assert 0 < diagnostics["selected_speed"] < diagnostics["nominal_speed"]
+    assert diagnostics["evaluated_speeds"][0]["reason"] == "horizontal_reserve_not_verified"
+    np.testing.assert_array_equal(actual["states"][0], state)
+    assert_original_witness(actual, CTBRConfig(), context.corridors[0])
+    assert_original_witness(virtual, CTBRConfig(), context.corridors[0])
+
+
+def test_same_polytope_must_provide_the_radius_and_the_entire_three_dimensional_witness():
+    model, options = CTBRConfig(), CTBRReferenceConfig()
+    table = _policy_table(model, options)
+    state = np.array([0.0, 0, 1, 1, 0, 0, 0, 2.0, 0, 0.1])
+    wide_but_low = box(10, xmin=-10, ymin=-10, ymax=10)
+    wide_but_low[4, 3] = -1.005
+    narrow_but_high = box(10, xmin=-10, ymin=-0.3, ymax=0.3)
+    original = _backup(state, [wide_but_low, narrow_but_high], model, options, table)
+    checked = _backup(state, [wide_but_low, narrow_but_high], model, options, table, require_horizontal_reserve=True)
+    assert original["certified"] and original["corridor"] == 1
+    assert not checked["certified"] and checked["reason"] == "horizontal_reserve_not_verified"
+    assert checked["horizontal_clearances"].tolist() == [10.0, 0.3]
+    assert np.linalg.norm(checked["states"][1, :2] - state[:2]) < 0.3
+    assert checked["horizontal_max_excursion"] > 0.3 and len(checked["states"]) > 2
+    # The large-radius polytope fails at z1: borrowing that radius would be incorrect.
+    assert checked["states"][1, 2] > 1.005
+    assert checked["horizontal_max_excursion"] == np.linalg.norm(checked["states"][:, :2] - state[:2], axis=1).max()
+    high_and_wide = box(10, xmin=-10, ymin=-10, ymax=10)
+    accepted = _backup(state, [narrow_but_high, high_and_wide], model, options, table, require_horizontal_reserve=True)
+    assert accepted["certified"] and accepted["corridor"] == 1
+    assert_original_witness(accepted, model, high_and_wide)
+
+
+def test_pure_vertical_caps_give_no_horizontal_cap_but_still_constrain_the_full_trajectory():
+    model, options = CTBRConfig(), CTBRReferenceConfig()
+    table = _policy_table(model, options)
+    state = np.array([0.0, 0, 1, 1, 0, 0, 0, 4.0, 0, 0])
+    caps = np.array([[0.0, 0, 1, -1.000001], [0, 0, -1, 0.999999]])
+    result = _backup(state, [caps], model, options, table, require_horizontal_reserve=True)
+    assert result["certified"] and np.isinf(result["horizontal_clearances"][0])
+    assert result["horizontal_max_excursion"] > 1
+    assert_original_witness(result, model, caps)
+    state[9] = 0.1
+    failed = _backup(state, [caps], model, options, table, require_horizontal_reserve=True)
+    assert not failed["certified"] and failed["reason"] == "left_every_single_polytope"
+    assert failed["horizontal_max_excursion"] == np.linalg.norm(failed["states"][:, :2] - state[:2], axis=1).max()

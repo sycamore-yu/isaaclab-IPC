@@ -1,8 +1,10 @@
 """Cost-independent, local CTBR braking witnesses for reference progression.
 
 The witness uses the canonical discrete prediction model, not Newton physics.
-It stays in one unchanged current polytope. A verified virtual speed is not a
-certificate for the measured state, the returned MPC schedule, or future maps.
+Virtual-speed witnesses additionally fit their whole horizontal excursion in
+the current-height inscribed disc of the same unchanged polytope. This finite,
+single-trajectory reference policy is not a certificate for the measured state,
+the returned MPC schedule, arbitrary maneuvers, or future unseen obstacles.
 """
 
 from dataclasses import dataclass, replace
@@ -10,7 +12,7 @@ from enum import IntEnum
 
 import numpy as np
 
-REFERENCE_GOVERNOR_VERSION = 1
+REFERENCE_GOVERNOR_VERSION = 2
 REFERENCE_DIAGNOSTIC_FIELDS = (
     "version",
     "applied",
@@ -135,11 +137,21 @@ def _inside(polytope, position):
     return bool(np.all(polytope[:, :3] @ position + polytope[:, 3] <= 0.0))
 
 
-def _backup(initial, polytopes, model, options, table):
+def _horizontal_radius(polytope, position):
+    """Largest centered horizontal disc at the actual height; caps do not limit it."""
+    norms = np.hypot(polytope[:, 0], polytope[:, 1])
+    keep = norms > 0
+    slack = -(polytope[:, :3] @ position + polytope[:, 3])
+    return float(np.min(slack[keep] / norms[keep])) if keep.any() else np.inf
+
+
+def _backup(initial, polytopes, model, options, table, *, require_horizontal_reserve=False):
     state = initial.copy()
     states, controls, accelerations = [state.copy()], [], []
-    survivors = np.array([_inside(p, state[:3]) for p in polytopes])
-    physical_max = 0.0
+    geometric_survivors = np.array([_inside(p, state[:3]) for p in polytopes])
+    survivors = geometric_survivors.copy()
+    radii = np.array([_horizontal_radius(p, state[:3]) for p in polytopes]) if require_horizontal_reserve else None
+    physical_max, horizontal_max = 0.0, 0.0
     reason, stopped = "no_containing_polytope", 0
     for _ in range(options.max_backup_steps if survivors.any() else 0):
         control = _brake_control(state, model, table)
@@ -148,6 +160,7 @@ def _backup(initial, polytopes, model, options, table):
         controls.append(control)
         accelerations.append(acceleration)
         states.append(following.copy())
+        horizontal_max = max(horizontal_max, float(np.linalg.norm(following[:2] - initial[:2])))
         limits = np.r_[model.mass * np.asarray(model.specific_thrust_limits)[:1], -np.asarray(model.body_rate_limits)]
         caps = np.r_[model.mass * np.asarray(model.specific_thrust_limits)[1:], model.body_rate_limits]
         physical_max = max(
@@ -168,9 +181,15 @@ def _backup(initial, polytopes, model, options, table):
         if not np.isfinite(following).all() or not np.isfinite(acceleration).all() or physical_max > 0:
             reason = "physical_bound_or_nonfinite"
             break
-        survivors &= [_inside(p, following[:3]) for p in polytopes]
-        if not survivors.any():
+        geometric_survivors &= [_inside(p, following[:3]) for p in polytopes]
+        if not geometric_survivors.any():
             reason = "left_every_single_polytope"
+            break
+        survivors = (
+            geometric_survivors if not require_horizontal_reserve else geometric_survivors & (horizontal_max <= radii)
+        )
+        if not survivors.any():
+            reason = "horizontal_reserve_not_verified"
             break
         unit_z = _rotation(following[3:7])[:, 2] / np.dot(following[3:7], following[3:7])
         tilt = np.arctan2(np.linalg.norm(unit_z[:2]), unit_z[2])
@@ -197,6 +216,9 @@ def _backup(initial, polytopes, model, options, table):
         "states": trajectory,
         "controls": np.asarray(controls).reshape(-1, 4),
         "accelerations": np.asarray(accelerations).reshape(-1, 3),
+        "horizontal_reserve_required": require_horizontal_reserve,
+        "horizontal_clearances": radii,
+        "horizontal_max_excursion": horizontal_max,
         "max_physical_violation": physical_max,
         "terminal_speed": float(np.linalg.norm(trajectory[-1, 7:])),
         "max_plane_violation": max(
@@ -273,12 +295,25 @@ def adapt_ctbr_reference(context, ctbr_state, model, *, path=None, nearest=None,
     diagnostics = dict(
         zip(
             REFERENCE_DIAGNOSTIC_FIELDS,
-            (1, False, int(ReferenceReason.NO_FORWARD_PATH), False, False, False, 1.0, 0.0, 0.0, 0, 0, -1),
+            (
+                REFERENCE_GOVERNOR_VERSION,
+                False,
+                int(ReferenceReason.NO_FORWARD_PATH),
+                False,
+                False,
+                False,
+                1.0,
+                0.0,
+                0.0,
+                0,
+                0,
+                -1,
+            ),
             strict=True,
         )
     )
     diagnostics.update(
-        scope="local actual/virtual braking witnesses; not a certificate of returned NLP or Newton safety",
+        scope="finite local braking and virtual horizontal-reserve policy; no returned-NLP, Newton, or future-obstacle guarantee",
         original_reference=reference.copy(),
         adapted_reference=reference.copy(),
         evaluated_speeds=[],
@@ -340,7 +375,7 @@ def adapt_ctbr_reference(context, ctbr_state, model, *, path=None, nearest=None,
     for speed in np.linspace(nominal_speed, 0.0, options.speed_samples):
         virtual = state.copy()
         virtual[7:9] = lateral + speed * tangent
-        backup = _backup(virtual, polytopes, model, options, table)
+        backup = _backup(virtual, polytopes, model, options, table, require_horizontal_reserve=True)
         backup["state_kind"] = "virtual_path_speed_at_measured_pose"
         diagnostics["evaluated_speeds"].append(
             {
@@ -348,6 +383,9 @@ def adapt_ctbr_reference(context, ctbr_state, model, *, path=None, nearest=None,
                 "certified": backup["certified"],
                 "reason": backup["reason"],
                 "steps": backup["steps"],
+                "horizontal_clearances": backup["horizontal_clearances"].copy(),
+                "horizontal_max_excursion": backup["horizontal_max_excursion"],
+                "corridor": backup["corridor"],
             }
         )
         if speed == nominal_speed:
