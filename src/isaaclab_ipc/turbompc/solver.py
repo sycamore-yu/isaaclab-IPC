@@ -52,6 +52,8 @@ class MPCResult:
     nx: int
     # errors[:, 2] remains the original physical inequality violation.
     normal_cone_error: torch.Tensor | None = None
+    # Optional numerical refinement keeps its certificate separate from raw ADMM.
+    polish: object | None = None
 
     @property
     def states(self):
@@ -129,22 +131,41 @@ def _parameter_gradients(z, y, v, w, wg, good, active, active_lower, active_uppe
 
 class _ImplicitTrajectory(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x0, d, e, q, g, lower, upper, trajectory, lambda0, lambda_dyn, y, status, solver):
+    def forward(
+        ctx, x0, d, e, q, g, lower, upper, trajectory, lambda0, lambda_dyn, y, status, solver, active_mask=None
+    ):
         ctx.solver = solver
-        ctx.save_for_backward(x0, d, e, q, g, lower, upper, trajectory, lambda0, lambda_dyn, y, status)
+        ctx.has_active_mask = active_mask is not None
+        ctx.save_for_backward(
+            x0,
+            d,
+            e,
+            q,
+            g,
+            lower,
+            upper,
+            trajectory,
+            lambda0,
+            lambda_dyn,
+            y,
+            status,
+            *([active_mask] if ctx.has_active_mask else []),
+        )
         return trajectory.clone()
 
     @staticmethod
     @once_differentiable
     def backward(ctx, upstream):
-        x0, d, e, q, g, lower, upper, z, lambda0, lambda_dyn, y, status = ctx.saved_tensors
+        x0, d, e, q, g, lower, upper, z, lambda0, lambda_dyn, y, status = ctx.saved_tensors[:12]
+        active_mask = ctx.saved_tensors[12] if ctx.has_active_mask else None
+        non_parameter_gradients = (None,) * (len(ctx.needs_input_grad) - 7)
         inputs = MPCInputs(x0, d, e, q, g, lower, upper)
         good = status == 0
         if good.all():
             safe_inputs, z_safe, ld_safe, y_safe = inputs, z, lambda_dyn, y
         else:
             if not good.any():
-                return *[torch.zeros_like(getattr(inputs, f.name)) for f in fields(inputs)], *([None] * 6)
+                return *[torch.zeros_like(getattr(inputs, f.name)) for f in fields(inputs)], *non_parameter_gradients
             # Invalid samples must not create singular/NaN systems even at zero RHS.
             template = good.to(torch.int32).argmax().reshape(1)
 
@@ -153,9 +174,12 @@ class _ImplicitTrajectory(torch.autograd.Function):
 
             safe_inputs = MPCInputs(*[safe(getattr(inputs, f.name)) for f in fields(inputs)])
             z_safe, ld_safe, y_safe = safe(z), safe(lambda_dyn), safe(y)
+            if active_mask is not None:
+                active_mask = safe(active_mask)
         solver = ctx.solver
+        arguments = (safe_inputs, z_safe, ld_safe, y_safe, good, upstream)
         qp, hessian, active, parameter_active, active_lower, active_upper, parameter_y, masked_upstream = (
-            solver._adjoint_data(safe_inputs, z_safe, ld_safe, y_safe, good, upstream)
+            solver._adjoint_data(*arguments) if active_mask is None else solver._adjoint_data(*arguments, active_mask)
         )
         adjoint = solver._adjoint(qp)
         v, w, wg = adjoint.solve(qp, hessian, active, masked_upstream)
@@ -174,7 +198,7 @@ class _ImplicitTrajectory(torch.autograd.Function):
             solver.dynamics.nx,
             ctx.needs_input_grad[:7],
         )
-        return *gradients, *([None] * 6)
+        return *gradients, *non_parameter_gradients
 
 
 class TorchMPC:
@@ -195,9 +219,11 @@ class TorchMPC:
         admm_config: ADMMConfig | None = None,
         *,
         constraints: PathConstraints | None = None,
+        polisher=None,
     ):
         self.dynamics = dynamics
         self.constraints = constraints
+        self.polisher = polisher
         self.config = config or SQPConfig()
         self.admm = NativeADMM(admm_config)
         if self.config.max_iter < 1 or self.config.tolerance <= 0:
@@ -358,7 +384,7 @@ class TorchMPC:
         status = torch.where(running & (~finite | (candidate.status == 4)), 3, status)
         return z, admm, qp, status, iterations, errors, normal_cone, (status != -1).all()
 
-    def _adjoint_data(self, inputs, z, lambda_dyn, y, good, upstream):
+    def _adjoint_data(self, inputs, z, lambda_dyn, y, good, upstream, active_mask=None):
         """Assemble exact curvature and active rows before the native KKT solve."""
         qp = self._qp(inputs, z)
         # This exact class has zero curvature. Keep its cost storage read-only;
@@ -373,6 +399,8 @@ class TorchMPC:
             active, active_lower, active_upper = self._active_sets(
                 qp.G, qp.lower, qp.upper, z, y, self.admm.config.eps_abs, self.admm.config.eps_rel
             )
+            if active_mask is not None:
+                active = active_mask
             parameter_active = active
         else:
             linear_rows = inputs.G.shape[-2]
@@ -389,6 +417,9 @@ class TorchMPC:
             path_active, _, _ = self._path_active_sets(
                 z, path_y, max(self.admm.config.eps_abs, self.config.tolerance), self.admm.config.eps_rel
             )
+            if active_mask is not None:
+                parameter_active = active_mask[..., :linear_rows]
+                path_active = active_mask[..., linear_rows:]
             # Do not mutate qp.D when affine dynamics share its storage. An
             # inactive multiplier cannot contribute constraint curvature.
             hessian = hessian + self._constraint_hessian(z, torch.where(path_active, path_y, 0.0))
@@ -410,6 +441,9 @@ class TorchMPC:
     def solve(self, inputs: MPCInputs, initial_guess: MPCResult | torch.Tensor | None = None):
         if inputs.q.ndim != 3 or inputs.q.shape[-1] <= self.dynamics.nx:
             raise ValueError("Expected q[B,N+1,nx+nu]")
+        if self.polisher is not None:
+            # Validate the original gradient contract before numerical detaching.
+            self.polisher.validate_inputs(inputs, self.dynamics)
         inputs = replace(inputs, D=0.5 * (inputs.D + inputs.D.transpose(-1, -2)))
         with torch.inference_mode(False), torch.no_grad():
             # SQP is a numerical forward; derivatives enter only through the
@@ -441,6 +475,20 @@ class TorchMPC:
                 if done:
                     break
             status = torch.where(status == -1, 1, status)
+            polished, active_mask, duals = None, None, admm
+            if self.polisher is not None:
+                polished = self.polisher(self, forward_inputs, z, admm, (status == 0) & (admm.status == 0))
+                z, duals, active_mask = polished.trajectory, polished, polished.active_mask
+                qp = self._qp(forward_inputs, z)
+                errors = self._errors(forward_inputs, qp, z, duals)
+                valid = (polished.status == 0) & torch.isfinite(errors).all(-1)
+                valid = valid & (errors.amax(-1) <= self.config.tolerance)
+                if self.constraints is not None:
+                    normal_cone = self._path_normal_cone(z, duals.y[..., inputs.G.shape[-2] :]).flatten(1).amax(-1)
+                    valid = valid & torch.isfinite(normal_cone) & (normal_cone <= self.config.tolerance)
+                # Code 4 is a failed optional refinement, never a rewritten raw
+                # QP status. It follows the same zero-gradient failure contract.
+                status = torch.where((status == 0) & ~valid, 4, status)
         trajectory = _ImplicitTrajectory.apply(
             inputs.initial_state,
             inputs.D,
@@ -450,13 +498,14 @@ class TorchMPC:
             inputs.lower,
             inputs.upper,
             z,
-            admm.lambda0,
-            admm.lambda_dyn,
-            admm.y,
+            duals.lambda0,
+            duals.lambda_dyn,
+            duals.y,
             status,
             self,
+            active_mask,
         )
-        return MPCResult(trajectory, status, iterations, errors, admm, self.dynamics.nx, normal_cone)
+        return MPCResult(trajectory, status, iterations, errors, admm, self.dynamics.nx, normal_cone, polished)
 
     def close(self):
         self.admm.close()

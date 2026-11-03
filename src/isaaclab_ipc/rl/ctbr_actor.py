@@ -8,6 +8,7 @@ from isaaclab_ipc.assets.quadrotor import MASS
 from isaaclab_ipc.execution import brake_jerk, next_braking
 from isaaclab_ipc.turbompc import ADMMConfig, SQPConfig, TorchMPC
 from isaaclab_ipc.turbompc.ctbr import CTBRConfig, CTBRQPBuilder
+from isaaclab_ipc.turbompc.ctbr_polish import CTBRPolisher
 from isaaclab_ipc.turbompc.quadrotor import controls_to_actions
 
 from .actor import MPCActor, flatness_torch
@@ -29,6 +30,9 @@ class CTBRMPCActor(MPCActor):
         sqp_iterations=60,
         sqp_tolerance=1e-7,
         admm_tolerance=1e-8,
+        polish_iterations=4,
+        polish_tolerance=1e-11,
+        polish_linear_refinements=2,
         **kwargs,
     ):
         super().__init__(*args, qp_iterations=qp_iterations, **kwargs)
@@ -51,6 +55,11 @@ class CTBRMPCActor(MPCActor):
             require_qp_convergence=True,
         )
         self.admm_config = ADMMConfig(max_iter=qp_iterations, eps_abs=admm_tolerance, eps_rel=0.0)
+        self.polisher = CTBRPolisher(
+            max_iter=polish_iterations,
+            tolerance=polish_tolerance,
+            max_linear_refinements=polish_linear_refinements,
+        )
         self._model = self.ctbr_problem.dynamics()
         self._native_solver = None
         self.native_solve_calls = 0
@@ -60,7 +69,11 @@ class CTBRMPCActor(MPCActor):
     def native_solver(self):
         if self._native_solver is None:
             self._native_solver = TorchMPC(
-                self._model, self.sqp_config, self.admm_config, constraints=self.ctbr_problem.path_constraints()
+                self._model,
+                self.sqp_config,
+                self.admm_config,
+                constraints=self.ctbr_problem.path_constraints(),
+                polisher=self.polisher,
             )
         return self._native_solver
 
@@ -189,4 +202,10 @@ class CTBRMPCActor(MPCActor):
             "model": asdict(self.ctbr_problem.config),
             "sqp": asdict(self.sqp_config),
             "admm": asdict(self.admm_config),
+            "polish": {
+                "max_iter": self.polisher.max_iter,
+                "tolerance": self.polisher.tolerance,
+                "max_linear_refinements": self.polisher.max_linear_refinements,
+                "gradient_scope": "cost parameters D/E/q",
+            },
         }

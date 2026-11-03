@@ -267,7 +267,9 @@ class IPCMPCEnv(IPCEnv):
         self.reward_sums += terms
         names = ("progress", "time", "smooth", "terminal")
         self.extras["reward_terms"] = dict(zip(names, terms.unbind(-1), strict=True))
-        self.extras.setdefault("log", {}).update(
+        # RSL retains each step's mapping by reference until rollout logging.
+        self.extras["log"] = dict(self.extras.get("log", {}))
+        self.extras["log"].update(
             {"Reward/" + name: value.mean() for name, value in self.extras["reward_terms"].items()}
         )
         self.extras["log"].update(

@@ -87,5 +87,27 @@ class SparseAdjoint:
         dual = solution[:, self.primal :]
         return primal, dual[:, : self.equalities], dual[:, self.equalities :].reshape(self.batch, self.stages, self.m)
 
+    def solve_full(self, qp, hessian, active, primal_rhs, equality_rhs, inequality_rhs):
+        """Solve the same KKT matrix with explicit residuals in every block.
+
+        This is used by numerical solution refinement. The caller supplies the
+        signs of the Newton right-hand side; inactive inequality entries must
+        be zero. The adjoint-only ``solve`` path above remains unchanged.
+        """
+        if primal_rhs.shape != (self.batch, self.stages, self.n):
+            raise ValueError("KKT primal RHS shape differs from the fixed pattern")
+        if equality_rhs.shape != (self.batch, self.equalities):
+            raise ValueError("KKT equality RHS must contain initial then dynamics residuals")
+        if inequality_rhs.shape != (self.batch, self.stages, self.m):
+            raise ValueError("KKT inequality RHS shape differs from the fixed pattern")
+        values, _ = self._assemble(qp, hessian, active, primal_rhs)
+        rhs = torch.cat(
+            (primal_rhs.reshape(self.batch, -1), equality_rhs, inequality_rhs.reshape(self.batch, -1)), -1
+        ).reshape(-1)
+        solution = self.solver.solve(values, rhs).reshape(self.batch, self.size)
+        primal = solution[:, : self.primal].reshape(self.batch, self.stages, self.n)
+        dual = solution[:, self.primal :]
+        return primal, dual[:, : self.equalities], dual[:, self.equalities :].reshape(self.batch, self.stages, self.m)
+
     def close(self):
         self.solver.close()
