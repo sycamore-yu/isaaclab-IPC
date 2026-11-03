@@ -37,6 +37,8 @@ class SQPConfig:
     armijo: float = 0.4
     max_cached_shapes: int = 4
     compile_kernels: bool = False
+    # Upstream permits an outer solution even when the inner QP exhausts its budget.
+    require_qp_convergence: bool = False
 
 
 @dataclass(frozen=True)
@@ -385,6 +387,8 @@ class TorchMPC:
                     normal_cone = _choose(running, next_normal_cone, normal_cone)
                     finite = finite & torch.isfinite(normal_cone)
                 solved = running & ~fatal & finite & (errors.amax(-1) <= self.config.tolerance)
+                if self.config.require_qp_convergence:
+                    solved = solved & (candidate.status == 0)
                 if self.constraints is not None:
                     solved = solved & (normal_cone <= self.config.tolerance)
                 status = torch.where(solved, 0, status)

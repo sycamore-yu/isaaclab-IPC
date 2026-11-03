@@ -44,7 +44,11 @@ class CTBRMPCActor(MPCActor):
         self.register_buffer("physical_action_lower", low32)
         self.register_buffer("physical_action_upper", high32)
         self.sqp_config = SQPConfig(
-            max_iter=sqp_iterations, tolerance=sqp_tolerance, linesearch="merit", compile_kernels=compile_kernels
+            max_iter=sqp_iterations,
+            tolerance=sqp_tolerance,
+            linesearch="merit",
+            compile_kernels=compile_kernels,
+            require_qp_convergence=True,
         )
         self.admm_config = ADMMConfig(max_iter=qp_iterations, eps_abs=admm_tolerance, eps_rel=0.0)
         self._model = self.ctbr_problem.dynamics()

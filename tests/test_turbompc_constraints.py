@@ -134,6 +134,69 @@ def test_stale_inactive_duals_do_not_add_curvature_or_pass_the_normal_cone_gate(
     solver.close()
 
 
+@pytest.mark.parametrize("with_path", [False, True])
+@pytest.mark.parametrize(
+    ("require_qp", "budget", "expected_status", "expected_iterations"),
+    [(False, 3, 0, 1), (True, 3, 0, 2), (True, 1, 1, 1)],
+)
+def test_inner_qp_budget_does_not_prematurely_certify_a_strict_outer_solution(
+    monkeypatch, with_path, require_qp, budget, expected_status, expected_iterations
+):
+    dynamics, inputs = problem()
+    inputs = replace(inputs, q=(0.1 * inputs.q).requires_grad_())
+    solver = TorchMPC(
+        dynamics,
+        SQPConfig(max_iter=budget, tolerance=1e-6, require_qp_convergence=require_qp),
+        ADMMConfig(max_iter=1, eps_abs=1e-8, eps_rel=0),
+        constraints=circle() if with_path else None,
+    )
+    candidates = []
+
+    def refine(qp, warm_start):
+        # The first QP has an independently computed dual residual between the
+        # inner and outer tolerances. A warm continuation reaches the exact
+        # analytic solution of this unconstrained quadratic on the next call.
+        x = -qp.q.clone()
+        if not candidates:
+            assert warm_start is None
+            x[0, 0, 1] += 5e-7
+        else:
+            torch.testing.assert_close(warm_start.x, candidates[-1].x, rtol=0, atol=0)
+            assert warm_start.status.item() == 1
+        dual = (x + qp.q).abs().amax()
+        candidate = ADMMResult(
+            iterations=torch.ones(1, dtype=torch.int32),
+            x=x,
+            z=torch.zeros_like(qp.lower),
+            y=torch.zeros_like(qp.lower),
+            lambda0=x.new_zeros((1, 1)),
+            lambda_dyn=x.new_zeros((1, 1, 1)),
+            xi=torch.zeros_like(qp.lower),
+            rho=x.new_ones(1),
+            kernel_ns=x.new_zeros(1),
+            status=(dual > solver.admm.config.eps_abs).to(torch.int32).reshape(1),
+            residuals=torch.stack((dual * 0, dual, dual.new_tensor(1e-8), dual.new_tensor(1e-8)))[None],
+        )
+        candidates.append(candidate)
+        return candidate
+
+    monkeypatch.setattr(solver.admm, "solve", refine)
+    try:
+        assert SQPConfig().require_qp_convergence is False
+        result = solver.solve(inputs)
+        assert result.errors.amax() <= solver.config.tolerance
+        assert len(candidates) == result.iterations.item() == expected_iterations
+        assert result.status.item() == expected_status
+        assert result.admm.status.item() == (expected_iterations == 1)
+        if expected_iterations == 2:
+            torch.testing.assert_close(result.trajectory, -inputs.q, rtol=0, atol=0)
+        if expected_status != 0:
+            gradient = torch.autograd.grad(result.trajectory.sum(), inputs.q)[0]
+            assert torch.count_nonzero(gradient) == 0
+    finally:
+        solver.close()
+
+
 @gpu
 def test_curved_active_constraint_matches_dense_kkt_finite_difference_and_compilation():
     dynamics, inputs = problem("cuda")

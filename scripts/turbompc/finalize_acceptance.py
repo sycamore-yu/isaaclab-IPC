@@ -59,6 +59,19 @@ def finite_array(arrays, key, shape, dtype=np.float64):
     return value
 
 
+def require_matching_sqp_configs(original, current):
+    # Historical reports predate this opt-in setting. Its missing value means
+    # False; every other recorded setting must still match exactly.
+    normalized = []
+    for label, config in (("original", original), ("current", current)):
+        require(
+            config.get("require_qp_convergence", False) is False,
+            f"M4 {label} SQP must preserve require_qp_convergence=False",
+        )
+        normalized.append({**config, "require_qp_convergence": False})
+    require(normalized[0] == normalized[1], "Original/candidate effective SQP settings differ")
+
+
 def validate_linear(document, arrays, provenance):
     require(document["qualification"] == candidate.QUALIFICATION, "Candidate qualification changed")
     require(
@@ -546,7 +559,10 @@ def finalize(args):
                     "Original/candidate inputs differ",
                 )
             for key in ("effective_A_solver", "effective_B_sqp", "effective_B_admm"):
-                require(original_batches[batch][key] == entry[key], "Original/candidate effective settings differ")
+                if key == "effective_B_sqp":
+                    require_matching_sqp_configs(original_batches[batch][key], entry[key])
+                else:
+                    require(original_batches[batch][key] == entry[key], "Original/candidate effective settings differ")
     after = candidate.preflight(preflight_args)
     require(after == current, "Sources/builds changed during CPU finalization")
     for entry in evidence.values():
