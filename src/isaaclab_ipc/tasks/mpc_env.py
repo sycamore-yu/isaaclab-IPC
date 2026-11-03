@@ -202,6 +202,17 @@ class IPCMPCEnv(IPCEnv):
             raise RuntimeError("Previous MPC result has not been consumed by env.step")
         self._pending = result
 
+    def _consume_control_result(self, planner, data, index, time, action):
+        """Consume the IPC jerk schema and return its command-bound violation."""
+        status = "solved" if data["solved"][index] else "max iterations reached"
+        if not data["sfc_valid"][index]:
+            status = "invalid SFC"
+        planner.consume_state(data["state"][index], data["solution"][index], status, time)
+        val = np.r_[data["predicted"][index, 3:], data["jerk"][index]]
+        low = np.r_[planner.mpc.lower, planner.mpc.jlow[:3]]
+        high = np.r_[planner.mpc.upper, planner.mpc.jhigh[:3]]
+        return bool(np.any((val < low - 0.001 - 0.001 * abs(low)) | (val > high + 0.001 + 0.001 * abs(high))))
+
     def _pre_physics_step(self, actions):
         if self._pending is None:
             raise RuntimeError("Call record_mpc_result(actor.last_result) before env.step")
@@ -214,24 +225,11 @@ class IPCMPCEnv(IPCEnv):
         face_counts = self.current_context["plane_mask"].sum(-1).gather(1, schedule.clamp_min(0))
         max_faces = face_counts.masked_fill(schedule < 0, 0).amax(-1).cpu().numpy()
         for i, planner in enumerate(self.planners):
-            status = "solved" if data["solved"][i] else "max iterations reached"
-            if not data["sfc_valid"][i]:
-                status = "invalid SFC"
-            planner.consume_state(
-                data["state"][i],
-                data["solution"][i],
-                status,
-                float(elapsed[i]),
-            )
+            violation = self._consume_control_result(planner, data, i, float(elapsed[i]), sampled[i])
             if not self.reported[i]:
                 self.sfc_constrained_steps[i] += max_faces[i] > 0
                 self.maximum_sfc_planes[i] = max(self.maximum_sfc_planes[i], int(max_faces[i]))
-                val = np.r_[data["predicted"][i, 3:], data["jerk"][i]]
-                low = np.r_[planner.mpc.lower, planner.mpc.jlow[:3]]
-                high = np.r_[planner.mpc.upper, planner.mpc.jhigh[:3]]
-                self.command_violations[i] += bool(
-                    np.any((val < low - 0.001 - 0.001 * abs(low)) | (val > high + 0.001 + 0.001 * abs(high)))
-                )
+                self.command_violations[i] += violation
                 self.thrust_violations[i] += not (0.08 * 9.81 / 0.7 <= sampled[i, 0] <= 0.9 * 9.81 / 0.7)
                 if data["sfc_valid"][i]:
                     self.qp_failures[i] += not data["solved"][i]

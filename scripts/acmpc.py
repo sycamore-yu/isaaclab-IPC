@@ -29,7 +29,7 @@ def main():
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--record", type=Path, help="Write one forest episode with SFC to a new RRD file")
     parser.add_argument(
-        "--fixed-cost", action="store_true", help="Evaluate the fixed IPC cost with the same CUDA solver"
+        "--fixed-cost", action="store_true", help="Evaluate this task's fixed MPC cost without a checkpoint"
     )
     args, overrides = parser.parse_known_args()
     if args.episodes < 1 or (args.mode == "train" and args.episodes != 1):
@@ -63,7 +63,7 @@ def main():
     env_cfg.log_dir = str(args.output.resolve())
     env_cfg.automatic_reset = args.mode == "train"
     env_cfg.rerun_path = str(args.record) if args.record else None
-    env_cfg.rerun_label = "fixed IPC cost" if args.fixed_cost else "learned cost"
+    env_cfg.rerun_label = "fixed MPC cost" if args.fixed_cost else "learned cost"
     config = dict(task=args.task, runner=agent_cfg, environment=env_cfg.to_dict())
     (args.output / "config.json").write_text(json.dumps(config, indent=2, default=str))
     env = RslRlVecEnvWrapper(gym.make(args.task, cfg=env_cfg))
@@ -184,7 +184,9 @@ def main():
             np.save(args.output / "timing-ms.npy", np.asarray(times))
             records = env.unwrapped.records
             metrics = dict(
-                policy="fixed-ipc" if args.fixed_cost else "learned-cost",
+                policy=("fixed-ctbr" if actor.solver_metadata()["dynamics"] == "ac-mpc-ctbr" else "fixed-ipc")
+                if args.fixed_cost
+                else "learned-cost",
                 checkpoint=str(args.checkpoint),
                 requested_episodes=args.episodes * env.num_envs,
                 evaluation_seeds=list(range(agent_cfg["seed"], agent_cfg["seed"] + args.episodes)),
@@ -195,6 +197,8 @@ def main():
                 timing_includes_first_call_compilation=True,
             )
         metrics["mpc"] = actor.solver_metadata()
+        if hasattr(env.unwrapped, "ctbr_runtime_contract"):
+            metrics["physical_model_contract"] = env.unwrapped.ctbr_runtime_contract
         metrics["wall_s"] = perf_counter() - start
         metrics["frontend_mean_ms"] = float(np.mean(env.unwrapped.frontend_times))
         (args.output / "records.json").write_text(json.dumps(env.unwrapped.records, indent=2))

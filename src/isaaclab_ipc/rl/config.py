@@ -57,3 +57,18 @@ class TurboMPCActorCfg(MPCActorCfg):
 class TurboMPCTrainCfg(MPCTrainCfg):
     experiment_name = "ipc_turbompc"
     actor = TurboMPCActorCfg()
+
+
+@configclass
+class CTBRActorCfg(TurboMPCActorCfg):
+    class_name = "isaaclab_ipc.rl.ctbr_actor:CTBRMPCActor"
+    qp_iterations = 32768
+    sqp_iterations = 60
+    sqp_tolerance = 1e-7
+    admm_tolerance = 1e-8
+
+
+@configclass
+class CTBRTrainCfg(MPCTrainCfg):
+    experiment_name = "ipc_turbompc_ctbr"
+    actor = CTBRActorCfg()

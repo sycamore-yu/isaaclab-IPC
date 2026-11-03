@@ -36,3 +36,13 @@ for scenario in ("Avoid", "Forest"):
             "rsl_rl_cfg_entry_point": "isaaclab_ipc.rl.config:TurboMPCTrainCfg",
         },
     )
+
+    gym.register(
+        id=f"Isaac-IPC-{scenario}-TurboMPC-CTBR-Direct",
+        entry_point="isaaclab_ipc.tasks.ctbr_env:CTBRMPCEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"isaaclab_ipc.tasks.ctbr_env:make_{'forest_' if scenario == 'Forest' else ''}ctbr_cfg",
+            "rsl_rl_cfg_entry_point": "isaaclab_ipc.rl.config:CTBRTrainCfg",
+        },
+    )
