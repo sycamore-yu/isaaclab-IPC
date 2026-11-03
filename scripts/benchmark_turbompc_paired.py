@@ -25,8 +25,10 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--reference", type=Path, default=Path("build/reference"))
     args = parser.parse_args()
-    if args.output.exists():
-        raise FileExistsError(f"Preserve existing result: {args.output}")
+    npz_paths = {name: args.output.with_name(f"{args.output.stem}-{name}.npz") for name in ("bridge", "torch")}
+    for path in (args.output, *npz_paths.values()):
+        if path.exists() or path.is_symlink():
+            raise FileExistsError(f"Preserve existing result: {path}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     case = make_case(args.batch, args.horizon, args.nonlinear)
     settings = dict(vars(args), compile=True, backward_backend="direct_cudss_ffi")
@@ -109,12 +111,15 @@ def main():
         memory={name: runtime.memory() for name, runtime in runtimes.items()},
     )
     for name, export in exports.items():
-        np.savez(args.output.with_name(args.output.stem + "-" + name).with_suffix(".npz"), **export)
+        with npz_paths[name].open("xb") as handle:
+            np.savez(handle, **export)
     # Cleanup is part of a successful run, although it is not timed as control work.
     native.close()
     bridge.close()
     report["cleanup_ok"] = True
-    args.output.write_text(json.dumps(report, indent=2, default=lambda x: int(x)) + "\n")
+    with args.output.open("x") as handle:
+        json.dump(report, handle, indent=2, default=lambda x: int(x))
+        handle.write("\n")
     print(json.dumps({k: v for k, v in report.items() if k not in ("statistics", "memory")}, indent=2))
     print("F+B", json.dumps({k: v for k, v in full.items() if k != "samples_ms"}))
 

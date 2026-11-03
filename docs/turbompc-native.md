@@ -57,6 +57,9 @@ sum_k (0.5 * z[k].T D[k] z[k] + q[k].T z[k])
 失败状态不会被隐藏。失败样本的成本梯度为零，混合批次仍可训练有效样本。
 活跃集切换处不保证经典导数存在；有限差分验收只用于局部规则解。
 
+原生结果中的 ADMM 迭代数记录最后一次 QP 求解；官方桥接汇总的是整个 SQP 的累计数。
+两字段不能直接当作同一统计口径比较。逐次审计工具会记录完整序列并分别计算累计值。
+
 ## 显式数值差异
 
 1. 稀疏 KKT 增加 2 次 cuDSS 迭代精化。未修改目标、约束或原变量正则项。
@@ -79,7 +82,7 @@ sum_k (0.5 * z[k].T D[k] z[k] + q[k].T z[k])
 正式入口是 `scripts/turbompc/check_acceptance.py`，只比较原版官方
 `MPCBackend + MPC.mean_only` 与原生 Torch，使用相同 CUDA 12 环境。
 固定 B=1/16/64/256、N=15、float64，每组至少 100 对 AB/BA 交替计时。
-它检查全部门槛，任一失败返回非零退出码，并保留历史未解决的数值失败。
+它检查全部门槛，任一失败返回非零退出码。已知 jerk 精度问题用显式指定的完整官方接口复测报告核验，历史自定义 backend 结果单独保留。
 
 `benchmark_turbompc.py`、`run_turbompc_comparison.py` 和
 `benchmark_turbompc_paired.py` 是早期诊断工具。它们复用了官方桥接文件，但使用自定义

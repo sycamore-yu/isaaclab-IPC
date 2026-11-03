@@ -2,7 +2,7 @@
 
 Default: N=15, float64, batches 1/16/64/256, 100 AB/BA pairs per batch.
 Smaller --pairs/--batches runs are diagnostics and cannot pass the complete gate.
-Existing jerk diagnostics remain visible and can block the overall M4 gate.
+The fixed official jerk regression is a gate; legacy custom-backend history is diagnostic only.
 No upstream source or solver settings are changed to repair the A baseline.
 """
 
@@ -729,8 +729,216 @@ def existing_diagnostics(directory):
     result["unresolved"] = bool(
         result["incomplete"] or result.get("read_errors") or any(not value["passed"] for value in result["comparisons"])
     )
-    result["qualification"] = "A new official-linear result does not resolve or overwrite these existing failures."
+    result["qualification"] = (
+        "Preserved legacy custom-backend history only; missing or failed historical files do not gate M4. "
+        "The explicit official-regression report determines the current fixed-jerk regression result."
+    )
+    result["blocks_m4"] = False
     return result
+
+
+OFFICIAL_REGRESSION_CHECKS = (
+    "base_solved_finite", "raw_vjp_and_callbacks_finite", "full_controls_vs_native",
+    "cost_gradient_vs_native", "state_gradient_vs_native", "base_and_perturbations_physically_feasible",
+    "perturbations_solved_finite", "stable_active_masks", "official_full_gradients_vs_both_fd_steps",
+    "official_old_cost_direction_vs_both_fd_steps", "installed_baseline_unchanged",
+)
+
+
+def _upstream_source_index(hashes):
+    """Compare pinned source content independently of the checkout's location."""
+    result = {}
+    for name, digest in hashes.items():
+        name = Path(name).as_posix()
+        if "/examples/rl/util/" in name:
+            key = "examples/rl/util/" + name.rsplit("/examples/rl/util/", 1)[1]
+        elif "/turbompc/" in name:
+            key = "turbompc/" + name.rsplit("/turbompc/", 1)[1]
+        else:
+            raise ValueError(f"Unrecognized upstream source record: {name}")
+        if key in result and result[key] != digest:
+            raise ValueError(f"Conflicting source hashes: {key}")
+        result[key] = digest
+    return result
+
+
+def validate_official_regression(path, measured_library_hashes, measured_source_hashes):
+    """Fail closed on a different A, different fixed input, or failed official report.
+
+    The companion NPZ is self-contained: no legacy custom-backend files are
+    needed. Inspect saved numerical arrays as well as the producer's booleans.
+    This validates recorded evidence; it does not rerun GPU calculations.
+    """
+    path = Path(path).resolve()
+    result = {
+        "path": str(path), "passed": False, "checks": {},
+        "scope": "Fixed B1/H15 jerk regression through official MPCBackend + MPC.forward, unchanged original A only",
+    }
+    checks = result["checks"]
+    try:
+        data = path.read_bytes()
+        document = json.loads(data)
+        result["report_sha256"] = hashlib.sha256(data).hexdigest()
+        kkt = {Path(name).resolve(): digest for name, digest in measured_library_hashes.items()
+               if Path(name).name == "libcudss_sparse_kkt_ffi.so"}
+        if len(kkt) != 1:
+            raise ValueError("Exactly one measured original-A KKT library is required")
+        expected_path, expected_hash = next(iter(kkt.items()))
+        if re.fullmatch(r"[0-9a-f]{64}", expected_hash) is None:
+            raise ValueError("Invalid measured original-A KKT hash")
+        provenance = document["provenance"]
+        checks["original_role"] = (
+            provenance.get("kkt_role") == "original"
+            and document.get("role") == "official full-plan jerk accuracy diagnostic: original"
+            and provenance.get("upstream_commit") == REVISION
+        )
+        checks["same_measured_A_library"] = all(
+            provenance.get(key) == expected_hash for key in (
+                "expected_kkt_library_sha256", "actual_loaded_kkt_sha256",
+                "installed_baseline_sha256_before", "installed_baseline_sha256_after",
+            )
+        ) and all(
+            Path(provenance[key]).resolve() == expected_path for key in (
+                "expected_kkt_library", "actual_loaded_kkt_library", "installed_baseline_library",
+            )
+        )
+        result["measured_A_kkt"] = {"path": str(expected_path), "sha256": expected_hash}
+        expected_sources = _upstream_source_index(measured_source_hashes)
+        actual_sources = _upstream_source_index(provenance["verified_upstream_files"])
+        required_sources = {"examples/rl/util/mpc.py", "examples/rl/util/jax_torch.py"}
+        checks["same_pinned_official_sources"] = (
+            required_sources <= expected_sources.keys() and actual_sources == expected_sources
+        )
+        implementation = document["implementation"]
+        checks["official_full_plan_interface"] = (
+            implementation.get("backend_class") == "_jerk_official_backend.MPCBackend"
+            and implementation.get("bridge_class") == "_jerk_official_bridge.MPC"
+            and implementation.get("entry_point") == "official MPC.forward (mean, full controls)"
+            and all(provenance["verified_upstream_files"].get(implementation.get(key)) == expected_sources[suffix]
+                    for key, suffix in (("backend_file", "examples/rl/util/mpc.py"),
+                                        ("bridge_file", "examples/rl/util/jax_torch.py")))
+        )
+        expected_case = {"batch": 1, "horizon": 15, "nx": 9, "nu": 3, "dtype": "float64", "seed": 719,
+                         "loss": "sum(all 16 control nodes * original saved probe)"}
+        checks["fixed_case_metadata"] = all(document.get("case", {}).get(k) == v for k, v in expected_case.items())
+        settings = implementation["effective_solver_parameters"]
+        expected_settings = {"constraint_handling": "projection", "log_barrier_kappa": 0.0,
+                             "tol_convergence": 1e-6, "convergence_criterion": "first_order",
+                             "forward_hessian_min_eig": 1e-12, "num_sqp_iteration_max": 15}
+        expected_admm = ADMM | {"eps_abs": 1e-8, "eps_rel": 1e-8}
+        checks["fixed_solver_settings"] = (
+            all(settings.get(key) == value for key, value in expected_settings.items())
+            and all(float(settings["admm"][key]) == float(value) for key, value in expected_admm.items())
+            and settings["linesearch"]["method"] == "merit"
+            and settings["linesearch"]["alphas"] == SOLVER["linesearch"]["alphas"]
+            and all(float(settings["linesearch"]["merit"][key]) == float(value)
+                    for key, value in SOLVER["linesearch"]["merit"].items())
+        )
+        checks["reported_checks_passed"] = (
+            "error" not in document and document.get("diagnostic_checks_passed") is True
+            and all(document.get("checks", {}).get(key) is True for key in OFFICIAL_REGRESSION_CHECKS)
+        )
+        helper = load_example("_acceptance_fixed_jerk_inputs", ROOT / "scripts/turbompc_benchmark_common.py")
+        case = helper.make_case(1, 15, False)
+        arrays_path = path.with_suffix(".npz")
+        raw_arrays = arrays_path.read_bytes()
+        result.update(arrays_file=str(arrays_path), arrays_sha256=hashlib.sha256(raw_arrays).hexdigest(),
+                      expected_inputs_sha256=array_hash({k: np.asarray(v) for k, v in case.items()}))
+        with np.load(io.BytesIO(raw_arrays), allow_pickle=False) as saved:
+            checks["exact_fixed_inputs"] = provenance.get("same_saved_inputs") is True and all(
+                f"input_{key}" in saved and saved[f"input_{key}"].dtype == np.asarray(value).dtype
+                and np.array_equal(saved[f"input_{key}"], value) for key, value in case.items()
+            )
+            shapes = {"base_trajectory": (1, 16, 12), "native_trajectory": (1, 16, 12),
+                      "base_returned_controls": (1, 16, 3), "callback_mpc_cost_adjoint": (1, 12),
+                      "callback_mpc_context_adjoint": (1, 9)}
+            for name, shape in (("cost_gradient", (1, 12)), ("state_gradient", (1, 9))):
+                for prefix in ("base", "native", "raw_retained", "fd_h0", "fd_h1"):
+                    shapes[f"{prefix}_{name}"] = shape
+            checks["raw_arrays_finite_and_complete"] = all(
+                key in saved and saved[key].shape == shape and saved[key].dtype == np.float64
+                and np.isfinite(saved[key]).all() for key, shape in shapes.items()
+            )
+            if not checks["raw_arrays_finite_and_complete"]:
+                raise ValueError("Official regression arrays are missing, nonfinite, or incorrectly shaped")
+            checks["raw_base_solved"] = (
+                saved["base_status"].shape == (1,) and np.all(saved["base_status"] == 0)
+                and saved["base_valid"].shape == (1,) and np.all(saved["base_valid"])
+            )
+            checks["controls_and_physical_constraints"] = bool(
+                np.max(np.abs(saved["base_returned_controls"] - saved["native_trajectory"][..., 9:])) <= THRESHOLDS["u0_max_abs"]
+                and np.max(np.abs(saved["base_returned_controls"] - saved["base_trajectory"][..., 9:])) <= 1e-8
+                and max(helper.physical_residuals(saved["base_trajectory"], case, False).values()) <= THRESHOLDS["physical_violation"]
+            )
+            result["recomputed_gradient_comparisons"] = {}
+            for name in ("cost_gradient", "state_gradient"):
+                comparisons = {"official_vs_native": gradient_error(saved[f"base_{name}"], saved[f"native_{name}"])}
+                for index in range(2):
+                    comparisons[f"official_vs_fd_h{index}"] = gradient_error(saved[f"base_{name}"], saved[f"fd_h{index}_{name}"])
+                result["recomputed_gradient_comparisons"][name] = comparisons
+                checks[f"raw_{name}_matches_reference_and_fd"] = all(value["passed"] for value in comparisons.values())
+        fd = document["finite_difference"]
+        steps, perturbations = fd["steps"], fd["perturbations"]
+        checks["complete_stable_fd_evidence"] = (
+            [step["step"] for step in steps] == [1e-4, 5e-5]
+            and fd.get("forward_perturbations") == len(perturbations) == 88
+            and all(fd.get(key) is True for key in ("all_solved", "all_finite", "all_active_masks_equal", "all_mask_replay_plans_match"))
+            and all(all(row.get(key) is True for key in ("solved", "finite", "active_masks_equal", "mask_replay_solved", "mask_duals_finite"))
+                    for row in perturbations)
+            and all(np.isfinite(row["physical_maximum"])
+                    and row["physical_maximum"] <= THRESHOLDS["physical_violation"] for row in perturbations)
+        )
+        checks["old_direction_matches_both_fd_steps"] = all(
+            np.isfinite(step["old_direction"]["official_relative_error"])
+            and step["old_direction"]["official_relative_error"] <= THRESHOLDS["gradient_relative"] for step in steps
+        )
+    except Exception as error:
+        result["error"] = f"{type(error).__name__}: {error}"
+    result["checks"] = {key: bool(value) for key, value in checks.items()}
+    result["passed"] = "error" not in result and bool(checks) and all(result["checks"].values())
+    return result
+
+
+def apply_official_regression_gate(report, regression):
+    """Historical custom-backend outcomes never override current official evidence."""
+    report["official_regression"] = regression
+    report["prior_failure_blocks_m4"] = False
+    report["official_regression_blocks_m4"] = regression.get("passed") is not True
+    report["m4_gate_passed"] = report.get("selected_linear_suite_passed") is True and regression.get("passed") is True
+
+
+def reevaluate_gate_report(measurement_path, official_path, output, measurement_commit="a771284"):
+    """Write a separate CPU-only decision; never relabel or overwrite GPU evidence."""
+    measurement_path, output = Path(measurement_path).resolve(), Path(output).resolve()
+    if output.exists():
+        raise FileExistsError("Choose a new gate re-evaluation report; original evidence is preserved")
+    raw = measurement_path.read_bytes()
+    measured = json.loads(raw)
+    revision = subprocess.check_output(["git", "-C", str(ROOT), "rev-parse", measurement_commit], text=True).strip()
+    source = subprocess.check_output(["git", "-C", str(ROOT), "show", f"{revision}:scripts/turbompc/check_acceptance.py"])
+    if hashlib.sha256(source).hexdigest() != measured["harness_sha256"] or measured["upstream_revision"] != REVISION:
+        raise ValueError("Saved GPU measurements do not match the declared unchanged-A harness checkpoint")
+    regression = validate_official_regression(official_path, measured["loaded_solver_hashes"], measured["verified_upstream_sources"])
+    arrays = Path(measured["arrays_file"])
+    report = {
+        "scope": "CPU-only M4 gate re-evaluation for unchanged original A; no authorization to replace A",
+        "gpu_measurements_rerun": False, "time_utc": datetime.now(UTC).isoformat(),
+        "measurement_report": {"path": str(measurement_path), "sha256": hashlib.sha256(raw).hexdigest(),
+                               "arrays_file": str(arrays), "arrays_sha256": sha256(arrays),
+                               "harness_commit": revision, "harness_sha256": measured["harness_sha256"]},
+        "gate_harness_sha256": sha256(__file__),
+        "measured_linear_gates": measured["gates"], "measured_m4_gate_passed": measured["m4_gate_passed"],
+        "selected_linear_suite_passed": measured["selected_linear_suite_passed"] is True and bool(measured["gates"])
+                                        and all(value is True for value in measured["gates"].values()),
+        "historical_custom_backend_scope": "Retained in the original measurement report as diagnostic history only",
+    }
+    apply_official_regression_gate(report, regression)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("x") as handle:
+        json.dump(json_safe(report), handle, indent=2, allow_nan=False)
+        handle.write("\n")
+    print(json.dumps(json_safe(report), indent=2, allow_nan=False))
+    return 0 if report["m4_gate_passed"] else 1
 
 
 def loaded_libraries():
@@ -914,7 +1122,17 @@ def main():
     parser.add_argument(
         "--prior-diagnostic-dir", type=Path, default=ROOT / "results/turbompc-port/sweep-linear-cu128-v1"
     )
+    parser.add_argument(
+        "--official-regression-report", type=Path,
+        default=ROOT / "results/turbompc-port/official-jerk-original-b1-v1.json",
+        help="Required fixed-B1 official jerk evidence for the same unchanged original A",
+    )
+    parser.add_argument("--reevaluate-report", type=Path, help="CPU-only: re-evaluate the gate of saved GPU measurements")
+    parser.add_argument("--measurement-harness-commit", default="a771284", help="Checkpoint that actually collected saved GPU measurements")
     args = parser.parse_args()
+    if args.reevaluate_report is not None:
+        return reevaluate_gate_report(args.reevaluate_report, args.official_regression_report, args.output,
+                                      args.measurement_harness_commit)
     if min(args.pairs, args.warmup, *args.batches) < 1 or len(set(args.batches)) != len(args.batches):
         parser.error("positive distinct batches, positive pairs and warmup are required")
     args.output = args.output.resolve()
@@ -1131,12 +1349,14 @@ def main():
             "no_harness_error": "error" not in report,
         }
         report["selected_linear_suite_passed"] = all(report["gates"].values())
-        report["m4_gate_passed"] = (
-            report["selected_linear_suite_passed"] and not report["prior_extension_diagnostic"]["unresolved"]
+        regression = validate_official_regression(
+            args.official_regression_report, report.get("loaded_solver_hashes", {}),
+            report.get("verified_upstream_sources", {}),
         )
-        report["prior_failure_blocks_m4"] = report["prior_extension_diagnostic"]["unresolved"]
+        apply_official_regression_gate(report, regression)
         report["completed_utc"] = datetime.now(UTC).isoformat()
-        np.savez_compressed(npz_path, **artifacts)
+        with npz_path.open("xb") as arrays_handle:
+            np.savez_compressed(arrays_handle, **artifacts)
         with args.output.open("x") as handle:
             json.dump(json_safe(report), handle, indent=2, allow_nan=False)
             handle.write("\n")

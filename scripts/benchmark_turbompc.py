@@ -374,6 +374,12 @@ def main():
     args = options()
     if min(args.batch, args.horizon, args.repeats) < 1 or args.warmup < 1:
         raise ValueError("Positive batch, horizon, repeats and warmup are required")
+    npz_path = args.output.with_suffix(".npz")
+    if args.output == npz_path:
+        raise ValueError("The JSON output must differ from its .npz sidecar")
+    for path in (args.output, npz_path):
+        if path.exists() or path.is_symlink():
+            raise FileExistsError(f"Preserve existing result: {path}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
     case = make_case(args.batch, args.horizon, args.nonlinear)
     start = time.perf_counter()
@@ -426,8 +432,11 @@ def main():
         )
     report["gpu_after"] = gpu_snapshot()
     report["memory"] = runtime.memory()
-    np.savez(args.output.with_suffix(".npz"), **exported, **{f"input_{k}": v for k, v in case.items()})
-    args.output.write_text(json.dumps(report, indent=2, default=lambda value: int(value)) + "\n")
+    with npz_path.open("xb") as handle:
+        np.savez(handle, **exported, **{f"input_{k}": v for k, v in case.items()})
+    with args.output.open("x") as handle:
+        json.dump(report, handle, indent=2, default=lambda value: int(value))
+        handle.write("\n")
     print(json.dumps({k: v for k, v in report.items() if k not in ("memory", "status", "iterations")}, indent=2))
     runtime.close()
 

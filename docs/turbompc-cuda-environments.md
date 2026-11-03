@@ -2,7 +2,7 @@
 
 ## 配置
 
-环境用于 `feat/turbompc-torch-native` 的工具链验证。
+环境用于 TurboMPC 原生移植；最终冻结验证分支为 `feat/turbompc-torch-native-verified`。
 驱动由服务器提供。每个 profile 独立选择编译器、Python 依赖和扩展缓存。
 
 | 项目 | `cu128` | `cu130` |
@@ -120,7 +120,7 @@ bash scripts/turbompc/env.sh cu128 python scripts/turbompc/check_baseline.py \
 ```
 
 上述检查属于 M0 环境验证。完整 MPC 前向、梯度及延迟验收仍按迁移方案执行。
-M4 性能门槛通过后，才接入 SFC 和 AC-MPC 非线性动力学。
+M4 的数值、梯度及性能门槛全部通过后，才接入 SFC 和 AC-MPC 非线性动力学。
 
 ### 原生求解器与正式 A/B 验收
 
@@ -133,7 +133,7 @@ bash scripts/turbompc/env.sh cu130 python scripts/build_turbompc.py
 bash scripts/turbompc/env.sh cu128 env PYTHONPATH="$PWD/src" \
   PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -q \
   tests/test_turbompc_native.py tests/test_turbompc_solver.py \
-  tests/test_turbompc_regressions.py
+  tests/test_turbompc_regressions.py tests/test_turbompc_lifecycle.py
 ```
 
 将测试命令中的 `cu128` 改为 `cu130` 即可使用无 JAX 的原生环境。
@@ -146,12 +146,16 @@ bash scripts/turbompc/env.sh cu128 env PYTHONPATH="$PWD/src" \
 bash scripts/turbompc/env.sh cu128 python scripts/turbompc/check_acceptance.py \
   --upstream-repo /home/tong/tongworkspace/reference_repos/TurboMPC \
   --batches 1 16 64 256 --pairs 100 --warmup 10 \
+  --official-regression-report results/turbompc-port/official-jerk-original-b1-v1.json \
   --output results/turbompc-port/acceptance-linear-cu128-new.json
 ```
 
 输出路径须使用新名称。脚本保留 JSON、输入及输出快照、原始配对耗时、负载记录和失败原因。
 用户已授权共享测试，不需要等待 GPU 空闲；全部数值、梯度与性能门槛仍然适用。
 当前结果与已知限制见 `turbompc-torch-progress.md`。
+`--official-regression-report` 必须是相同原版库、相同固定输入的完整官方 jerk 复测；脚本检查报告及 NPZ 原始数组。
+它独立判定已知精度问题，旧自定义 backend 的历史报告不再永久否决新的官方结果。
+该报告的生成命令及 IR2 候选的独立使用方法见 `turbompc-kkt-reference-fix.md`。
 
 ## 官方依据
 
@@ -199,5 +203,6 @@ bash scripts/turbompc/env.sh cu128 python scripts/turbompc/check_acceptance.py \
 
 桥接结果记录在 `results/turbompc-jax-bridge-smoke.json`；原版安装检查日志位于 `build/turbompc-installation-check.log`。
 
-以上结果确认两套构建环境及原版桥接可运行。CUDA 13 检查覆盖 Torch CUDA 扩展与 cuDSS，完整原生 TurboMPC 的数值对照、梯度数值检查及 Batch 1/16/64/256 性能验收仍属于后续迁移阶段。
-验证时 GPU 仍在执行其他训练，未采集 M4 的 P50/P95 性能结果。
+以上表格是 M0 环境验证记录。后续已完成原生求解器实现，固定验证树的 CUDA 12/13 各 14 项目标测试全部通过。
+Batch 1/16/64/256 的共享 GPU 正式 A/B 验收也已执行，P50/P95 均满足 1.1×，但原版 KKT 梯度精度仍使 M4 失败。
+完整实测表、原始结果路径、构建来源和修正候选见 `turbompc-torch-progress.md` 与 `turbompc-kkt-reference-fix.md`。
