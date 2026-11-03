@@ -4,7 +4,7 @@
 
 - 目标：在 Isaac Lab 3.0 中运行无 JAX 运行时依赖的 PyTorch 原生 TurboMPC。复用 TurboMPC 的 CUDA ADMM / cuDSS、稀疏 KKT 求解算法及原生实现。
 - 起始开发分支：`feat/turbompc-torch-native`，基点为 `isaaclab-IPC` 提交 `3e1b459`。
-- 固定验证分支：`feat/turbompc-torch-native-verified`，工作树为同级 `turbompc-torch-native-verified`。原工作树出现另一个进程的 SFC/AC-MPC/Actor 并行修改后，单独保存 M0–M4 求解器检查点；原工作树及其修改保留。本验证分支不修改正式任务入口和原 MPC 默认行为。
+- 固定验证分支：`feat/turbompc-torch-native-verified`，工作树为同级 `turbompc-torch-native-verified`。原工作树出现另一个进程的 SFC/AC-MPC/Actor 并行修改后，单独保存 M0–M4 求解器检查点；原工作树及其修改保留。第一阶段不修改正式任务入口；M5 使用独立任务 ID，保留原 MPC 默认行为。
 - 上游参考：`ToyotaResearchInstitute/turbompc` 提交 `7050a4f367d08504ecb6f5820d9161e704df5816`，MIT 许可证。参考副本：`/home/tong/tongworkspace/reference_repos/TurboMPC`，保持只读。
 - **第一阶段只比较 PyTorch 原生版与原版 JAX + 官方 PyTorch 桥接。** 不提前加入 IPC SFC、CA-AC-MPC 动力学或新的强化学习算法。
 - 标准执行模型、理想/真实配置、场景和恢复策略遵守 `CONTEXT.md`、`docs/adr/`、`docs/execution-profiles.md`。
@@ -92,5 +92,5 @@
 ## 当前进度
 
 - M0–M3 的环境、原生接口、Torch SQP 与隐式微分已经实现。CUDA 12 和 CUDA 13 原生目标测试通过。
-- M4 正在使用官方接口和共享 GPU 配对计时执行。旧诊断已暴露原版稀疏 KKT 的梯度精度问题；未经修正的 A 与候选修正结果分别保留，不能混用。
-- M5 尚未开始。最新测试、正式验收结果及阻塞原因见 `turbompc-torch-progress.md`。
+- M4 的官方接口和共享 GPU 配对实验已完成。未修改 A0 的稀疏 KKT 精度问题和失败记录保留；本轮明确采用两端共同 IR2 配置，独立汇总 `m4-ir2-accepted-v1.json` 通过，不能表述为未修改 A0 通过。
+- M5 的 IPC/SFC 原生接口、同 QP 组装、成本梯度及低速真实闭环已经验证；冻结 SFC 版本继续森林验证，并开始 CTBR 独立实施。最新状态见 `turbompc-torch-progress.md` 与 `turbompc-sfc.md`。

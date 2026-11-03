@@ -71,6 +71,7 @@ class TurboMPCActor(MPCActor):
     def solver_metadata(self):
         result = {
             "backend": "turbompc-cuda",
+            "implementation_file": __file__,
             "dynamics": "ipc-jerk",
             "horizon": 15,
             "prediction_dt": 0.1,

@@ -122,7 +122,7 @@ def main():
                 obs = TensorDict(values, batch_size=[env.num_envs])
                 first_record = len(env.unwrapped.records)
                 failure_saved = False
-                for _ in range(env.max_episode_length + 1):
+                for step_index in range(env.max_episode_length + 1):
                     with torch.inference_mode():
                         torch.cuda.synchronize()
                         tick = perf_counter()
@@ -154,6 +154,19 @@ def main():
                         obs, _, _, _ = env.step(actions)
                         torch.cuda.synchronize()
                         times.append([solve_ms, (perf_counter() - tick) * 1000])
+                    if (step_index + 1) % 100 == 0:
+                        print(
+                            json.dumps(
+                                dict(
+                                    evaluation_seed=seed,
+                                    steps=step_index + 1,
+                                    position=obs["mpc_state"][:, :3].cpu().tolist(),
+                                    solved=actor.last_result["solved"].cpu().tolist(),
+                                    braking=actor.last_result["braking"].cpu().tolist(),
+                                )
+                            ),
+                            flush=True,
+                        )
                     if env.unwrapped.reported.all():
                         break
                 records = env.unwrapped.records[first_record:]
@@ -179,6 +192,7 @@ def main():
                 success=sum(r["success"] for r in records),
                 actor_mean_ms=float(np.mean(times, axis=0)[0]),
                 step_mean_ms=float(np.mean(times, axis=0)[1]),
+                timing_includes_first_call_compilation=True,
             )
         metrics["mpc"] = actor.solver_metadata()
         metrics["wall_s"] = perf_counter() - start
