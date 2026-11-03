@@ -120,6 +120,9 @@ class SuperMPCEnv(IPCMPCEnv):
             row.update(super_case=self.cfg.super_case, peak_actual_speed_mps=float(self.peak_speed[i]),
                        waypoint_times_s=self.waypoint_times[i].copy(),
                        waypoints_reached=len(self.waypoint_times[i]) + int(row['success']),
+                       safe_climb_events=self.planners[i].safe_climb_events,
+                       safe_climb_steps=self.planners[i].safe_climb_steps,
+                       reused_prediction_count=self.planners[i].reused_prediction_count,
                        norm_violation_steps=dict(zip(['velocity', 'acceleration', 'jerk', 'angular_velocity'],
                                                      self.norm_violations[i].cpu().tolist(), strict=True)))
         return done

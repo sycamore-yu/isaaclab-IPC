@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from .planner import InvalidCorridorError
+from .planner import InvalidCorridorError, SafeClimbPending
 
 
 def batch_clouds_to_host(hits, positions, blind=0.3, maximum=float("inf")):
@@ -33,6 +33,12 @@ def _prepare_context(item):
     try:
         x, reference, corridors = planner.context(state[:9])
         return PlanningContext(x, reference, corridors, True)
+    except SafeClimbPending:
+        # A collision-checked ascent is underway; this is not a failed SFC solve.
+        x = planner.cfg.profile.planner_state(state[:9])
+        reference = np.zeros((15, 9))
+        reference[:, :3] = x[:3]
+        return PlanningContext(x, reference, [], False)
     except InvalidCorridorError:
         planner.frontend_failures += 1
         planner.replan = True

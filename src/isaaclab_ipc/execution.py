@@ -15,6 +15,14 @@ def brake_jerk(state, lower, upper, jlow, jhigh, dt):
     return ((desired - state[..., 6:]) / dt).clip(jlow[:3], jhigh[:3])
 
 
+def safe_climb_jerk(state, target_z, lower, upper, jlow, jhigh, dt):
+    """Retain horizontal braking while controlling altitude toward a checked target."""
+    desired = (-2.0 * state[..., 3:6]).clip(lower[3:], upper[3:])
+    desired = desired.clone() if hasattr(desired, "clone") else desired.copy()
+    desired[..., 2] = (5.0 * (target_z - state[..., 2]) - 3.0 * state[..., 5]).clip(-2.0, 3.0)
+    return ((desired - state[..., 6:]) / dt).clip(jlow[:3], jhigh[:3])
+
+
 class RecoveryPolicy(StrEnum):
     BRAKE_REPLAN = "brake_replan"
     PREVIOUS_SEQUENCE = "previous_sequence"

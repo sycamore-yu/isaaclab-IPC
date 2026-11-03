@@ -55,9 +55,11 @@ class IPCMPCEnv(IPCEnv):
             braking=(1,),
             yaw_target=(1,),
             sfc_valid=(1,),
+            climb_active=(1,),
+            climb_target=(3,),
         )
         for name, shape in shapes.items():
-            if name in ("plane_mask", "braking", "sfc_valid"):
+            if name in ("plane_mask", "braking", "sfc_valid", "climb_active"):
                 space = gym.spaces.Box(0, 1, shape=shape, dtype=np.bool_)
             elif name == "corridor_index":
                 space = gym.spaces.Box(-1, 1, shape=shape, dtype=np.int64)
@@ -130,7 +132,7 @@ class IPCMPCEnv(IPCEnv):
         valid = np.zeros(planes.shape[:-1], bool)
         corridor_indices = np.full((self.num_envs, 15), -1, dtype=np.int64)
         sfc_valid = np.ones((self.num_envs, 1), bool)
-        refs, states, margins, braking, yaw = [], [], [], [], []
+        refs, states, margins, braking, yaw, climb_active, climb_targets = [], [], [], [], [], [], []
         contexts = self.planning_batch.contexts(self.planners, values, clouds)
         for i, (planner, state, context) in enumerate(zip(self.planners, values, contexts, strict=True)):
             x, ref, corridor = context.state, context.reference, context.corridors
@@ -155,6 +157,10 @@ class IPCMPCEnv(IPCEnv):
             refs.append(ref)
             margins.append(clearance)
             braking.append([planner.braking])
+            climb_active.append([planner.recovery_target is not None])
+            climb_targets.append(
+                planner.recovery_target.copy() if planner.recovery_target is not None else np.zeros(3)
+            )
             yaw.append(
                 [
                     np.arctan2(planner.goal[1] - state[1], planner.goal[0] - state[0])
@@ -192,6 +198,8 @@ class IPCMPCEnv(IPCEnv):
             braking=tensor(braking, torch.bool),
             yaw_target=tensor(yaw),
             sfc_valid=tensor(sfc_valid, torch.bool),
+            climb_active=tensor(climb_active, torch.bool),
+            climb_target=tensor(climb_targets),
         )
         self.current_context = result
         self.frontend_times.append((perf_counter() - tick) * 1000)

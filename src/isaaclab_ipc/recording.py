@@ -186,12 +186,20 @@ class ForestRecording:
                 ),
             )
         planner = env.planners[0]
+        recovery_note = (
+            f"Safe climb target: {planner.recovery_target[2]:.2f} m | climbs: {planner.safe_climb_events}\n"
+            if planner.recovery_target is not None
+            else f"Last frontend issue: {planner.last_frontend_error or 'none'}\n"
+        )
+        reuse_note = f"Reused trajectories: {planner.reused_prediction_count}\n"
         r.log(
             "status/current",
             rr.TextDocument(
                 f"{self.policy} | Newton real | {self.route_label}\n"
                 f"SFC valid: {mode[0]} | QP solved: {mode[1]} | braking: {mode[2]}\n"
                 f"Frontend failures: {planner.frontend_failures} | recoveries: {planner.recovery_events}\n\n"
+                f"{recovery_note}"
+                f"{reuse_note}"
                 "Blue: actual flight\nWhite: reference\nMagenta: accepted QP prediction\n"
                 "Cyan / amber: SFC, labels list prediction steps (0.1 s each)\n"
                 "Red point: braking prediction\nPlans sampled at 10 Hz and every mode change."

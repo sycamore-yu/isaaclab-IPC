@@ -6,8 +6,9 @@ from time import perf_counter
 import numpy as np
 
 from . import _geometry
-from .execution import RecoveryPolicy, brake_jerk, next_braking
+from .execution import RecoveryPolicy, brake_jerk, next_braking, safe_climb_jerk
 from .mpc import MPC
+from .safe_recovery import vertical_segment_clear
 
 
 def voxel_centroids(points, leaf=0.2):
@@ -30,6 +31,14 @@ def contains(planes, p):
 
 class InvalidCorridorError(ValueError):
     """The geometry frontend did not produce finite SFC planes."""
+
+
+class AStarEndpointUnavailable(InvalidCorridorError):
+    """The native A* grid contains no free endpoint at the searched altitude."""
+
+
+class SafeClimbPending(InvalidCorridorError):
+    """The real controller must regain a collision-checked planning altitude."""
 
 
 class Planner:
@@ -72,6 +81,15 @@ class Planner:
         self.braking = False
         self.brake_steps = 0
         self.recovery_events = 0
+        self.recovery_target = None
+        self.safe_climb_events = 0
+        self.safe_climb_steps = 0
+        self.last_frontend_error = ""
+        self._climb_cloud = None
+        self._safe_prediction = None
+        self._safe_prediction_goal = None
+        self._latest_schedule = []
+        self.reused_prediction_count = 0
 
     def update_cloud(self, cloud, position):
         cloud = np.asarray(cloud, dtype=float).reshape(-1, 3)
@@ -127,7 +145,95 @@ class Planner:
                     found = True
             if found:
                 return p
-        raise InvalidCorridorError("No free A* endpoint in the local map")
+        raise AStarEndpointUnavailable("No free A* endpoint in the local map")
+
+    def _safe_vertical_target(self, position):
+        frontend = self.cfg.params.get("frontend")
+        if not frontend or not frontend.get("safe_climb", False) or not len(self.cloud):
+            return None
+        resolution = float(frontend["resolution"])
+        radius = float(self.cfg.params["sfc_dis"])
+        clearance = radius + float(frontend["cloud_leaf"]) / 2
+        lower, upper = np.asarray(frontend["workspace"], dtype=float)
+        if position[2] <= lower[2] + clearance or position[2] >= upper[2] - clearance:
+            return None
+        ceiling = min(position[2] + 1.8, upper[2] - clearance)
+        for candidate_z in np.arange(position[2] + resolution, ceiling + 1e-9, resolution):
+            target = position.copy()
+            target[2] = min(candidate_z + resolution / 2, upper[2] - clearance)
+            if not self.grid.endpoint_free(target):
+                continue
+            if vertical_segment_clear(self.cloud, position, target, clearance):
+                return target
+        return None
+
+    def _continue_safe_climb(self, state):
+        if self.recovery_target is None:
+            return
+        position = state[:3]
+        target = self.recovery_target
+        if self._climb_cloud is not self.cloud or np.linalg.norm(position[:2] - target[:2]) > 0.15:
+            frontend = self.cfg.params["frontend"]
+            clearance = float(self.cfg.params["sfc_dis"]) + float(frontend["cloud_leaf"]) / 2
+            if not vertical_segment_clear(self.cloud, position, target, clearance):
+                self.recovery_target = None
+                self.last_frontend_error = "recovery_climb_blocked"
+                raise InvalidCorridorError("Observed obstacle blocks the vertical recovery path")
+            self._climb_cloud = self.cloud
+        if (
+            self.grid.endpoint_free(position)
+            and abs(position[2] - target[2]) < 0.1
+            and np.linalg.norm(state[3:6]) < 0.2
+            and np.linalg.norm(state[6:]) < 0.5
+        ):
+            self.recovery_target = None
+            self._climb_cloud = None
+            self.replan = True
+            return
+        raise SafeClimbPending("Safe vertical recovery is in progress")
+
+    def _grid_segment_free(self, start, end):
+        frontend = self.cfg.params.get("frontend")
+        resolution = float(frontend["resolution"]) if frontend else float(self.grid.resolution_)
+        steps = max(1, int(np.ceil(np.linalg.norm(end - start) / (0.5 * resolution))))
+        for alpha in np.linspace(0, 1, steps + 1):
+            point = start + (end - start) * alpha
+            if frontend:
+                low, high = np.asarray(frontend["workspace"])
+                if np.any(point < low) or np.any(point >= high):
+                    return False
+            if not self.grid.free(point):
+                return False
+        return True
+
+    def _reuse_safe_prefix(self, position):
+        frontend = self.cfg.params.get("frontend")
+        if not frontend or not frontend.get("reuse_prediction", False):
+            return None
+        prefix = self._safe_prediction
+        if prefix is None or not np.array_equal(self._safe_prediction_goal, self.goal):
+            return None
+        if not self.grid.endpoint_free(position) or np.linalg.norm(prefix[0] - position) > 2.5:
+            return None
+        points = np.vstack((position, prefix))
+        if any(not self._grid_segment_free(a, b) for a, b in zip(points[:-1], points[1:], strict=True)):
+            return None
+        return prefix.copy()
+
+    def _remember_safe_prediction(self, state, solution):
+        frontend = self.cfg.params.get("frontend")
+        self._safe_prediction = None
+        if not frontend or not frontend.get("reuse_prediction", False) or not self._latest_schedule:
+            return
+        count = min(3, self.mpc.n)
+        positions = (self.mpc.M @ state + self.mpc.C @ np.asarray(solution)).reshape(self.mpc.n, 9)[:count, :3]
+        if any(
+            not len(faces) or np.any(faces[:, :3] @ pos + faces[:, 3] > 1e-4)
+            for pos, faces in zip(positions, self._latest_schedule[:count], strict=True)
+        ):
+            return
+        self._safe_prediction = positions.copy()
+        self._safe_prediction_goal = self.goal.copy()
 
     def _refresh_grid(self, radius):
         if self.cfg.params.get("frontend"):
@@ -152,14 +258,33 @@ class Planner:
                 goal = position + delta * extent / distance
             else:
                 goal[:2] = position[:2] + delta[:2] * extent / distance
-        start = self._move_endpoint(start)
+        try:
+            start = self._move_endpoint(start)
+        except AStarEndpointUnavailable:
+            target = self._safe_vertical_target(position)
+            if target is not None:
+                self.recovery_target = target
+                self._climb_cloud = self.cloud
+                self.safe_climb_events += 1
+                self._safe_prediction = None
+                self.last_frontend_error = "astar_start_occupied_safe_climb"
+                raise SafeClimbPending("A* start occupied; use verified vertical recovery") from None
+            self.last_frontend_error = "astar_start_occupied_no_safe_climb"
+            raise
         goal = self._move_endpoint(goal)
+        reusable = self._reuse_safe_prefix(position) if np.array_equal(start, position) else None
+        if reusable is not None:
+            start = reusable[-1]
         path = np.asarray(self.grid.search(start, goal))
         if not len(path):
+            self.last_frontend_error = "astar_path_not_found"
             self.frontend_failures += 1
             self.path = position[None].copy()
             self.replan = False
             return
+        if reusable is not None:
+            path = np.vstack((position, reusable, path[1:]))
+            self.reused_prediction_count += 1
         if extended and not frontend and self.grid.free(self.goal):
             path = np.vstack((path, self.goal))
         spacing = self.cfg.params["fsm"]["path_dis"]
@@ -225,6 +350,7 @@ class Planner:
         state = self.cfg.profile.planner_state(state)
         position = np.asarray(state[:3])
         frontend = self.cfg.params.get("frontend")
+        self._continue_safe_climb(state)
         advance = (
             frontend and len(self.path) and np.linalg.norm(self.path[-1] - self.goal) > 0.1
             and np.linalg.norm(position - self.path[-1]) < frontend["receding_distance"]
@@ -281,6 +407,7 @@ class Planner:
         references = np.zeros((n, 9))
         references[:, :3] = path[indices]
         references[:, 3:6] = np.diff(np.vstack((position, references[:, :3])), axis=0) / self.mpc.dt
+        self._latest_schedule = [faces.copy() for faces in schedule]
         return state, references, schedule
 
     def prepare(self, state):
@@ -290,7 +417,14 @@ class Planner:
 
     def _brake(self, state):
         # Track a velocity-opposing acceleration, with the original jerk bounds.
-        jerk = brake_jerk(state, self.mpc.lower, self.mpc.upper, self.mpc.jlow, self.mpc.jhigh, self.mpc.dt)
+        if self.recovery_target is not None:
+            jerk = safe_climb_jerk(
+                state, self.recovery_target[2], self.mpc.lower, self.mpc.upper,
+                self.mpc.jlow, self.mpc.jhigh, self.mpc.dt,
+            )
+            self.safe_climb_steps += 1
+        else:
+            jerk = brake_jerk(state, self.mpc.lower, self.mpc.upper, self.mpc.jlow, self.mpc.jhigh, self.mpc.dt)
         self.brake_steps += 1
         return self.mpc.a @ state + self.mpc.b @ jerk, jerk, False
 
@@ -314,6 +448,7 @@ class Planner:
                 self.replan = True
             self.braking = braking
             if braking:
+                self._safe_prediction = None
                 return self._brake(state)
         if success:
             self.previous = np.asarray(solution).reshape(self.mpc.n, 3).copy()
@@ -323,7 +458,9 @@ class Planner:
             for i in range(self.index + 1):
                 jerk = self.previous[min(i, self.mpc.n - 1)]
                 x = self.mpc.a @ x + self.mpc.b @ jerk
+            self._remember_safe_prediction(state, solution)
         else:
+            self._safe_prediction = None
             self.failures += 1
             if self.previous is None:
                 raise RuntimeError("Initial MPC solve failed: " + status)

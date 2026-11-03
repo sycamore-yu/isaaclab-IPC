@@ -39,6 +39,7 @@ def planner_params(name):
     low[2], high[2] = mapping['virtual_ground_height'], mapping['virtual_ceil_height']
     params['frontend'] = dict(
         resolution=mapping['resolution'], size=size.tolist(), center=center.tolist(), gpu_incremental=True,
+        safe_climb=True, reuse_prediction=(name == 'high_speed'),
         workspace=[low.tolist(), high.tolist()],
         cloud_leaf=min(case['simulation']['downsample_res'], mapping['resolution']),
         planning_horizon=source['super_planner']['planning_horizon'],

@@ -21,6 +21,8 @@ def test_pinned_super_parameters_and_real_scan_law(name, speed, resolution, dist
     assert case['simulation']['sensing_horizon'] == distance
     params = planner_params(name)
     assert params['mpc']['vy_max'] == speed
+    assert params['frontend']['safe_climb']
+    assert params['frontend']['reuse_prediction'] == (name == 'high_speed')
     assert params['frontend']['resolution'] == resolution
     assert params['frontend']['size'] == [15, 110, 6]
     assert params['sfc_dis'] == .2
@@ -92,7 +94,10 @@ def test_source_waypoints_switch_without_resetting_physics(monkeypatch):
     env.hit = torch.zeros(1, dtype=torch.bool)
     env.reported = np.zeros(1, bool)
     env.scene = SimpleNamespace(env_origins=torch.zeros(1, 3))
-    env.planners = [SimpleNamespace(goal=np.array([0, 50, 1.5]), replan=False)]
+    env.planners = [SimpleNamespace(
+        goal=np.array([0, 50, 1.5]), replan=False, safe_climb_events=0,
+        safe_climb_steps=0, reused_prediction_count=0,
+    )]
     env.peak_speed = torch.zeros(1)
     env.norm_violations = torch.zeros(1, 4, dtype=torch.long)
     env.last_mpc_result = {'jerk': torch.zeros(1, 3)}

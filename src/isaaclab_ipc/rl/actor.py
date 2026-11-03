@@ -6,7 +6,7 @@ from rsl_rl.models import MLPModel
 from rsl_rl.modules import MLP
 
 from isaaclab_ipc.corridor_storage import expand_corridors
-from isaaclab_ipc.execution import brake_jerk, next_braking
+from isaaclab_ipc.execution import brake_jerk, next_braking, safe_climb_jerk
 from isaaclab_ipc.mpc import MPC, Config
 
 from .qp import DifferentiableQP
@@ -58,6 +58,9 @@ class MPCActor(MLPModel):
         torch.nn.init.zeros_(self.mlp[-1].weight)
         torch.nn.init.zeros_(self.mlp[-1].bias)
         self.thrust_limits, self.rate_limit = thrust_limits, rate_limit
+        self.safe_climb_enabled = bool(
+            planner_params and planner_params.get("frontend", {}).get("safe_climb", False)
+        )
         m = MPC(Config(planner_params) if planner_params else Config.load("avoid"))
         for name in ("M", "C", "q", "A0", "lower", "upper", "jlow", "jhigh", "a", "b"):
             self.register_buffer(name, torch.as_tensor(getattr(m, name), dtype=torch.float64))
@@ -135,6 +138,14 @@ class MPCActor(MLPModel):
             obs["braking"].flatten().bool(), solved, state[:, 3:6].norm(dim=-1), state[:, 6:].norm(dim=-1)
         )
         backup = brake_jerk(state, self.lower, self.upper, self.jlow, self.jhigh, 0.1)
+        climb = torch.zeros_like(valid)
+        if self.safe_climb_enabled:
+            climb = obs["climb_active"].flatten().bool()
+            vertical = safe_climb_jerk(
+                state, obs["climb_target"][:, 2].double(), self.lower, self.upper,
+                self.jlow, self.jhigh, 0.1,
+            )
+            backup = torch.where(climb[:, None], vertical, backup)
         jerk = torch.where(braking[:, None], backup, solution[:, :3])
         predicted = state @ self.a.T + jerk @ self.b.T
         rotation = obs["rotation"].reshape(-1, 3, 3).double()
@@ -156,6 +167,7 @@ class MPCActor(MLPModel):
             iterations=iterations,
             mean=mean.detach(),
             sfc_valid=valid,
+            climb_active=climb,
         )
         if stochastic_output:
             return torch.where(braking[:, None], self._backup, self.distribution.sample())
