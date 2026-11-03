@@ -2,11 +2,11 @@
 
 ## 当前结论
 
-固定四类 IPC 线性 jerk/SFC 问题的数值与成本梯度审计已通过。正式结果为 `results/turbompc-port/sfc-parity-cu130-v3.json`，其中 `passed=true`、`sfc_numerical_gate_passed=true`、`sources_unchanged=true`。验收时间为 2026-11-03 08:05 UTC。
+固定四类 IPC 线性 jerk/SFC 问题的数值与成本梯度审计已通过。最新回归对应 `403fc2ddb19e753ec959771cd1a4fa593328ce72` 的编译路径，结果为 [sfc-parity-compiled-cu130-v1.json](../results/turbompc-port/sfc-parity-compiled-cu130-v1.json)：`passed=true`、`sfc_numerical_gate_passed=true`、`sources_unchanged=true`，执行时间为2026-11-03 15:13:05–15:13:41 UTC。此前 `50b7298` 上的 eager `final-v1`、最初的 v3 和全部失败记录保留。
 
-SFC 数学问题、原生求解、成本梯度和一个固定低速障碍的真实 Newton/MJWarp 闭环均已通过。森林扩展场景继续使用冻结 SFC 代码验证；不从单次成功推断总体成功率。AC-MPC 非线性 CTBR 模型不属于本次数值结果。
+SFC 数学问题、原生求解、成本梯度及低速障碍、森林两个真实 Newton/MJWarp 闭环均已有通过证据。两次历史闭环各为一个固定种子及当时冻结的实现，不从单次成功推断总体成功率。当前核心本轮重跑编译数值与梯度协议，没有重跑这两个线性SFC真实场景；AC-MPC 非线性 CTBR 模型及其真实导航另有独立验证。
 
-前置 M4 使用已明确披露的统一 IR2 修正配置，正式汇总 `m4-ir2-accepted-v1.json` 的门槛为 true。未经修改的原版 A0 失败仍保留，SFC 结果不改写它。
+前置 M4 使用已明确披露的统一 IR2 修正配置。最新编译回归绑定正式 [final-v8](../results/turbompc-port/m4-ir2-accepted-final-v8.json)，其 `m4_gate_passed=true`，SHA256为 `9fd2a6e8d5e160b8ed6cc2eff3428e755bd9646fd4908d192c2d984e3eeb9e41`；四个 Batch 的400对前后向测量、数值、有限差分和来源门槛全部通过。历史各轮前置M4证据保留。未经修改的原版 A0 仍为 false，SFC 结果不改写它，也不覆盖中间正式 M4 轮次的失败。
 
 ## 代码与接口
 
@@ -70,7 +70,7 @@ v2 保存的证据明确显示：raw dual residual 为 `1.31776034e-5`，它低�
 
 这没有放宽原始约束 `1e-5`、控制误差 `1e-4`、梯度相对误差 `1e-3` 或原始 QP 必须 `SOLVED` 的门槛，也没有修改 M4 核心或既有测量。v1 未记录 raw 四元残差向量，因此不能事后补称取得了它的实际终止阈值；v2/v3 已记录 `[primal, dual, primal_limit, dual_limit]`。
 
-## v3 实测结果
+## 初次 v3 实测结果
 
 环境为 Python 3.12.14、PyTorch 2.11.0+cu130、CUDA 13.0、RTX 4090。审计采用 eager 执行，数值配置与生产 Actor 一致；本次不进行吞吐对照。
 
@@ -97,12 +97,76 @@ v2 保存的证据明确显示：raw dual residual 为 `1.31776034e-5`，它低�
 
 64 面容量增加 32 个无效面到 96 后，四例仍全部 `SOLVED`，全部控制的最大差为 `7.7384e-12`。源码前后哈希一致，加载的原生 `.so` 与成功构建记录匹配。
 
-## 证据与来源
+## 最终核心回归：final-v1
+
+本轮对应提交 `50b7298b6fdecfd923d3566705ed68584f9c01f8`，`solver.py` SHA256 为 `ed21a70911fa200e6b57af91e69e6f67e99860af3037670735c37a0618540d29`。审计脚本仍为上述 v3 使用的同一文件，SHA256 未变。逐项核对后，四个样例的初态、参考、成本、平面数量、全部外部验收阈值、两种有限差分步长、OSQP 配置及 ADMM 配置与原 v3 完全一致；没有替换或筛选样本。
+
+仍使用最多 15 次、绝对容差 `1e-6`、无搜索的 SQP，以及最多 16384 次、绝对容差 `1e-7`、相对容差 0 的 ADMM。新配置字段 `require_qp_convergence=False` 对应原协议的默认行为；独立审计本身继续要求四行的 SQP 和最终 raw QP 都为 `SOLVED`。该脚本没有 `--compile` 选项，本轮保持 **eager** 执行，没有将执行模式变更混入回归。
+
+环境仍为 Python 3.12.14、PyTorch 2.11.0+cu130、CUDA 13.0、OSQP 1.0.5、RTX 4090。四个原生基点在同一 B=4 调用中执行，全部 112 个 CPU OSQP 正负扰动求解及活动面稳定性检查通过；这些是独立 OSQP 有限差分参考，不是 112 次原生扰动求解。
+
+| 样例 | SQP / raw QP 状态 | SQP / 最后一次 QP 迭代数 | 首条 jerk 最大绝对误差 | 全部 jerk 最大绝对误差 | 七成本梯度最大相对误差 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `no_sfc` | `SOLVED / SOLVED` | 1 / 175 | `8.6509e-8` | `9.4005e-8` | `5.6515e-9` |
+| `interior_sfc` | `SOLVED / SOLVED` | 1 / 175 | `9.0649e-8` | `9.8385e-8` | `5.7103e-9` |
+| `terminal_active_sfc` | `SOLVED / SOLVED` | 1 / 8550 | `5.7428e-8` | `3.3401e-7` | `5.9324e-9` |
+| `redundant_active_sfc` | `SOLVED / SOLVED` | 1 / 1975 | `6.3112e-8` | `3.0874e-7` | `5.6798e-9` |
+
+表中梯度误差取两个步长中的最大相对 L2 误差；每个步长均分别通过 `1e-3` 门槛。四行均只执行一次 SQP，最后一次 QP 迭代数与本轮累计次数相同。
+
+| 汇总指标 | 最差实测值 | 保持的验收条件 |
+| --- | ---: | --- |
+| 凝聚 `H/g/A/l/u` 数据差 | `5.6843e-14` | `atol=1e-10, rtol=1e-12` |
+| 首条控制误差 | `9.0649e-8` | `<=1e-4` |
+| 全部 45 个控制误差 | `3.3401e-7` | `<=1e-4` |
+| 全部未来状态误差 | `3.3025e-8` | `<=1e-4` |
+| 初态/动力学等式残差 | `3.1043e-11` | `<=1e-5` |
+| 原始单位不等式违反 | `0` | `<=1e-5` |
+| 独立完整系统 stationarity | `9.8684e-8` | `<=1e-5` |
+| 独立凝聚系统 stationarity | `1.3710e-7` | `<=1e-5` |
+| 七成本梯度相对误差 | `5.9324e-9` | 两步长分别 `<=1e-3` |
+
+七成本梯度的最大绝对误差为 `1.9088e-9`。raw QP 的最大 primal / dual residual 分别为 `1.3935e-10 / 9.8684e-8`，对应绝对停止阈值均为 `1e-7`。容量从 64 增至 96，新增 32 个带 NaN 占位的无效面后，四行状态仍全部通过，全部控制最大差为 `1.8824e-11`。
+
+源码前后哈希一致，实际加载的原生 `.so` 与成功增量构建 manifest 对应，实际 cuDSS 路径与 SHA256 也已记录；具体库哈希与下列初次 v3 记录相同。该轮与独立 CTBR/真实 Newton 验证共享 GPU，**不以时延或吞吐作为 SFC 回归门槛**。本轮结论限于最终核心上的原 IPC 数学问题、真实约束与成本 VJP 回归；历史低速和森林的闭环范围仍以各自冻结实现和原始报告为准。
+
+## 当前编译核心回归：compiled-cu130-v1
+
+`403fc2d` 的 `_matvec` 优化只作用于编译路径，因此历史 eager 审计不能单独证明此次变更。新 producer 在 `build/turbompc/diagnostics/check_sfc_compiled_regression.py` 保存原脚本副本，只改三处：绝对项目根目录、`compile_kernels=True`、报告中的执行模式标签。将三处逆变换后，整个模块AST与原脚本完全一致；独立只读复核也确认字节等于这三次替换。原生产验收脚本未修改，准备证明保存在 `build/turbompc/sfc-compiled-producer-prep-v1.json`。
+
+四个样例、112次独立OSQP有限差分、两步长、全部成本、平面/mask、预算、容差及总门槛均保持原协议。当前调用使用CUDA13环境、N15、float64，真实执行 `compile_kernels=True`。四行SQP/raw QP均为0，SQP均1次，最后一次QP迭代分别为175、175、8550、1975；活动重复面仍全部保留。
+
+| 当前编译回归指标 | 最差实测 | 固定门槛 |
+| --- | ---: | ---: |
+| 首条控制误差 | `9.0648511e-8` | `1e-4` |
+| 全部控制误差 | `3.3399769e-7` | `1e-4` |
+| 全部未来状态误差 | `3.3022904e-8` | `1e-4` |
+| 初态/动力学等式残差 | `3.1043293e-11` | `1e-5` |
+| 原始单位不等式违反 | `0` | `1e-5` |
+| 独立完整系统 stationarity | `9.8685216e-8` | `1e-5` |
+| 独立凝聚系统 stationarity | `1.3709612e-7` | `1e-5` |
+| 七成本梯度相对误差 | `5.9320661e-9` | 两步长各 `1e-3` |
+
+容量64增加至96、无效面含NaN占位后，四行继续通过，全部控制最大差为 `1.9319657e-11`。实际加载的native/cuDSS与原CUDA13构建一致，全部源文件、HEAD、producer和前置M4哈希运行前后相同。该回归在共享GPU上完成，不增加性能门槛，不复用历史模型或闭环结果来代替新编译数值证据。
+
+| 证据 | SHA256 |
+| --- | --- |
+| [编译回归报告](../results/turbompc-port/sfc-parity-compiled-cu130-v1.json) | `31f7a1e11513b369bb4b9213cd99b285c616a67f46168dfe21a5ef1bb5587e1e` |
+| [原始数组](../results/turbompc-port/sfc-parity-compiled-cu130-v1.npz) | `1530e3186b69ae1d0b748325e4b9e7e732bf0cbda24304e7dd846708acd3e02d` |
+| [执行日志](../results/turbompc-port/sfc-parity-compiled-cu130-v1.log) | `cb3a97f52195e09b2ee12c9cd2576856c800bc6eab136c44ff36bf5c05433a36` |
+
+外围启动和源码守卫记录见 [sfc-parity-compiled-cu130-v1.execution.json](../results/turbompc-port/sfc-parity-compiled-cu130-v1.execution.json)。
+
+## 历史证据与来源
 
 路径均相对于本项目工作树。原始 JSON、NPZ 和失败版本脚本独占写入，未覆盖历史结果。
 
 | 文件 | SHA256 |
 | --- | --- |
+| `results/turbompc-port/sfc-parity-cu130-final-v1.json` | `1daf8bbf87e26ca165f1a5b7d06c08e800a10a2ef46fa2bb35d4432a6d3f5200` |
+| `results/turbompc-port/sfc-parity-cu130-final-v1.npz` | `d8c36468979fc2aa1313ef3df8b7de691a3aa4ace80878b193f140a245227f73` |
+| `results/turbompc-port/sfc-parity-cu130-final-v1.log` | `0bb009b97e81657833423ec0e3595aca3d899e3b3a274c1add369bf99bffe712` |
+| `results/turbompc-port/m4-ir2-accepted-final-v4.json` | `39f129f083a2d87178dbe7ab8547963bac836b923ed46a9a52e9da69907c9062` |
 | `results/turbompc-port/sfc-parity-cu130-v3.json` | `3b8e6880cb79c90c410abddab266e739c649ab0367d6af02955c3036a0803c7e` |
 | `results/turbompc-port/sfc-parity-cu130-v3.npz` | `9958378d1f214ae4809221964cd9bfa2b86b847b54d4c683be06131ea7241afd` |
 | `results/turbompc-port/sfc-parity-cu130-v1.json` | `7d476c66f1f0da9116873b08457eafb2bc9c46f9dad90bb3e35b1a859c148f7d` |
@@ -143,10 +207,11 @@ bash scripts/turbompc/env.sh cu130 env \
   PYTHONPATH="$PWD/src" WARP_CACHE_PATH="$PWD/build/warp-cache" \
   /home/tong/tongworkspace/free/isaaclab-IPC/.venv/bin/python -B \
   scripts/turbompc/check_sfc_parity.py \
-  --output results/turbompc-port/sfc-parity-cu130-new.json
+  --output results/turbompc-port/sfc-parity-cu130-new.json \
+  --m4-summary results/turbompc-port/m4-ir2-accepted-final-v4.json
 ```
 
-增加 `--preflight` 可仅运行 CPU 矩阵、OSQP 和有限差分检查；该模式不会声明完整 SFC 数值门槛通过。GPU 作业与本任务其他 GPU 验证串行，共享设备上的既有训练保持运行。
+增加 `--preflight` 可仅运行 CPU 矩阵、OSQP 和有限差分检查；该模式不会声明完整 SFC 数值门槛通过。运行时记录共享 GPU 情况；本次 final-v1 与其他数值/闭环验证并行，不用于性能比较。共享设备上的既有训练保持运行。
 
 ## 真实低速障碍闭环
 
@@ -160,8 +225,27 @@ bash scripts/turbompc/env.sh cu130 env \
 
 证据 SHA256：`records.json` 为 `f94f4b25acee9210065df5d7da10332b4a4ee9ff5fec8c487870b1d4ef53d5e0`；`metrics.json` 为 `bdbf6a21f6799f931d0c327e4b8332cc6a1a97638eb2ff137fab130fef798bcf`；`timing-ms.npy` 为 `86abdc44ce66c3bef25defd2e12b9c86f4dcf07261979ccf6e06224a1e876a77`。
 
-## 后续边界
+## 真实森林闭环
 
-森林扩展仍需记录到达、碰撞、失败恢复及完整时延。已有中速真实场景的失败历史不因本次低速成功而改变。
+固定实现 `c1889ae299e367c01d5ab6138ecb457cf39a4962`、seed=0、stride=6、B=1，使用 `Isaac-IPC-Forest-TurboMPC-Direct` 与零成本头。通过 Git archive 冻结 160 个源码文件，运行路径为 `build/turbompc/sfc-validation-c1889ae/`，允许 CTBR 在验证树独立开发而不改变正在执行的 SFC 源码。输出位于 `results/turbompc-port/sfc-real-forest-v1/`。
 
-SFC 独立数值和真实闭环完成后，开始 CTBR 的 Isaac Lab XYZW 到模型 WXYZ、世界系速度、机体系角速度、总推力单位和质量适配，并另行检查模型/Jacobian/梯度及闭环。
+- 356 步到达 8 m 森林目标，最终位置 `[7.511107,0.010235,1.042960]` m；无碰撞、命令/推力/实际状态越界、QP 或前端失败、制动和恢复事件。
+- 356 次原生调用、356 个接受步；全部 356 步有非空 SFC，最多 25 个有效平面。
+- 最大接受解原始约束残差 `1.5756571e-7`，最小物理步净间距 `0.3939347` m。
+- 全部 356 个样本的 Actor P50/P95 为 `574.354 / 5113.753` ms，完整控制步 P50/P95 为 `665.042 / 5271.135` ms，均值为 `1624.395 / 1751.262` ms。包含首步编译及所有尾部样本。
+- 墙钟约 `623.902` s，仿真时间 3.56 s。该结果也不满足 100 Hz 墙钟实时控制。
+
+独立来源旁车 `source-provenance.json` 核对运行前 manifest、运行后快照、Git 提交的 160/160 源文件以及几何扩展，全部一致；原始四个报告在旁车写入前后哈希不变。
+
+| 文件 | SHA256 |
+| --- | --- |
+| `sfc-real-forest-v1/source-provenance.json` | `e002d4de73c6a0e9f7ac29116e342afd7dec1a24edf44316d64be50746fdc071` |
+| `sfc-real-forest-v1/metrics.json` | `f260f94f89d0b84eab5ab044632f5a8a7625010f5a17641b8cd3b264284afd87` |
+| `sfc-real-forest-v1/timing-ms.npy` | `ca015f14b60795498e6039dd170404cc80a3f779e479e995fd516d8d89933d4f` |
+| 冻结快照 `source-manifest.json` | `aef8f74d8793302ee4b38de8c5916bc49699687f1c70e5423489b1ff4c7f7905` |
+
+## 验证范围
+
+已有中速真实场景的失败历史不因上述低速和森林成功而改变。这里证明固定场景的数值与真实闭环链条成立，没有进行多种子成功率或实时控制验收。
+
+SFC 独立数值和低速真实闭环完成后，才开始 CTBR 的 Isaac Lab XYZW 到模型 WXYZ、世界系速度、机体系角速度、总推力单位和质量适配；非线性模型/Jacobian/梯度及闭环另行验收。

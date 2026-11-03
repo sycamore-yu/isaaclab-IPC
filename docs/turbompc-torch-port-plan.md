@@ -92,5 +92,5 @@
 ## 当前进度
 
 - M0–M3 的环境、原生接口、Torch SQP 与隐式微分已经实现。CUDA 12 和 CUDA 13 原生目标测试通过。
-- M4 的官方接口和共享 GPU 配对实验已完成。未修改 A0 的稀疏 KKT 精度问题和失败记录保留；本轮明确采用两端共同 IR2 配置，独立汇总 `m4-ir2-accepted-v1.json` 通过，不能表述为未修改 A0 通过。
-- M5 的 IPC/SFC 原生接口、同 QP 组装、成本梯度及低速真实闭环已经验证；冻结 SFC 版本继续森林验证，并开始 CTBR 独立实施。最新状态见 `turbompc-torch-progress.md` 与 `turbompc-sfc.md`。
+- M4 的官方接口和共享 GPU 配对实验已完成。未修改 A0 的稀疏 KKT 精度问题和失败记录保留；采用两端共同 IR2 配置的正式汇总通过，不能表述为未修改 A0 通过。后续核心修改分别复测并独立保存，最新版本、精确源码和原始数据以 [进度记录](turbompc-torch-progress.md) 为准。
+- M5 的 IPC/SFC 原生接口、同 QP 组装、成本梯度及低速和森林真实闭环已经验证。CTBR 非线性动力学、完整 KKT 成本梯度、模型闭环和 Newton 物理闭环已实现并通过相应检查；最终导航与 PPO 更新独立验收。具体结果及未完成项见 [SFC 验证](turbompc-sfc.md)、[CTBR 验证](turbompc-ctbr.md) 和 [进度记录](turbompc-torch-progress.md)。
