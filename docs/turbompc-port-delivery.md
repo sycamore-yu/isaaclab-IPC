@@ -2,6 +2,8 @@
 
 日期：2026-11-03 UTC。工作树：`/home/tong/tongworkspace/free/.worktrees/isaaclab-IPC/turbompc-torch-native-verified`；独立分支：`feat/turbompc-torch-native-verified`。
 
+两个已测参考前端提交已顺序集成为 `a37cf21` 和 `282a3fa92c8b738e520ec331a081b61a84d5ce92`。集成后的144项冻结源码、155项追踪运行/测试文件（含二进制fixture）、CUDA12基准产物、CUDA13实际加载库与manifest均核对一致；与被测候选的Git差异只有文档。源码映射检查12项全真，未重新执行GPU测试。[集成一致性报告](../results/turbompc-port/native-port-integrated-source-v1.json)
+
 原生求解器、CUDA12/13独立环境、共同IR2配置的M4、IPC SFC和AC-MPC CTBR接入已经完成。最新固定成本导航按原seed0协议完整执行1076步并到达目标；同一参考前端的一次PPO更新与checkpoint回放也通过。总体验收的限定结论为 `qualified_migration_acceptance_passed=true`，**未经修改上游A0的M4仍为false**。[总体索引v2](../results/turbompc-port/native-port-completion-v2.json)
 
 ## 实现和实际被测来源
@@ -111,6 +113,7 @@ CTBR入口显式将Isaac状态的XYZW重排为WXYZ，位置与SFC采用同一环
 | 核心证据 | SHA256 |
 | --- | --- |
 | [总体索引v2](../results/turbompc-port/native-port-completion-v2.json) | `8dc396aeb05e8a363d613db58721581f6b8e357cdda46e05bac4a5dfe04c8dbb` |
+| [集成一致性](../results/turbompc-port/native-port-integrated-source-v1.json) | `366fdf9428b6e408133172576037dc045ce4ccf32fcd2f2768ab193209ab1cc4` |
 | [M4 final-v8](../results/turbompc-port/m4-ir2-accepted-final-v8.json) | `9fd2a6e8d5e160b8ed6cc2eff3428e755bd9646fd4908d192c2d984e3eeb9e41` |
 | [导航v4](../results/turbompc-port/ctbr-real-low-v4-acceptance.json) | `e56ee5fdc8687d37bec42ef42526d05e2a2dee2dbb3c66c1094ed2899139c526` |
 | [PPO v5](../results/turbompc-port/ctbr-train-smoke-v5-acceptance.json) | `008d2f44ec8e61e687cd6a00d34fe87941e22c82004c02aa9ebc434e30fb36dc` |

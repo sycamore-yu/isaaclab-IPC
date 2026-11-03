@@ -14,6 +14,8 @@
 
 最新参考余量策略 V2 的冻结候选 `1a71d69` 已通过 [导航 v4 独立验收](../results/turbompc-port/ctbr-real-low-v4-acceptance.json)：原 seed0、固定成本与场景协议完整执行1076步，在原目标半径内结束，碰撞、约束违反、求解/前端失败、恢复和制动计数均为0。同一候选的 [PPO v5 一次更新](../results/turbompc-port/ctbr-train-smoke-v5-acceptance.json) 也通过。结合来源相同的核心组件证据，[最终组件索引 v2](../results/turbompc-port/native-port-completion-v2.json) 的七个限定验证域均通过，`qualified_migration_acceptance_passed=true`。这一结论保留共同 IR2 的前提、未修改原版 A0 的 M4 失败、旧导航失败，以及单 seed 低速导航和单次 PPO 更新的范围；不表示未见动态障碍的通用安全保证或墙钟100Hz能力。
 
+已测前端现已顺序集成到verified分支，代码提交 `282a3fa92c8b738e520ec331a081b61a84d5ce92`。144项冻结来源、155项运行/测试文件和CUDA12/13相关构建产物逐字核对一致，分支差异只有文档；核心实际403、前端实际1a71的原执行身份继续保留。[集成一致性报告](../results/turbompc-port/native-port-integrated-source-v1.json)
+
 ## 实现边界
 
 | 文件 | 职责 |

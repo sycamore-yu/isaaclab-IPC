@@ -18,6 +18,7 @@ SFC 独立验证继续保留；CTBR 后续闭环和训练验收在专项说明�
 - SFC/CTBR 接入后的复测分别另存为 `candidate-ir2-official-linear-cu128-final-v1` 至 `final-v8`；各次源码与构建输入以对应报告的哈希守卫为准。
 - 最新核心M4被测提交：`403fc2ddb19e753ec959771cd1a4fa593328ce72`；solver SHA256：`314e9d672b93161be2bfdfdfb855c5d68a7db07d6baac9bc731e78d16131581c`，adjoint SHA256：`6fa2ad79292c2a383a0b2355fd3617adff2b0a6aab8b195cab542d3df909beb0`，CTBR polisher SHA256：`21953024352cf57da5c830daacd677963958442350a38dbf9924025ceff05c71`。最新导航/PPO实际被测前端提交为 `1a71d692c2eb2b3ca540146def685d7879e5852b`，上述核心和原生库未改变；两种测试身份分开记录。
 - 参考仓库只读；构建、虚拟环境和结果均位于本工作树。
+- 已测前端的两个提交已经依次集成为 `a37cf21` 与 `282a3fa92c8b738e520ec331a081b61a84d5ce92`；运行代码与被测候选1a71逐字一致，后续仅更新交付文档。
 - 原项目依赖锁与正在运行的训练不作修改。用户已授权共享 GPU 验收，不等待空闲。
 
 原工作树后来出现另一个开发进程写入的 SFC、四旋翼和 Actor 草稿，并修改了 `solver.py` 和包入口。
@@ -603,3 +604,5 @@ CPU finalizer独立检查原始数组及官方jerk稳定FD证据后，正式给�
 [总体索引v2](../results/turbompc-port/native-port-completion-v2.json)已单次CPU汇总完成，SHA256 `8dc396aeb05e8a363d613db58721581f6b8e357cdda46e05bac4a5dfe04c8dbb`，`qualified_migration_acceptance_passed=true`。M4、编译SFC、CTBR模型、Newton、真实状态public29、导航v4和PPO v5七域原门槛及六项来源守卫全真；1187个文件哈希、24组源码/动态库边界、104个403到候选逐字一致的组件文件均核对，`provenance_issues=[]`。
 
 索引明确区分核心实际测试提交403、前端实际测试提交1a71和汇总时文档HEAD497。Newton使用原IPC环境直接控制，仅相关质量检查函数与候选保持AST一致，不能称旧600步是在新参考前端执行。`unmodified_upstream_m4_passed=false`继续保留；旧false索引v1和三轮导航失败未覆盖。CTBR吞吐、通用导航成功率及训练收敛均未评估。
+
+两个已测前端提交顺序合入verified分支后，[独立源码集成核验](../results/turbompc-port/native-port-integrated-source-v1.json)12项全真：144项冻结来源、155项Git运行/测试文件及全部fixture一致；CUDA12基准产物、实际Nav/PPO加载的CUDA13 native/cuDSS/geometry/runtime与manifest，以及候选库别名全部一致；无额外未追踪运行文件。集成代码提交为 `282a3fa92c8b738e520ec331a081b61a84d5ce92`，报告SHA256 `366fdf9428b6e408133172576037dc045ce4ccf32fcd2f2768ab193209ab1cc4`。与被测候选的分支差异仅文档；本次核验未调用Torch、仿真或GPU，不伪称在新Git提交重跑了旧测试。
