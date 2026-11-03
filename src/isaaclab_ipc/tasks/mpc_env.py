@@ -116,6 +116,10 @@ class IPCMPCEnv(IPCEnv):
             self.reported[i] = False
             self.episode_ids[i] += 1
 
+    def _adapt_planning_contexts(self, contexts):
+        """Default IPC identity; subclasses adapt before packing and feature construction."""
+        return contexts
+
     def _get_observations(self):
         tick = perf_counter()
         physical = super()._get_observations()["policy"]
@@ -132,6 +136,7 @@ class IPCMPCEnv(IPCEnv):
         sfc_valid = np.ones((self.num_envs, 1), bool)
         refs, states, margins, braking, yaw = [], [], [], [], []
         contexts = self.planning_batch.contexts(self.planners, values, clouds)
+        contexts = self._adapt_planning_contexts(contexts)
         for i, (planner, state, context) in enumerate(zip(self.planners, values, contexts, strict=True)):
             x, ref, corridor = context.state, context.reference, context.corridors
             sfc_valid[i] = context.valid

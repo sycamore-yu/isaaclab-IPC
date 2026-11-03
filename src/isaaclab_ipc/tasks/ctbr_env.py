@@ -1,12 +1,18 @@
 """Isaac Lab task adapting physical XYZW state to native CTBR MPC."""
 
 import math
+from dataclasses import asdict
 
 import gymnasium as gym
 import numpy as np
 import torch
 
 from isaaclab_ipc.assets.quadrotor import MASS, MAX_THRUST
+from isaaclab_ipc.corridor_storage import pack_corridors
+from isaaclab_ipc.ctbr_reference import (
+    REFERENCE_DIAGNOSTIC_FIELDS as REFERENCE_DIAGNOSTICS,
+)
+from isaaclab_ipc.ctbr_reference import CTBRReferenceConfig, adapt_ctbr_reference
 from isaaclab_ipc.turbompc.ctbr import CTBRConfig
 from isaaclab_ipc.turbompc.quadrotor import body_rates_from_isaac, reference_from_ipc, state_from_isaac
 
@@ -61,9 +67,24 @@ class CTBRMPCEnv(IPCMPCEnv):
 
     def _configure_gym_env_spaces(self):
         super()._configure_gym_env_spaces()
-        shapes = {"ctbr_state": (10,), "ctbr_reference": (15, 10), "body_rates": (3,)}
+        shapes = {
+            "ctbr_state": (10,),
+            "ctbr_reference": (15, 10),
+            "body_rates": (3,),
+            "nominal_reference": (15, 9),
+            "nominal_planes": (2, self.cfg.max_planes, 4),
+            "nominal_plane_mask": (2, self.cfg.max_planes),
+            "nominal_corridor_index": (15,),
+            "ctbr_reference_diagnostics": (len(REFERENCE_DIAGNOSTICS),),
+        }
         for name, shape in shapes.items():
-            self.single_observation_space[name] = gym.spaces.Box(-np.inf, np.inf, shape=shape, dtype=np.float64)
+            if name == "nominal_plane_mask":
+                space = gym.spaces.Box(0, 1, shape=shape, dtype=np.bool_)
+            elif name == "nominal_corridor_index":
+                space = gym.spaces.Box(-1, 1, shape=shape, dtype=np.int64)
+            else:
+                space = gym.spaces.Box(-np.inf, np.inf, shape=shape, dtype=np.float64)
+            self.single_observation_space[name] = space
         self.observation_space = gym.vector.utils.batch_space(self.single_observation_space, self.num_envs)
 
     def __init__(self, cfg, render_mode=None, **kwargs):
@@ -96,13 +117,75 @@ class CTBRMPCEnv(IPCMPCEnv):
             "physics_dt": self.cfg.sim.dt,
             "model_body_rate_limits_rad_s": self.ctbr_config.body_rate_limits,
             "model_specific_thrust_limits_m_s2": self.ctbr_config.specific_thrust_limits,
+            "reference_adaptation": {
+                "version": 1,
+                "options": asdict(CTBRReferenceConfig()),
+                "diagnostic_fields": list(REFERENCE_DIAGNOSTICS),
+                "policy_features": CTBR_FEATURES,
+                "scope": "Frozen rollout reference adaptation; actual measured state and original physical bounds are unchanged",
+                "backup_scope": "A bounded constructive backup in one original polytope; virtual-speed checks do not certify the actual state or the returned multi-polytope schedule",
+                "not_certified_meaning": "The particular backup was not certified, not a proof that the original problem is infeasible",
+                "geometry_validity_unchanged": True,
+            },
         }
 
+    def _adapt_planning_contexts(self, contexts):
+        """Freeze CTBR adaptation once during observation acquisition, before packing."""
+        state, capture = self._ctbr_reference_capture
+        actual = state.detach().cpu().numpy().copy()
+        actual.flags.writeable = False
+        nominal_planes = np.zeros((self.num_envs, 2, self.cfg.max_planes, 4))
+        nominal_mask = np.zeros(nominal_planes.shape[:-1], dtype=bool)
+        nominal_index = np.full((self.num_envs, self.ctbr_config.horizon), -1, dtype=np.int64)
+        nominal_reference, adapted, diagnostics = [], [], []
+        for i, (context, planner) in enumerate(zip(contexts, self.planners, strict=True)):
+            original_state, original_valid = context.state.copy(), context.valid
+            nominal_reference.append(context.reference.copy())
+            if context.corridors:
+                nominal_planes[i], nominal_mask[i], nominal_index[i] = pack_corridors(
+                    context.corridors, self.cfg.max_planes
+                )
+            original_path = planner.path.copy()
+            original_path.flags.writeable = False
+            updated, audit = adapt_ctbr_reference(
+                context, actual[i], self.ctbr_config, path=original_path, nearest=planner.nearest
+            )
+            if (
+                not np.array_equal(context.state, original_state)
+                or not np.array_equal(updated.state, original_state)
+                or context.valid != original_valid
+                or updated.valid != original_valid
+            ):
+                raise RuntimeError("CTBR reference adaptation must preserve measured state and geometry validity")
+            adapted.append(updated)
+            diagnostics.append(audit)
+        capture.update(
+            nominal_reference=torch.as_tensor(np.stack(nominal_reference), device=self.device),
+            nominal_planes=torch.as_tensor(nominal_planes, device=self.device),
+            nominal_plane_mask=torch.as_tensor(nominal_mask, device=self.device),
+            nominal_corridor_index=torch.as_tensor(nominal_index, device=self.device),
+            ctbr_reference_diagnostics=torch.tensor(
+                [[item[key] for key in REFERENCE_DIAGNOSTICS] for item in diagnostics],
+                dtype=torch.float64,
+                device=self.device,
+            ),
+        )
+        # Detailed local actual/virtual backup traces are last-call diagnostics,
+        # not policy inputs or a replacement for the frozen observation fields.
+        self.ctbr_reference_audit = diagnostics
+        return adapted
+
     def _get_observations(self):
-        result = super()._get_observations()
         pose, twist = self.body_state()
         state = state_from_isaac(pose, twist, self.scene.env_origins)
         body_rates = body_rates_from_isaac(pose, twist)
+        capture = {}
+        self._ctbr_reference_capture = (state, capture)
+        try:
+            result = super()._get_observations()
+        finally:
+            del self._ctbr_reference_capture
+        result.update(capture)
         result.update(
             ctbr_state=state,
             ctbr_reference=reference_from_ipc(result["reference"], result["yaw_target"]),
