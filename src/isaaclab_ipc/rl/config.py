@@ -44,3 +44,16 @@ class MPCTrainCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
         use_clipped_value_loss=True,
     )
+
+
+@configclass
+class TurboMPCActorCfg(MPCActorCfg):
+    class_name = "isaaclab_ipc.rl.turbo_actor:TurboMPCActor"
+    qp_iterations = 16384
+    compile_kernels = True
+
+
+@configclass
+class TurboMPCTrainCfg(MPCTrainCfg):
+    experiment_name = "ipc_turbompc"
+    actor = TurboMPCActorCfg()

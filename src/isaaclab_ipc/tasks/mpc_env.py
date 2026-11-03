@@ -78,6 +78,10 @@ class IPCMPCEnv(IPCEnv):
         self.state_violations = np.zeros(self.num_envs, int)
         self.qp_residual_max = np.zeros(self.num_envs)
         self.qp_failures = np.zeros(self.num_envs, int)
+        self.accepted_qp_residual_max = np.zeros(self.num_envs)
+        self.accepted_qp_steps = np.zeros(self.num_envs, int)
+        self.sfc_constrained_steps = np.zeros(self.num_envs, int)
+        self.maximum_sfc_planes = np.zeros(self.num_envs, int)
         self.reported = np.zeros(self.num_envs, bool)
         self.episode_ids = np.zeros(self.num_envs, int)
         self.current_context = None
@@ -105,6 +109,10 @@ class IPCMPCEnv(IPCEnv):
             self.command_violations[i] = self.thrust_violations[i] = self.state_violations[i] = 0
             self.qp_residual_max[i] = 0
             self.qp_failures[i] = 0
+            self.accepted_qp_residual_max[i] = 0
+            self.accepted_qp_steps[i] = 0
+            self.sfc_constrained_steps[i] = 0
+            self.maximum_sfc_planes[i] = 0
             self.reported[i] = False
             self.episode_ids[i] += 1
 
@@ -202,6 +210,9 @@ class IPCMPCEnv(IPCEnv):
         data = {k: v.cpu().numpy() for k, v in result.items() if isinstance(v, torch.Tensor)}
         elapsed = self.elapsed.cpu().numpy()
         sampled = actions.cpu().numpy()
+        schedule = self.current_context["corridor_index"]
+        face_counts = self.current_context["plane_mask"].sum(-1).gather(1, schedule.clamp_min(0))
+        max_faces = face_counts.masked_fill(schedule < 0, 0).amax(-1).cpu().numpy()
         for i, planner in enumerate(self.planners):
             status = "solved" if data["solved"][i] else "max iterations reached"
             if not data["sfc_valid"][i]:
@@ -213,6 +224,8 @@ class IPCMPCEnv(IPCEnv):
                 float(elapsed[i]),
             )
             if not self.reported[i]:
+                self.sfc_constrained_steps[i] += max_faces[i] > 0
+                self.maximum_sfc_planes[i] = max(self.maximum_sfc_planes[i], int(max_faces[i]))
                 val = np.r_[data["predicted"][i, 3:], data["jerk"][i]]
                 low = np.r_[planner.mpc.lower, planner.mpc.jlow[:3]]
                 high = np.r_[planner.mpc.upper, planner.mpc.jhigh[:3]]
@@ -223,6 +236,11 @@ class IPCMPCEnv(IPCEnv):
                 if data["sfc_valid"][i]:
                     self.qp_failures[i] += not data["solved"][i]
                     self.qp_residual_max[i] = max(self.qp_residual_max[i], float(data["primal"][i]))
+                    if data["solved"][i] and not data["braking"][i]:
+                        self.accepted_qp_steps[i] += 1
+                        self.accepted_qp_residual_max[i] = max(
+                            self.accepted_qp_residual_max[i], float(data["primal"][i])
+                        )
         super()._pre_physics_step(actions)
 
     def _get_rewards(self):
@@ -309,6 +327,10 @@ class IPCMPCEnv(IPCEnv):
                     recovery_events=planner.recovery_events,
                     brake_steps=planner.brake_steps,
                     maximum_qp_primal_residual=float(self.qp_residual_max[i]),
+                    accepted_qp_steps=int(self.accepted_qp_steps[i]),
+                    maximum_accepted_qp_primal_residual=float(self.accepted_qp_residual_max[i]),
+                    sfc_constrained_steps=int(self.sfc_constrained_steps[i]),
+                    maximum_sfc_planes=int(self.maximum_sfc_planes[i]),
                     minimum_physics_step_clearance_m=float(self.min_clearance[i]),
                     final_position=self.extras["terminal_position"][i].cpu().tolist(),
                 )

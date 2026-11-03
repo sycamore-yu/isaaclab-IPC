@@ -67,6 +67,7 @@ def main():
     config = dict(task=args.task, runner=agent_cfg, environment=env_cfg.to_dict())
     (args.output / "config.json").write_text(json.dumps(config, indent=2, default=str))
     env = RslRlVecEnvWrapper(gym.make(args.task, cfg=env_cfg))
+    actor = None
     try:
         runner_config.device = device
         runner_config.max_iterations = agent_cfg["max_iterations"]
@@ -135,11 +136,12 @@ def main():
                         unsolved = ~actor.last_result["solved"] & actor.last_result["sfc_valid"]
                         if unsolved.any() and not failure_saved:
                             costs = actor.mlp(actor.get_latent(obs))
-                            problem = actor.problem(obs, costs)
+                            problem = actor.problem_snapshot(obs[unsolved], costs[unsolved])
                             torch.save(
                                 dict(
                                     observation=obs.cpu(),
-                                    problem=[v.cpu() for v in problem],
+                                    problem_rows=unsolved.nonzero().flatten().cpu(),
+                                    problem={name: value.detach().cpu() for name, value in problem.items()},
                                     result={
                                         k: v.cpu() if isinstance(v, torch.Tensor) else v
                                         for k, v in actor.last_result.items()
@@ -178,13 +180,18 @@ def main():
                 actor_mean_ms=float(np.mean(times, axis=0)[0]),
                 step_mean_ms=float(np.mean(times, axis=0)[1]),
             )
+        metrics["mpc"] = actor.solver_metadata()
         metrics["wall_s"] = perf_counter() - start
         metrics["frontend_mean_ms"] = float(np.mean(env.unwrapped.frontend_times))
         (args.output / "records.json").write_text(json.dumps(env.unwrapped.records, indent=2))
         (args.output / "metrics.json").write_text(json.dumps(metrics, indent=2))
         print(json.dumps(metrics), flush=True)
     finally:
-        env.close()
+        try:
+            if actor is not None:
+                actor.close()
+        finally:
+            env.close()
 
 
 if __name__ == "__main__":

@@ -109,8 +109,8 @@ class MPCActor(MLPModel):
         a = torch.cat((self.A0.expand(len(state), -1, -1), sfc_a), 1)
         return h, g, a, lo, hi, state
 
-    def forward(self, obs, masks=None, hidden_state=None, stochastic_output=False):
-        costs = self.mlp(self.get_latent(obs))
+    def _solve_context(self, obs, costs):
+        """Solve this immutable observation without changing the online Planner."""
         h, g, a, lo, hi, state = self.problem(obs, costs)
         valid = obs["sfc_valid"].flatten().bool()
         if valid.all():
@@ -124,6 +124,23 @@ class MPCActor(MLPModel):
             if valid.any():
                 x, ok, rp, rd, iterations = self.solver(h[valid], g[valid], a[valid], lo[valid], hi[valid])
                 solution[valid], solved[valid], primal[valid], dual[valid] = x, ok, rp, rd
+        return solution, solved, primal, dual, iterations, state
+
+    def problem_snapshot(self, obs, costs):
+        """Expose the actual problem for failed-solve diagnostics."""
+        values = self.problem(obs, costs)
+        return dict(zip(("H", "g", "A", "lower", "upper", "state"), values, strict=True))
+
+    def close(self):
+        """The condensed Torch solver owns no external CUDA workspace handles."""
+
+    def solver_metadata(self):
+        return {"backend": "condensed-torch", "dynamics": "ipc-jerk", "horizon": 15}
+
+    def forward(self, obs, masks=None, hidden_state=None, stochastic_output=False):
+        costs = self.mlp(self.get_latent(obs))
+        solution, solved, primal, dual, iterations, state = self._solve_context(obs, costs)
+        valid = obs["sfc_valid"].flatten().bool()
         braking = next_braking(
             obs["braking"].flatten().bool(), solved, state[:, 3:6].norm(dim=-1), state[:, 6:].norm(dim=-1)
         )
