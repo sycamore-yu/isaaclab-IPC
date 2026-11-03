@@ -53,6 +53,12 @@ class Planner:
         self._corridor_cloud = self.cloud
         self._grid_cloud = None
         self._grid_radius = None
+        self.incremental_voxels = None
+        self.warp_grid = None
+        if frontend and frontend.get("gpu_incremental", False):
+            from .incremental_voxels import IncrementalVoxelCentroids
+
+            self.incremental_voxels = IncrementalVoxelCentroids(frontend["cloud_leaf"])
         self.corridor_evaluations = 0
         self.corridor_cache_hits = 0
         self.path = np.empty((0, 3))
@@ -73,11 +79,28 @@ class Planner:
             raise ValueError("Point cloud must be finite")
         frontend = self.cfg.params.get("frontend")
         if frontend:
-            # Fixed SUPER maps retain observed occupancy; never preload the full collision PCD.
-            points = np.vstack((self.cloud, cloud))
+            # Fixed SUPER maps accumulate observed points only, never the full collision PCD.
             low, high = np.asarray(frontend["workspace"])
-            valid = ((points >= low) & (points <= high)).all(1)
-            self.cloud = voxel_centroids(points[valid], frontend["cloud_leaf"])
+            if self.incremental_voxels is not None:
+                valid = ((cloud >= low) & (cloud <= high)).all(1)
+                removed, added, rebuilt = self.incremental_voxels.update(cloud[valid])
+                if not len(removed) and not len(added):
+                    return
+                self.cloud = self.incremental_voxels.points
+                if self.warp_grid is None:
+                    from .warp_inflation import WarpInflatedGrid
+
+                    self.warp_grid = WarpInflatedGrid(
+                        frontend["resolution"], frontend["size"], frontend["center"],
+                        self.cfg.params["astar"]["expand_fix"],
+                    )
+                self.warp_grid.update(removed, added, self.grid, reset=rebuilt)
+                self._grid_cloud = self.cloud
+                self._grid_radius = self.cfg.params["astar"]["expand_fix"]
+            else:
+                points = np.vstack((self.cloud, cloud))
+                valid = ((points >= low) & (points <= high)).all(1)
+                self.cloud = voxel_centroids(points[valid], frontend["cloud_leaf"])
         else:
             self.frames.append(cloud.copy())
             points = np.concatenate(self.frames)
@@ -104,7 +127,7 @@ class Planner:
                     found = True
             if found:
                 return p
-        raise RuntimeError("No free A* endpoint in the local map")
+        raise InvalidCorridorError("No free A* endpoint in the local map")
 
     def _refresh_grid(self, radius):
         if self.cfg.params.get("frontend"):

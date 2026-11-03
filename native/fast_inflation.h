@@ -3,6 +3,7 @@ void LoaclAstarClass::setObsMatrixFast(
     const Eigen::Ref<const Eigen::Matrix<double,Eigen::Dynamic,3,Eigen::RowMajor>>& cloud, double radius) {
     if(!std::isfinite(radius)||radius<0) throw std::invalid_argument("Invalid inflation radius");
     const size_t cells=size_t(GL_SIZE_(0))*GL_SIZE_(1)*GL_SIZE_(2);
+    packed_.clear();
     memset(grid_map_,0,cells);
     std::vector<double> offsets;
     for(double d=-radius;d<=radius;d+=resolution_) offsets.push_back(d);

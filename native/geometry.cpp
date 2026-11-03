@@ -2,6 +2,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/eigen.h>
 #include <pybind11/stl.h>
+#include <pybind11/numpy.h>
 #include <optional>
 #include "local_astar.cpp"
 #include "fast_inflation.h"
@@ -56,6 +57,10 @@ PYBIND11_MODULE(_geometry,m){
         })
         .def("cloud",&LoaclAstarClass::setObsVector,py::call_guard<py::gil_scoped_release>())
         .def("cloud_fast",&LoaclAstarClass::setObsMatrixFast,py::call_guard<py::gil_scoped_release>())
+        .def("load_bits",[](LoaclAstarClass& g,py::array_t<uint32_t,py::array::c_style> data) {
+            if(data.ndim()!=1)throw std::invalid_argument("Packed occupancy must be a 1D uint32 array");
+            g.loadPackedOccupancy(data.data(),data.size());
+        },py::call_guard<py::gil_scoped_release>())
         .def("occupancy_matches",&LoaclAstarClass::sameOccupancy)
         .def("free",&LoaclAstarClass::CheckPoint)
         .def("endpoint_free",&LoaclAstarClass::CheckStartEnd)

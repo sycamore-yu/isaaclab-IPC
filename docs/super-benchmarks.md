@@ -109,4 +109,4 @@ SUPER 的速度/加速度罚项针对向量模；IPC 仍为逐轴硬界，二者
 
 `results/super-benchmark-20261103/` 保存完整源配置、有效运行配置核对、测试与运行记录。
 正式 RRD：`recordings/super_high_speed_ipc_newton.rrd`、`recordings/super_dense_ipc_newton.rrd`。
-两次录制正在进行；结果以各自 `records.json` 的实际终止状态为准。
+原先两次 RRD 为历史尝试，不作为已完成任务的成功率。High-speed 曾在局部终点被占据时出现不可恢复异常；Dense 旧尝试尚无完整 episode 统计。新结果必须使用独立文件名，并检查实际终止记录。

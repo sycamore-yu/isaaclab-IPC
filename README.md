@@ -175,3 +175,9 @@ Git 保存源码、配置、锁文件、测试和文档。
 录制目录与对应配置见 [执行配置](docs/execution-profiles.md#rerun-录制)。
 
 SUPER High-speed / Dense 场景、参数对应与录制命令见 [SUPER 场景](docs/super-benchmarks.md)。
+
+
+## SUPER Dense 增量前端
+
+SUPER 场景默认使用 GPU 增量占据栅格，保留原有 IPC A*、PathCover/RISP、Newton 与 CUDA MPC。
+实现、耗时、验证边界见 [增量前端说明](docs/gpu-incremental-front.md)。

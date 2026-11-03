@@ -72,13 +72,30 @@ def main():
     }
     void setObs(""", 1)
     s = s.replace("    void setObs(", """    void setObsMatrixFast(const Eigen::Ref<const Eigen::Matrix<double,Eigen::Dynamic,3,Eigen::RowMajor>>& cloud,double radius);
+    void loadPackedOccupancy(const uint32_t* words, size_t count) {
+        const size_t cells = size_t(GL_SIZE_(0))*GL_SIZE_(1)*GL_SIZE_(2);
+        if (count != (cells + 31)/32) throw std::invalid_argument("Packed occupancy shape mismatch");
+        packed_.assign(words, words + count);
+    }
+    inline bool occupiedAt(size_t index) const {
+        return packed_.empty() ? grid_map_[index]!=0 : (packed_[index/32] >> (index%32)) & 1u;
+    }
     bool sameOccupancy(const LoaclAstarClass &other) const {
-        return resolution_==other.resolution_ && center_==other.center_ && gl_low_==other.gl_low_ &&
-            gl_upp_==other.gl_upp_ && GL_SIZE_==other.GL_SIZE_ &&
-            memcmp(grid_map_,other.grid_map_,size_t(GL_SIZE_(0))*GL_SIZE_(1)*GL_SIZE_(2))==0;
+        if (resolution_!=other.resolution_ || center_!=other.center_ || gl_low_!=other.gl_low_ ||
+            gl_upp_!=other.gl_upp_ || GL_SIZE_!=other.GL_SIZE_) return false;
+        if (!packed_.empty() && !other.packed_.empty()) return packed_==other.packed_;
+        const size_t cells=size_t(GL_SIZE_(0))*GL_SIZE_(1)*GL_SIZE_(2);
+        for(size_t i=0;i<cells;++i) if (occupiedAt(i)!=other.occupiedAt(i)) return false;
+        return true;
     }
     void setObs(""", 1)
-    s = s.replace("GridNodePtr ***GridNodeMap_;", "std::unordered_map<size_t, std::unique_ptr<GridNode>> nodes_;")
+    s = s.replace("GridNodePtr ***GridNodeMap_;", "std::unordered_map<size_t, std::unique_ptr<GridNode>> nodes_;\n    std::vector<uint32_t> packed_;")
+    s = s.replace("(grid_map_[idx_x*GL_SIZE_(1)*GL_SIZE_(2) + idx_y*GL_SIZE_(2) + idx_z] == 1)",
+                  "occupiedAt((size_t(idx_x)*GL_SIZE_(1)+idx_y)*GL_SIZE_(2)+idx_z)")
+    s = s.replace("(grid_map_[idx_x*GL_SIZE_(1)*GL_SIZE_(2) + idx_y*GL_SIZE_(2) + idx_z] < 1)",
+                  "!occupiedAt((size_t(idx_x)*GL_SIZE_(1)+idx_y)*GL_SIZE_(2)+idx_z)")
+    s = s.replace("void setObsVector(std::vector<Eigen::Vector3d> &cloud, double radius = 0.2) {",
+                  "void setObsVector(std::vector<Eigen::Vector3d> &cloud, double radius = 0.2) {\n        packed_.clear();")
     # Configurable SUPER extents need the final partial voxel, unlike IPC's divisible defaults.
     for axis in "xyz":
         s = s.replace(f"(gl_upp.{axis}() - gl_low.{axis}()) / resolution_;",

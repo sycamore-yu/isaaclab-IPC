@@ -38,7 +38,7 @@ def planner_params(name):
     low, high = center - size / 2, center + size / 2
     low[2], high[2] = mapping['virtual_ground_height'], mapping['virtual_ceil_height']
     params['frontend'] = dict(
-        resolution=mapping['resolution'], size=size.tolist(), center=center.tolist(),
+        resolution=mapping['resolution'], size=size.tolist(), center=center.tolist(), gpu_incremental=True,
         workspace=[low.tolist(), high.tolist()],
         cloud_leaf=min(case['simulation']['downsample_res'], mapping['resolution']),
         planning_horizon=source['super_planner']['planning_horizon'],
