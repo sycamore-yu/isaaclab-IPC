@@ -1,8 +1,8 @@
 # TurboMPC 原生移植进度
 
-更新：2026-11-03（UTC）。计划：`docs/turbompc-torch-port-plan.md`。
+更新：2026-11-03（UTC）。计划：`docs/turbompc-torch-port-plan.md`；集中交付说明：[turbompc-port-delivery.md](turbompc-port-delivery.md)。
 
-**提交 `403fc2d` 的 M4 `final-v8` 已正式通过。** 四批400对完整前向加反向、双步长有限差分、全部固定数值及性能门槛、328个源文件和10个构建产物来源守卫全部通过。A 明确为 `7050a4f + 三行 IR2`，原版 A0 仍失败。新编译 SFC 四例/112次独立OSQP有限差分、CTBR模型v6的116个开环/有限差分样本和四例各60步、Newton600步、保存导航失败点的29次公共求解与一次PPO更新均通过；导航v2已封存为 `FAILED_INCOMPLETE`，完整M5尚未通过。
+**原生Torch求解器已实现，提交 `403fc2d` 的 M4 `final-v8` 已正式通过；后续参考前端 `1a71d69` 的导航v4和PPO v5也已独立验收通过。** M4四批400对完整前向加反向、双步长有限差分、全部固定数值及性能门槛、328个源文件和10个构建产物来源守卫全部通过。A 明确为 `7050a4f + 三行 IR2`，原版 A0 仍失败。编译SFC四例/112次独立OSQP有限差分、CTBR模型v6的116个开环/有限差分样本和四例各60步、Newton600步、真实状态29次公共求解保留其实际403核心身份。最新导航在原seed0协议下完成1076步并达到原目标判据；PPO的一次更新/重载通过49项检查。历史导航v1/v2/v3失败不改写。
 `final-v7` 的 B16 P50 `1.157486 > 1.1` 失败完整保留。剖析后增加编译matvec融合，先通过独立CPU与GPU诊断，再执行完整 final-v8；CUDA原生库、输入、预算、阈值和计时边界不变。
 final-v8的206条负载记录利用率90%–100%、中位数99%；按用户授权在共享GPU上验收，不要求空闲。本轮通过不外推其他负载、独占性能或CTBR 10状态/4输入模型吞吐。
 `final-v1/v2/v3` 失败、成本组装编译负收益及全部原始记录均保留。尤其 `final-v3` 在较低负载下的 B16 P50 失败尚未由相同条件的最终代码复测消除。
@@ -16,7 +16,7 @@ SFC 独立验证继续保留；CTBR 后续闭环和训练验收在专项说明�
 - 历史 M0–M4 冻结被测代码：`a771284`；后续审计与文档修订不改动该次测量的求解器源码。
 - QP 审计、修正后的正式 gate、独立 IR2 完整实验入口固定于 `710cc8c`；原生求解器和构建输入与 `a771284` 完全一致。
 - SFC/CTBR 接入后的复测分别另存为 `candidate-ir2-official-linear-cu128-final-v1` 至 `final-v8`；各次源码与构建输入以对应报告的哈希守卫为准。
-- 最新通过时提交：`403fc2ddb19e753ec959771cd1a4fa593328ce72`；solver SHA256：`314e9d672b93161be2bfdfdfb855c5d68a7db07d6baac9bc731e78d16131581c`，adjoint SHA256：`6fa2ad79292c2a383a0b2355fd3617adff2b0a6aab8b195cab542d3df909beb0`，CTBR polisher SHA256：`21953024352cf57da5c830daacd677963958442350a38dbf9924025ceff05c71`。
+- 最新核心M4被测提交：`403fc2ddb19e753ec959771cd1a4fa593328ce72`；solver SHA256：`314e9d672b93161be2bfdfdfb855c5d68a7db07d6baac9bc731e78d16131581c`，adjoint SHA256：`6fa2ad79292c2a383a0b2355fd3617adff2b0a6aab8b195cab542d3df909beb0`，CTBR polisher SHA256：`21953024352cf57da5c830daacd677963958442350a38dbf9924025ceff05c71`。最新导航/PPO实际被测前端提交为 `1a71d692c2eb2b3ca540146def685d7879e5852b`，上述核心和原生库未改变；两种测试身份分开记录。
 - 参考仓库只读；构建、虚拟环境和结果均位于本工作树。
 - 原项目依赖锁与正在运行的训练不作修改。用户已授权共享 GPU 验收，不等待空闲。
 
@@ -34,7 +34,7 @@ SFC 独立验证继续保留；CTBR 后续闭环和训练验收在专项说明�
 | M2 | 已实现，目标回归通过 | Torch QP 组装、自动微分线性化、merit 线搜索、真实残差和逐样本状态；未宣称完整上游 API 等价 |
 | M3 | 已实现并验证 | 稀疏 KKT + 一阶 Torch autograd；成本、状态、约束和非线性有限差分通过 |
 | M4 | 当前403fc2d的final-v8通过 | 四批400对、数值/FD/来源/性能全过；共同IR2基线及原版A0失败身份不变 |
-| M5 | 编译SFC、CTBR模型116个开环/FD与240步闭环、Newton600步/公共29/一次PPO更新通过；完整导航失败 | 已完成验证全部绑定403fc2d与M4final-v8；导航v2保存状态在原控制界下无法留在任一原走廊，受控停止且未完成episode；正在隔离候选中修复CTBR参考生成 |
+| M5 | SFC与CTBR接入及既定数值/闭环验收通过 | 403核心：编译SFC、CTBR116个开环/FD与240步模型闭环、Newton600步/公共29；1a71前端：原协议1076步导航、PPO一次更新/重载；不外推多seed、CTBR森林、训练收敛或实时性 |
 
 M3 的原生梯度数值检查与 M4 的原版一致性是两个检查。不能以有限差分通过替代用户规定的 A/B 梯度门槛。
 
@@ -537,9 +537,9 @@ CPU finalizer独立检查原始数组及官方jerk稳定FD证据后，正式给�
 
 两套核心回归见 [matvec-core-results-v1.json](../results/turbompc-port/matvec-core-results-v1.json)，完整执行收尾见 [m4-final-v8.execution-completion.json](../results/turbompc-port/m4-final-v8.execution-completion.json)。当前编译SFC回归及CTBR后续验证分别见 [SFC专项](turbompc-sfc.md) 和 [CTBR专项](turbompc-ctbr.md)。
 
-## 当前CTBR完整复验与导航阻塞
+## 历史403核心复验与导航v2阻塞
 
-当前冻结版本的[总体索引](../results/turbompc-port/native-port-completion-v1.json)已经完成，SHA256为 `82e9a4d2d6860a29ab54634743b1919bf2141aa23f34a138f96c9302a8fd8081`。七个验证域中六个通过、实际导航失败，`qualified_migration_acceptance_passed=false`；所有HEAD、源文件、构建产物和索引前后哈希守卫通过。已终结的失败报告不等于完成episode，索引保留了这一区别。
+当时冻结版本的[总体索引v1](../results/turbompc-port/native-port-completion-v1.json)已经完成，SHA256为 `82e9a4d2d6860a29ab54634743b1919bf2141aa23f34a138f96c9302a8fd8081`。七个验证域中六个通过、实际导航失败，`qualified_migration_acceptance_passed=false`；所有HEAD、源文件、构建产物和索引前后哈希守卫通过。已终结的失败报告不等于完成episode，索引保留了这一区别。后续新参考前端的成功结果另列在下文，不能回写这一历史索引。
 
 `403fc2d` 的[模型v6报告](../results/turbompc-port/ctbr-acceptance-cu130-v6.json)和[执行收尾](../results/turbompc-port/ctbr-acceptance-cu130-v6.execution.json)现已完成：原116个开环/有限差分样本及四例各60步模型闭环全部通过，输入、预算、阈值、被测源码和实际加载库均保持原协议。与作者动力学前向差异最大 `4.98962e-13`；四例双步长成本梯度相对差最大 `3.59409e-7`。模型位置阶跃的最终位置误差为 `0.00652466 m`，固定墙面案例为 `0.00389987 m`。这些是独立NumPy离散模型闭环，不是障碍导航。
 
@@ -549,4 +549,57 @@ CPU finalizer独立检查原始数组及官方jerk稳定FD证据后，正式给�
 
 这次失败不同于v1的可修正KKT精度问题。[全控制可达性报告](../results/turbompc-port/ctbr-real-low-v2-corridor-reachability-cpu-v1.json)对保存的原二进制输入所定义的数学离散模型给出必要界：预测node4在两个原走廊中都不可能满足全部平面，至少一个面的归一化违反下界分别为 `0.0373412 m` 和 `0.0427631 m`。因此，增加求解迭代或仅改变两走廊切换时刻均不能解决该保存问题；报告没有把硬件浮点运算声称为严格区间认证。
 
-下一项实现位于独立 `build/turbompc/ctbr-reference-candidate` 工作树：在冻结Actor观测之前，利用当前CTBR状态和已经观测的原走廊调节参考推进，保留原几何、名义stride、物理界、H15/dt0.1和验收门槛。原始/调整后参考与调度将明确区分。该候选尚未完成验收，不能把其新规划问题描述为原失败QP已求解，也不能提前宣布完整M5通过。
+当时下一项实现位于独立 `build/turbompc/ctbr-reference-candidate` 工作树：在冻结Actor观测之前，利用当前CTBR状态和已经观测的原走廊调节参考推进，保留原几何、名义stride、物理界、H15/dt0.1和验收门槛。原始/调整后参考与调度明确区分。后续新规划问题的成功也不能描述为这个原失败QP已被求解。
+
+### CTBR参考调节候选v1
+
+候选已提交为 `3f9cd34`，分支 `feat/turbompc-ctbr-reference`，仍独立于固定验证分支。实现只改CTBR参考生成与父环境的恒等适配接点，求解器、模型、Actor、原物理界和场景参数保持原版本。在同一次观测中读取真实状态与规划器完整路径；先构造原允许控制下、单个当前原走廊内的有限制动轨迹，再从已记录的有限候选网格选择参考速度，并沿完整原路径重分配时间。实际状态与替换切向速度的虚拟状态分别检查，完整原平面与重复面均保留；局部制动见证不构成返回MPC时间分配、Newton物理或未来地图的递归可行性保证。
+
+15项[数学回归](../build/turbompc/ctbr-reference-candidate/tests/test_ctbr_reference.py)、7项[观测接口回归](../build/turbompc/ctbr-reference-candidate/tests/test_ctbr_reference_env.py)及13项既有Actor CPU回归通过。数学记录为[ctbr-reference-cpu-v1.json](../build/turbompc/ctbr-reference-candidate/build/turbompc/ctbr-reference-cpu-v1.json)，未初始化CUDA。开阔案例的2/4m/s名义参考保持原样；受限案例按已检查网格选择较低速度；旧导航v2失败状态仍为实际制动未认证，原几何有效标记和输入保持不变。另修复了非零float32环境原点的观测精度比较，真实float64 CTBR状态不被回写或裁剪。
+
+候选与原M4组件的[冻结清单](../results/turbompc-port/ctbr-reference-candidate-v1-freeze.json)已生成，SHA256为 `f61ef8e3bea9ac72dd20755eef79ddaf6dabc7f59895f57046b5288544761c2b`。原seed0导航v3于 `2026-11-03 16:49:29.136023 UTC` 在共享GPU启动。记录器分别保存求解输入和物理步后的观测，原始/调整后参考、几何变化与实际状态均有同次调用快照。
+
+导航v3已[封存为FAILED_INCOMPLETE](../results/turbompc-port/ctbr-real-low-v3-acceptance.json)，不是完成episode。390次返回且执行的求解均final/raw/polish成功、未制动、几何有效且物理违反计数为零；其中原SQP为389次状态0和1次状态1，后一例由既定finisher认证收尾。首次新障碍几何在仿真3.90秒到达，状态位置x约6.13529m；[独立全控制必要界](../results/turbompc-port/ctbr-real-low-v3-first-geometry-reachability-cpu-v1.json)证明，该状态的node4在两个原走廊中分别至少违反0.0230970m/0.0299788m法向距离。新几何出现时才降低参考已经太迟，仅调整切换时刻也不可行。
+
+第391次求解未返回时，依据已保存的独立不可行证书，于17:07:08 UTC只对本次子进程受控SIGINT；其状态、迭代和残差保持unknown/null，未将中断伪报为耗尽原预算。child130/outer1、无终局records、完整来源守卫和334件产物均保留。该结果检验了候选v1的因果限制，不能归结为数值容差不足。
+
+同一冻结候选的[PPO v4独立验收](../results/turbompc-port/ctbr-train-smoke-v4-acceptance.json)49项通过：两批8×7原始成本VJP的16行均有限、非零，update/reload阶段不调用Planner或环境，checkpoint和optimizer一致。范围仍为一次更新、0个完整episode；成功行未持久化governor诊断，不能推断其实际触发次数。
+
+### 候选v2：当前水平净空内的制动余量，原协议导航通过
+
+新的隔离工作树为 `build/turbompc/ctbr-reserve-candidate`，从v1的`3f9cd34`出发。只在虚拟参考速度的选择中增加一条保守规则：构造的有限制动轨迹必须留在同一原polytope内，并将水平位移限制在该polytope当前高度截面的内接圆盘半径内。半径由已观测原平面的水平法向与当前余量计算；纯上下盖不产生水平半径限制。实际状态的原制动检查、MPC全体几何/物理约束、名义stride、目标、触发距离和时限不变。
+
+这是一项明确的新参考策略，会因可见侧壁净空降低狭窄走廊内的推进速度；它不是原约束的必要速度上限，也不保证未来未知障碍、Newton跟踪或无限时域安全。候选提交为 `1a71d692c2eb2b3ca540146def685d7879e5852b`；19项数学CPU检查与7项观测接口CPU检查通过。开阔场景2/4m/s保持原名义参考；实际状态检查、所有原平面和物理界未变。同一块polytope的水平半径与完整轨迹绑定，不能从不同polytope借用余量。冻结清单为 [ctbr-reserve-candidate-v2-freeze.json](../results/turbompc-port/ctbr-reserve-candidate-v2-freeze.json)，SHA256 `2d7dce0bc8861acf61bee79990b4a07209e948bbea39f409330ed771594254b6`。
+
+#### 原协议导航v4：完整终局与31项独立验收通过
+
+本轮在共享GPU于 `2026-11-03 17:16:49.470874–17:30:03.335600 UTC` 执行，保留原seed0、1环境、固定成本、stride10、goal10m、障碍距离1m、35s、全部感知/物理/求解参数。标准CLI输出完整1个episode，1076步均有实际原生求解、结果接受和SFC约束；原返回状态/raw ADMM/polish全部0。31项独立CPU审计核对原终局、5942个完整事件、560个几何快照及578项产物，全部通过。[导航v4验收](../results/turbompc-port/ctbr-real-low-v4-acceptance.json)，SHA256 `e56ee5fdc8687d37bec42ef42526d05e2a2dee2dbb3c66c1094ed2899139c526`。
+
+| 原协议指标 | 导航v4结果 |
+| --- | ---: |
+| 完整episode/原目标判据成功 | 1 / 1 |
+| 碰撞、超时、物理/推力/状态违反 | 全部0 |
+| 求解失败、前端失败、恢复事件、制动步 | 全部0 |
+| 接受求解步、SFC约束步 | 各1076 |
+| 最小物理子步间距 | 0.2194174826m |
+| 返回轨迹原等式/不等式最大误差 | 2.5535129566e-15 |
+| 返回stationarity最大值 | 9.3702823278e-14 |
+| raw ADMM primal/dual最大值 | 9.9957464528e-9 / 9.8984632529e-9 |
+
+终点真实位置为 `[9.53153038,-.132499963,1.013237834]m`，到配置目标 `[10,0,1]` 的距离为 `.487026965m`，满足原任务 `<.5m` 到达判据；不是声称x已越过10m。原SQP为1075次状态0和1次状态1；后者是solve974/obs975的60轮迭代上限、stationarity `1.626197537e-7`，经已经固定的finisher通过原证书。原阶段信息保留，没有修改raw状态或原预算。
+
+参考诊断完整保留32次reason6（obs678–709，仿真t6.760060–7.070067s；solve677–708）：有限虚拟速度网格没有候选通过额外水平余量条件，因而保留名义参考、`selected_backup_certified=false`。这些行的实际状态制动见证仍已认证，原MPC在完整原约束下求解并通过。额外余量只是参考筛选规则，不是每步成立的硬不变量；未计算的时序匹配标记也不能解读为物理违规。没有剔除这些行或放宽原验收。
+
+计时原样记录：墙钟774.172s，actor均值613.461ms、step均值718.505ms，包含首次编译与只读记录器开销；仿真控制周期为.01s。该数据不是CTBR的热态吞吐验收，也不支持100Hz墙钟实时结论。[原records](../results/turbompc-port/ctbr-real-low-v4/records.json) · [原metrics](../results/turbompc-port/ctbr-real-low-v4/metrics.json)。
+
+#### 同候选PPO v5：49项检查通过
+
+[PPO v5独立验收](../results/turbompc-port/ctbr-train-smoke-v5-acceptance.json)的SHA256为 `008d2f44ec8e61e687cd6a00d34fe87941e22c82004c02aa9ebc434e30fb36dc`。原16步rollout、2个B8 minibatch、1 epoch、1迭代与两次重载协议未变：34个Actor行全部valid/solved/unbraked，outer/raw状态0；两份完整8×7成本VJP逐值复算，16行均有限且非零；12个MLP参数hook有限、8个非零。更新与重载阶段Planner、env.step、reset及恢复调用全部0，12个optimizer state都为step2，checkpoint逐tensor一致。
+
+最大参数改变量为 `2.0013286849e-4`；确定性动作在同一克隆观测上按 `atol=1e-6, rtol=0` 重载一致。完整成本VJP可独立复算，动作数组与初始参数未保存，后两项按来源固定的进程内断言核对；不声称独立重算了未持久化数组。训练范围是一轮更新、0个完整episode，不能用于训练收敛或导航成功率结论。训练成功行未持久化详细参考诊断，触发次数保持unknown，不从导航轨迹代推。
+
+### 最终组件索引v2
+
+[总体索引v2](../results/turbompc-port/native-port-completion-v2.json)已单次CPU汇总完成，SHA256 `8dc396aeb05e8a363d613db58721581f6b8e357cdda46e05bac4a5dfe04c8dbb`，`qualified_migration_acceptance_passed=true`。M4、编译SFC、CTBR模型、Newton、真实状态public29、导航v4和PPO v5七域原门槛及六项来源守卫全真；1187个文件哈希、24组源码/动态库边界、104个403到候选逐字一致的组件文件均核对，`provenance_issues=[]`。
+
+索引明确区分核心实际测试提交403、前端实际测试提交1a71和汇总时文档HEAD497。Newton使用原IPC环境直接控制，仅相关质量检查函数与候选保持AST一致，不能称旧600步是在新参考前端执行。`unmodified_upstream_m4_passed=false`继续保留；旧false索引v1和三轮导航失败未覆盖。CTBR吞吐、通用导航成功率及训练收敛均未评估。

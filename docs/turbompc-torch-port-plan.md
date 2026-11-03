@@ -93,4 +93,4 @@
 
 - M0–M3 的环境、原生接口、Torch SQP 与隐式微分已经实现。CUDA 12 和 CUDA 13 原生目标测试通过。
 - M4 的官方接口和共享 GPU 配对实验已完成。未修改 A0 的稀疏 KKT 精度问题和失败记录保留；采用两端共同 IR2 配置的正式汇总通过，不能表述为未修改 A0 通过。后续核心修改分别复测并独立保存，最新版本、精确源码和原始数据以 [进度记录](turbompc-torch-progress.md) 为准。
-- M5 的 IPC/SFC 原生接口、同 QP 组装、成本梯度及低速和森林真实闭环已经验证。CTBR 非线性动力学、完整 KKT 成本梯度、模型闭环和 Newton 物理闭环已实现并通过相应检查；最终导航与 PPO 更新独立验收。具体结果及未完成项见 [SFC 验证](turbompc-sfc.md)、[CTBR 验证](turbompc-ctbr.md) 和 [进度记录](turbompc-torch-progress.md)。
+- M5 的 IPC/SFC 原生接口、同 QP 组装、成本梯度及低速和森林真实闭环已经验证。CTBR 非线性动力学、完整 KKT 成本梯度、模型闭环和 Newton 物理闭环已实现并通过相应检查。后续参考前端按当前已观测走廊的水平余量约束虚拟制动轨迹，候选 `1a71d69` 的原协议固定成本低速导航v4完整执行1076步并达到原目标判据，PPO v5一次更新/重载通过49项检查。核心测试保留原 `403fc2d` 身份，新前端由独立导航/PPO报告绑定，不用旧组件测试替代前端验证。具体结果、历史失败与范围见 [SFC 验证](turbompc-sfc.md)、[CTBR 验证](turbompc-ctbr.md) 和 [进度记录](turbompc-torch-progress.md)。这些验证不覆盖CTBR森林、多seed成功率、训练收敛或100Hz墙钟实时性。

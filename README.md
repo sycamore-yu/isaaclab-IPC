@@ -17,8 +17,9 @@ A 明确采用上游 `7050a4f` 加三行 cuDSS IR2 配置，B 同样使用 IR2�
 最终代码采用外层 SQP 融合、数值前向 detach 与反向准备融合、精确线性模型解析组装和编译矩阵向量积融合；负收益的成本组装编译、ADMM准备融合候选均未采用，实验与源码归档保留。
 
 IPC SFC 的独立数值、低速与森林真实闭环验证已完成；当前 `403fc2d` 的编译 SFC 数值回归也通过，保留四个固定场景和112次独立OSQP有限差分。低速与森林闭环数据对应其报告中的历史提交。
-当前 `403fc2d` 的 CTBR 模型v6已通过116个开环/有限差分样本和四例各60步模型闭环；Newton v6已通过悬停200步和位置阶跃400步。保存导航失败点的29次公共求解/有限差分、一次PPO更新与checkpoint重载也已独立验收通过。完整导航v2因原问题物理不可行而失败，受控停止后记录为 `FAILED_INCOMPLETE`；完整M5尚未通过。可达性证据排除了仅调整走廊切换时刻的修复，CTBR参考生成的调整正在独立候选工作树中开发。全部历史失败、原残差认证修复及实际运行边界单独记录。
-当前结果、调度开销诊断和逐阶段边界见 [移植进度](docs/turbompc-torch-progress.md)、[原生接口](docs/turbompc-native.md)、
+`403fc2d` 的 CTBR 模型v6已通过116个开环/有限差分样本和四例各60步模型闭环；Newton v6已通过悬停200步和位置阶跃400步，保存真实状态的29次公共求解/有限差分也通过。后续参考前端候选 `1a71d69` 保留这些核心与原生库，按当前可见走廊余量选择参考速度。[导航v4](results/turbompc-port/ctbr-real-low-v4-acceptance.json)已在原seed0、stride10、目标10m、障碍距离1m、35s协议下完成1076步、达到原目标判据，碰撞/超时/物理违反/求解失败/恢复/制动均为0，最小物理间距0.219417m；31项独立检查通过。[PPO v5](results/turbompc-port/ctbr-train-smoke-v5-acceptance.json)的一次实际更新与checkpoint重载通过49项检查。完整记录保留32次额外参考余量未认证的名义参考回退，以及1次原SQP迭代上限后经既定finisher认证通过的行。
+原导航v1/v2/v3失败及其不可行证据保留。这些结果覆盖一条固定成本低速导航、既定模型/物理样本和一次PPO更新，不声明CTBR森林、多seed成功率、训练收敛或100Hz墙钟实时性。各测试保留实际被测提交身份；当前核心的来源等价性与新前端的实际执行证据分别核验。
+完整交付与当前范围先见 [移植交付](docs/turbompc-port-delivery.md)。当前结果、调度开销诊断和逐阶段边界见 [移植进度](docs/turbompc-torch-progress.md)、[原生接口](docs/turbompc-native.md)、
 [SFC 验证](docs/turbompc-sfc.md)和 [CTBR 验证](docs/turbompc-ctbr.md)。
 
 ## 安装与运行
