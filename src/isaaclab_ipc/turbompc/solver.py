@@ -54,6 +54,9 @@ class MPCResult:
     normal_cone_error: torch.Tensor | None = None
     # Optional numerical refinement keeps its certificate separate from raw ADMM.
     polish: object | None = None
+    # Pre-refinement SQP diagnostics; None when no polisher is configured.
+    sqp_status: torch.Tensor | None = None
+    sqp_errors: torch.Tensor | None = None
 
     @property
     def states(self):
@@ -480,19 +483,28 @@ class TorchMPC:
                     break
             status = torch.where(status == -1, 1, status)
             polished, active_mask, duals = None, None, admm
+            sqp_status, sqp_errors = None, None
             if self.polisher is not None:
-                polished = self.polisher(self, forward_inputs, z, admm, (status == 0) & (admm.status == 0))
+                sqp_status, sqp_errors = status.clone(), errors.clone()
+                eligible = (status == 0) & (admm.status == 0)
+                if getattr(self.polisher, "finish_iteration_limit", False):
+                    finite = torch.isfinite(z).flatten(1).all(-1) & torch.isfinite(errors).all(-1)
+                    if normal_cone is not None:
+                        finite = finite & torch.isfinite(normal_cone)
+                    eligible = eligible | ((status == 1) & (admm.status == 0) & finite)
+                polished = self.polisher(self, forward_inputs, z, admm, eligible)
                 z, duals, active_mask = polished.trajectory, polished, polished.active_mask
                 qp = self._qp(forward_inputs, z)
                 errors = self._errors(forward_inputs, qp, z, duals)
-                valid = (polished.status == 0) & torch.isfinite(errors).all(-1)
+                valid = eligible & (polished.status == 0) & torch.isfinite(errors).all(-1)
                 valid = valid & (errors.amax(-1) <= self.config.tolerance)
                 if self.constraints is not None:
                     normal_cone = self._path_normal_cone(z, duals.y[..., inputs.G.shape[-2] :]).flatten(1).amax(-1)
                     valid = valid & torch.isfinite(normal_cone) & (normal_cone <= self.config.tolerance)
                 # Code 4 is a failed optional refinement, never a rewritten raw
                 # QP status. It follows the same zero-gradient failure contract.
-                status = torch.where((status == 0) & ~valid, 4, status)
+                status = torch.where(valid, 0, status)
+                status = torch.where(((sqp_status == 0) | eligible) & ~valid, 4, status)
         trajectory = _ImplicitTrajectory.apply(
             inputs.initial_state,
             inputs.D,
@@ -509,7 +521,18 @@ class TorchMPC:
             self,
             active_mask,
         )
-        return MPCResult(trajectory, status, iterations, errors, admm, self.dynamics.nx, normal_cone, polished)
+        return MPCResult(
+            trajectory,
+            status,
+            iterations,
+            errors,
+            admm,
+            self.dynamics.nx,
+            normal_cone,
+            polished,
+            sqp_status,
+            sqp_errors,
+        )
 
     def close(self):
         self.admm.close()

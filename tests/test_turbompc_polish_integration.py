@@ -12,6 +12,7 @@ import pytest
 import torch
 
 from isaaclab_ipc.turbompc import ADMMConfig, ADMMResult, AutoDiffDynamics, MPCInputs, SQPConfig, TorchMPC
+from isaaclab_ipc.turbompc.ctbr_polish import CTBRPolisher
 
 
 def transition(z):
@@ -232,6 +233,136 @@ def test_refined_trajectory_and_duals_control_full_hessian_vjp(monkeypatch, comp
         assert polisher.validations[0][0] is case.inputs
     finally:
         case.solver.close()
+
+
+@pytest.mark.parametrize("compiled", [False, True], ids=["eager", "compiled"])
+def test_iteration_limit_finisher_preserves_sqp_diagnostics_and_refined_vjp(monkeypatch, compiled):
+    polisher = AnalyticPolisher()
+    polisher.finish_iteration_limit = True
+    case = scalar_case(monkeypatch, polisher=polisher, compiled=compiled)
+    case.solver.config = replace(case.solver.config, tolerance=1e-7)
+    before = {field.name: getattr(case.raw, field.name).clone() for field in fields(case.raw)}
+    try:
+        result = case.solver.solve(case.inputs, case.raw.x)
+        assert result.sqp_status.tolist() == [1] and result.status.tolist() == [0]
+        assert result.iterations.tolist() == [1] and result.admm.status.tolist() == [0]
+        assert result.sqp_errors[0, 0].item() == pytest.approx(0.198, abs=1e-14)
+        assert result.sqp_errors.max() > case.solver.config.tolerance
+        assert result.errors.max() <= 1e-14
+        assert result.sqp_errors.data_ptr() != result.errors.data_ptr()
+        assert polisher.accepted[0].tolist() == [True]
+        gradient = torch.autograd.grad(result.controls[:, 0].sum(), case.inputs.q)[0]
+        assert gradient[0, 1, 0].item() == pytest.approx(-0.5, abs=1e-13)
+        # The complete nonlinear Hessian must use the certified -0.5 dual,
+        # not the raw approximate -0.4 dual from the exhausted SQP phase.
+        hessian, active, _, _ = case.reference.calls[-1]
+        assert hessian[0, 0, 1, 1].item() == pytest.approx(0, abs=1e-14)
+        assert not active.any()
+        assert_raw_preserved(result.admm, before)
+        assert_raw_preserved(case.raw, before)
+    finally:
+        case.solver.close()
+
+
+def test_iteration_limit_failed_certificate_keeps_finite_outputs_but_zero_gradient(monkeypatch):
+    class RefusedFinisher(AnalyticPolisher):
+        finish_iteration_limit = True
+
+        def __call__(self, solver, inputs, z, admm, accepted):
+            result = super().__call__(solver, inputs, z, admm, accepted)
+            result.status[accepted] = 2
+            result.errors[accepted] = 1
+            return result
+
+    polisher = RefusedFinisher()
+    case = scalar_case(monkeypatch, polisher=polisher)
+    case.solver.config = replace(case.solver.config, tolerance=1e-7)
+    before = {field.name: getattr(case.raw, field.name).clone() for field in fields(case.raw)}
+    try:
+        result = case.solver.solve(case.inputs, case.raw.x)
+        assert polisher.accepted[0].tolist() == [True]
+        assert result.sqp_status.tolist() == [1] and result.status.tolist() == [4]
+        assert result.polish.status.tolist() == [2]
+        assert torch.isfinite(result.trajectory).all()
+        gradient = torch.autograd.grad(result.controls.sum(), case.inputs.q)[0]
+        torch.testing.assert_close(gradient, torch.zeros_like(gradient), atol=0, rtol=0)
+        assert result.sqp_errors.max() > case.solver.config.tolerance
+        assert_raw_preserved(result.admm, before)
+    finally:
+        case.solver.close()
+
+
+def test_iteration_limit_mixed_rows_isolate_solved_limit_raw_limit_fatal_and_nonfinite(monkeypatch):
+    polisher = AnalyticPolisher()
+    polisher.finish_iteration_limit = True
+    case = scalar_case(monkeypatch, batch=5, polisher=polisher)
+    case.solver.config = replace(case.solver.config, tolerance=1e-7)
+    # Row 0 is an exact original SQP solution, row 1 exhausts its SQP budget.
+    case.raw.x[0] = case.raw.x.new_tensor([[0, 1], [1, 0]])
+    case.raw.lambda0[0], case.raw.lambda_dyn[0] = 0.5, -0.5
+    case.raw.status[2], case.raw.status[3] = 1, 2
+    case.raw.x[4] = torch.nan
+    before = {field.name: getattr(case.raw, field.name).clone() for field in fields(case.raw)}
+    try:
+        result = case.solver.solve(case.inputs, case.raw.x)
+        assert result.sqp_status.tolist() == [0, 1, 1, 2, 3]
+        assert result.status.tolist() == [0, 0, 1, 2, 3]
+        assert result.polish.status.tolist() == [0, 0, 1, 1, 1]
+        assert polisher.accepted[0].tolist() == [True, True, False, False, False]
+        gradient = torch.autograd.grad(result.controls.nan_to_num().sum(), case.inputs.q)[0]
+        torch.testing.assert_close(gradient[:2, 1, 0], gradient.new_full((2,), -0.5), atol=1e-13, rtol=0)
+        torch.testing.assert_close(gradient[2:], torch.zeros_like(gradient[2:]), atol=0, rtol=0)
+        assert torch.isfinite(gradient).all()
+        assert_raw_preserved(result.admm, before)
+        assert_raw_preserved(case.raw, before)
+    finally:
+        case.solver.close()
+
+
+def test_iteration_limit_finishing_requires_an_explicit_polisher_opt_in(monkeypatch):
+    for mode in ("none", "undeclared", "disabled"):
+        polisher = None if mode == "none" else AnalyticPolisher()
+        if mode == "disabled":
+            polisher.finish_iteration_limit = False
+        case = scalar_case(monkeypatch, polisher=polisher)
+        case.solver.config = replace(case.solver.config, tolerance=1e-7)
+        try:
+            result = case.solver.solve(case.inputs, case.raw.x)
+            assert result.status.tolist() == [1]
+            gradient = torch.autograd.grad(result.controls.sum(), case.inputs.q)[0]
+            torch.testing.assert_close(gradient, torch.zeros_like(gradient), atol=0, rtol=0)
+            if polisher is None:
+                assert result.sqp_status is None and result.sqp_errors is None and result.polish is None
+            else:
+                assert result.sqp_status.tolist() == [1] and result.polish.status.tolist() == [1]
+                assert polisher.accepted[0].tolist() == [False]
+        finally:
+            case.solver.close()
+
+
+def test_sqp_success_with_raw_iteration_limit_still_rejects_polish_route(monkeypatch):
+    polisher = AnalyticPolisher()
+    polisher.finish_iteration_limit = True
+    case = scalar_case(monkeypatch, polisher=polisher)
+    case.solver.config = replace(case.solver.config, require_qp_convergence=False)
+    case.raw.status[:] = 1
+    try:
+        result = case.solver.solve(case.inputs, case.raw.x)
+        assert result.sqp_status.tolist() == [0] and result.admm.status.tolist() == [1]
+        assert result.status.tolist() == [4] and result.polish.status.tolist() == [1]
+        assert polisher.accepted[0].tolist() == [False]
+        gradient = torch.autograd.grad(result.controls.sum(), case.inputs.q)[0]
+        torch.testing.assert_close(gradient, torch.zeros_like(gradient), atol=0, rtol=0)
+    finally:
+        case.solver.close()
+
+
+def test_ctbr_iteration_limit_option_is_boolean_and_defaults_to_historical_behavior():
+    assert CTBRPolisher().finish_iteration_limit is False
+    assert CTBRPolisher(finish_iteration_limit=True).finish_iteration_limit is True
+    for invalid in (0, 1, None, "true"):
+        with pytest.raises(ValueError, match="finish_iteration_limit must be bool"):
+            CTBRPolisher(finish_iteration_limit=invalid)
 
 
 def test_certified_inactive_face_is_not_reactivated_by_near_bound_heuristic(monkeypatch):

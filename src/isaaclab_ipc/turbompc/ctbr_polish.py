@@ -164,7 +164,12 @@ def _linear_residual(qp, hessian, active, dz, dlambda, dy, primal_rhs, equality_
 
 
 class CTBRPolisher:
-    """At most max_iter Newton steps per already accepted CTBR sample.
+    """At most max_iter Newton steps per eligible CTBR sample.
+
+    By default the owning solver requires both SQP and raw QP success.
+    Explicit finish_iteration_limit=True also permits finite SQP status 1 /
+    raw QP status 0 candidates. The same bounded Newton stage and all original
+    certificates decide whether a candidate succeeds.
 
     Each eligible sample uses a separate B=1 native solve so a singular or
     inaccurate KKT system cannot poison another batch row. The local active
@@ -185,7 +190,14 @@ class CTBRPolisher:
 
     adjoint_tolerance = 1e-11
 
-    def __init__(self, max_iter=4, tolerance=1e-11, max_linear_refinements=2, max_adjoint_refinements=4):
+    def __init__(
+        self,
+        max_iter=4,
+        tolerance=1e-11,
+        max_linear_refinements=2,
+        max_adjoint_refinements=4,
+        finish_iteration_limit=False,
+    ):
         if isinstance(max_iter, bool) or not isinstance(max_iter, int) or max_iter < 1:
             raise ValueError("CTBR polishing needs a positive integer iteration budget")
         if not math.isfinite(tolerance) or tolerance <= 0:
@@ -206,6 +218,11 @@ class CTBRPolisher:
             raise ValueError("CTBR adjoint refinement budget must be an integer from 0 to 4")
         self.max_adjoint_refinements = max_adjoint_refinements
         self.last_adjoint_diagnostics = None
+        if not isinstance(finish_iteration_limit, bool):
+            raise ValueError("CTBR finish_iteration_limit must be bool")
+        # Opt in to finishing a finite SQP iteration-limit candidate. Every
+        # original certificate and the existing Newton budget still apply.
+        self.finish_iteration_limit = finish_iteration_limit
 
     @torch.no_grad()
     def solve_adjoint(self, adjoint, qp, hessian, active, upstream):
