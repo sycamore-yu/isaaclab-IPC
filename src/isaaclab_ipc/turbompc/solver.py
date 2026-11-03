@@ -68,6 +68,17 @@ class MPCResult:
 
 
 def _matvec(a, x):
+    if (
+        torch.compiler.is_compiling()
+        and a.ndim >= 2
+        and x.ndim >= 1
+        and a.shape[-1] == x.shape[-1]
+        and a.dtype == x.dtype == torch.float64
+        and a.device == x.device
+        and a.layout == x.layout == torch.strided
+    ):
+        # Exact contraction size avoids accepting malformed inputs by broadcasting.
+        return (a * x.unsqueeze(-2)).sum(-1)
     return (a @ x.unsqueeze(-1)).squeeze(-1)
 
 
