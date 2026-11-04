@@ -590,3 +590,37 @@ v4 还暴露出延迟计划的状态偏移：最后一条计划的求解源加�
 最新 Python 回归检查为 41 项通过，没有跳过项。它涵盖 ROS 策略、评测统计、执行语义、MPC 和 SUPER 任务配置；Newton 任务工厂使用原有地图资产完成配置检查。Ruff 与 `git diff --check` 通过。原生分配 CTest 为 1/1 通过，覆盖 3773 组输入。上述检查补充软件和数值证据，不替代本节记录的真实任务运行。
 
 最终 `preservation-final.json` 记录：原目录仍在 main，HEAD 为 `7d6da6b`；已有工作树改动列表与前一阶段一致。3 个参考仓库的 tracked/staged diff 均为空。RL、Planner、执行模型和 MPC 源码相对任务基线没有差异。检查时原 `isaaclab-navrl` 训练进程 PID 1647733 仍在 GPU 上运行，本次评测进程列表为空。
+
+## 12. SUPER MARSIM 真实运行 Rerun 回放
+
+`scripts/export_marsim_super_rerun.py` 使用**此前已完成的真实 ROS 2 评测记录**，不重新运行仿真。它把实际里程计位置、四元数、速度、逐段净空、发布的 `PositionCommand`、实际到达航点和任务结局写入 RRD。静态地图使用对应评测的**完整原始 PCD 有效点**，并核对点数。RRD 自包含地图和飞行数据。
+
+现有四份录制在工作树 `recordings/` 下，不提交 Git：
+
+| 文件 | 场景 | 执行模式 | 真实任务结果 |
+|---|---|---|---|
+| `super_marsim_high_speed_ideal.rrd` | high_speed | ideal | success，2/2 |
+| `super_marsim_dense_ideal.rrd` | dense | ideal | success，2/2 |
+| `super_marsim_high_speed_dynamic.rrd` | high_speed | dynamic | success，2/2 |
+| `super_marsim_dense_dynamic_collision.rrd` | dense | dynamic | collision，0/2 |
+
+使用 Rerun 桌面端直接打开文件：
+
+```bash
+rerun recordings/super_marsim_high_speed_ideal.rrd recordings/super_marsim_dense_ideal.rrd \
+  recordings/super_marsim_high_speed_dynamic.rrd recordings/super_marsim_dense_dynamic_collision.rrd
+```
+
+重新从指定评测生成独立文件，例如：
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/export_marsim_super_rerun.py \
+  --run results/marsim-ros2-followup-20261104/official-ideal-dense-rest-clock-repeat \
+  --output recordings/my_super_dense_ideal.rrd
+
+rerun rrd verify recordings/my_super_dense_ideal.rrd
+```
+
+Rerun 中蓝色为逐步累计的真实飞行轨迹，灰色为完整真实轨迹，洋红色为**已发布**的 `PositionCommand` 样本，绿色为实际到达航点。速度和净空使用评测保存的原始数值。录制还保留了航点切换、末端碰撞或成功状态。
+
+评测 NPZ **没有保存原始 LiDAR 点云帧和 SUPER 优化器候选轨迹**。因此 RRD 不提供这两类数据，不使用 PCD 地图伪装实时 LiDAR，也不把已发布的 PositionCommand 样本冒充完整的规划曲线。四份录制均通过 Rerun 的 `rrd verify` 解码检查。
