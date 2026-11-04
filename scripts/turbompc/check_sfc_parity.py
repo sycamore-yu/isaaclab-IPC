@@ -47,7 +47,7 @@ OSQP_SETTINGS = {
     "warm_starting": False,
     "verbose": False,
 }
-# Match TurboMPCActor's absolute stopping policy. Keep the inner threshold
+# Match MPCActor's absolute stopping policy. Keep the inner threshold
 # below SQP's 1e-6 target regardless of the O(1e3) IPC position weights.
 ADMM = ADMMConfig(max_iter=16384, eps_abs=1e-7, eps_rel=0.0)
 SQP = SQPConfig(max_iter=15, tolerance=1e-6, linesearch="none", compile_kernels=False)
@@ -510,7 +510,7 @@ def main():
         "osqp_settings": OSQP_SETTINGS,
         "native_admm": asdict(ADMM),
         "native_sqp": asdict(SQP),
-        "native_configuration_origin": "TurboMPCActor numerical settings; eager execution for this independent audit",
+        "native_configuration_origin": "MPCActor numerical settings; eager execution for this independent audit",
         "prior_diagnostics": {
             "sfc-parity-cu130-v1": "4000/1e-10 reached raw QP MAX_ITER on the single active plane; numerical and gradient gates passed",
             "sfc-parity-cu130-v2": "4096/1e-8 relative stopping let QP finish above the absolute SQP target; SQP failed and cost gradients were zero",

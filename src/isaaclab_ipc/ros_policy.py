@@ -33,6 +33,7 @@ from isaaclab_ipc.ros_control import (
     select_jerk,
     sequence_reference,
 )
+from isaaclab_ipc.turbompc.ipc import FixedIPCSolver
 
 
 def observation(physical, goal, context, braking=False, yaw_target=0.0, climb_target=None, device="cpu"):
@@ -99,12 +100,15 @@ def planning_worker(requests, results, options, params, actor_cfg):
     planner = Planner(config, np.asarray(load_case(options["benchmark"])["start"], dtype=float))
     batch = PlanningBatch(1)
     actor = None
+    fixed = None
     device = torch.device(options["device"])
+    if options["policy"] == "fixed":
+        fixed = FixedIPCSolver(params, device=device, compile_kernels=False)
     if options["policy"] == "acmpc":
         checkpoint, _, _ = load_checkpoint(options["checkpoint"])
         blank = PlanningContext(np.zeros(9), np.zeros((15, 9)), [np.empty((0, 4))] * 15, False)
         sample = observation(np.r_[np.zeros(9), np.eye(3).ravel()], np.zeros(3), blank, device=device)
-        actor_cfg = dict(actor_cfg, planner_params=params)
+        actor_cfg = dict(actor_cfg, planner_params=params, compile_kernels=False)
         actor = MPCActor(sample, {"actor": ["policy"]}, "actor", 4, **actor_cfg).to(device)
         actor.load_state_dict(checkpoint["actor_state_dict"], strict=True)
         actor.eval()
@@ -145,16 +149,18 @@ def planning_worker(requests, results, options, params, actor_cfg):
                     iterations = int(result["iterations"])
                     primal = float(result["primal"][0])
                     status = "solved" if solved else "max iterations reached"
-                elif context.valid:
-                    problem = planner.mpc.problem(context.state, context.reference, context.corridors)
-                    solution, status, primal, _ = planner.mpc.solve(problem)
-                    solver_state, iterations = problem[-1], None
-                    solved = status in ("solved", "solved inaccurate")
                 else:
-                    solver_state, solution, solved = context.state, np.zeros(3 * planner.mpc.n), False
-                    iterations, primal, status = None, float("inf"), "invalid SFC"
+                    fixed_result = fixed.solve([context])[0]
+                    solution = fixed_result["solution"]
+                    status = fixed_result["status"]
+                    solver_state = fixed_result["state"]
+                    iterations = fixed_result["iterations"]
+                    primal = fixed_result["primal"]
+                    solved = status == "solved"
             solve_ms = 1000 * (perf_counter() - solve_started)
-            planner.consume_state(solver_state, solution, status if context.valid else "invalid SFC",
+            if solution is None:
+                solution = np.zeros(3 * planner.mpc.n)
+            planner.consume_state(solver_state, solution, status,
                                   request["source_stamp_ns"] * 1e-9)
             sequence_id += 1
             qp_failed = bool(context.valid and not solved)
@@ -164,11 +170,8 @@ def planning_worker(requests, results, options, params, actor_cfg):
             faces, masks, schedule = pack_corridors(corridors, max(map(len, corridors)))
             # Retain the original face order for MPC.problem; pack_corridors reverses it.
             unique = [block[mask][::-1].copy() for block, mask in zip(faces, masks, strict=True)]
-            # These are MPC.solve's OSQP primal tolerances. Solved-inaccurate
-            # uses OSQP's existing tenfold termination tolerance.
-            multiplier = 10 if status == "solved inaccurate" else 1
-            eps_abs = actor.solver.eps_abs if actor is not None else multiplier * 1e-3
-            eps_rel = 0.0 if actor is not None else multiplier * 1e-3
+            eps_abs = (actor.native_solver if actor is not None else fixed.solver).admm.config.eps_abs
+            eps_rel = 0.0
             plan = dict(sequence=sequence,
                         source_stamp_ns=request["source_stamp_ns"], plan_sequence_id=sequence_id,
                         goal_id=goal_id, braking=bool(planner.braking), sfc_valid=context.valid,
@@ -192,6 +195,8 @@ def planning_worker(requests, results, options, params, actor_cfg):
         batch.close()
         if actor is not None:
             actor.close()
+        if fixed is not None:
+            fixed.close()
         results.close()
 
 
@@ -254,7 +259,7 @@ def main(args=None):
         def __init__(self):
             super().__init__("ipc_policy")
             defaults = dict(policy="fixed", execution="dynamic", benchmark="high_speed", checkpoint="",
-                            output_directory="results/marsim-policy", device="cpu", frequency=100.0,
+                            output_directory="results/marsim-policy", device="cuda:0", frequency=100.0,
                             simulated_time=False, replan_frequency=10.0,
                             odom_topic="", cloud_topic="/cloud_registered", goal_topic="/planning/click_goal",
                             acceleration_topic="/marsim/acceleration", ctbr_topic="/marsim/ctbr",
@@ -319,7 +324,7 @@ def main(args=None):
                             ideal_integration="previous published PVA and jerk over actual publication interval",
                             statistics="event=solve records each QP once; event=control records each command",
                             acceleration_source=p["acceleration_topic"] if p["execution"] == "dynamic" else "PositionCommand.acceleration_matched_to_odometry_PV",
-                            solver="condensed-torch" if p["policy"] == "acmpc" else "osqp-fixed-ipc")
+                            solver="turbompc-cuda", pipeline="learned-acmpc" if p["policy"] == "acmpc" else "fixed-ipc")
             (directory / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
             self.state = self.rotation = self.cloud = None
             self.acceleration = np.zeros(3)

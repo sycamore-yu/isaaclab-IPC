@@ -670,3 +670,17 @@ SUPER dense 即使使用同步仿真时间仍在高于地面的 PCD 障碍处碰
 从已完成的 SUPER 两场景生成了新 Rerun 回放：`recordings/super_marsim_high_speed_simtime.rrd` 和 `recordings/super_marsim_dense_simtime_collision.rrd`，均通过 `rerun rrd verify`。结果目录以及录制文件不提交 Git；只提交实现与本文。
 
 独立进行了原 `--time-mode wall` 的 SUPER dynamic high_speed 6 s 回归探针：里程计实测 **99.9996 Hz 墙钟**，收到 49 帧 LiDAR、227 条 PositionCommand 和 526 条 CTBR；程序按预设 6 s 墙钟截止，无异常退出。证据在 `wall-regression-super-high-6s/`。此短时探针用于确认墙钟接口保留，不计入完整往返任务成功率。
+
+## 两条正式 IPC 路径（统一 TurboMPC）
+
+本项目现在只维护固定成本 IPC 和学习成本 AC-MPC 两条算法路径。二者使用相同的 PathCover/RISP、原始 SFC、jerk 预测模型、约束以及 `TorchMPC` 原生 CUDA 求解器；ROS 策略通过 `--policy ipc` 或 `--policy acmpc --checkpoint ...` 选择成本。学习策略的 124D 输入和 7D 成本参数保持不变。
+
+启动入口为 `scripts/run_marsim_ros2.py`；`sim` 控制周期为 0.01 s、MPC 以 0.1 s 仿真时间重规划。保留 `wall` 作为实时计算延迟实验。原有 SUPER 仅作外部比较，不属于项目算法路径。
+
+新检查点通过 `rl/actor.py:MPCActor` 直接进入 TurboMPC。代码不再包含另一个独立的 PyTorch ADMM 生产实现。两条策略都要求 CUDA 原生扩展，使用 `scripts/marsim_ros2_env.sh` 设置本项目的默认构建路径。旧运行记录仍保留原始求解器版本与负结果，不重命名历史数据。
+
+### 重构后的运行检查
+
+学习成本 AC-MPC 使用迁移后的检查点，在 high_speed 动态模式运行 6 s 仿真时间：601 次里程计采样（100 Hz）、301 次有效控制回调（100 Hz）、31 次 MPC 更新（10 Hz），QP 失败 0 次。结果：`results/ipc-two-pipelines-20261104/probe-acmpc-eager/`。6 s 是接口探针的截止时间，不属于完整任务超时评测。
+
+固定成本 IPC 的原生求解器已通过真实 PathCover/SFC 输入的约束、数值一致性和 Newton 3 步物理回归，均未发生 QP 失败。high_speed MARSIM 动态探针在首个求解时达到 60 s 墙钟等待上限，尚未通过该场景的闭环验收；证据为 `results/ipc-two-pipelines-20261104/probe-ipc-eager/`。不把它与成功的 AC-MPC 探针混为同一结果。

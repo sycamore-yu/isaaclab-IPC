@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Source this file before launching the isolated MARSIM evaluation overlay.
 export IPC_MARSIM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export TURBOMPC_NATIVE_BUILD_DIR="${TURBOMPC_NATIVE_BUILD_DIR:-$IPC_MARSIM_ROOT/build/turbompc/native/cu130}"
 export IPC_MARSIM_PYTHON="$IPC_MARSIM_ROOT/.venv/bin/python"
 source "/opt/ros/${ROS_DISTRO:-jazzy}/setup.bash"
 IPC_MARSIM_DEPS="$IPC_MARSIM_ROOT/build/marsim_ros2/deps/root"

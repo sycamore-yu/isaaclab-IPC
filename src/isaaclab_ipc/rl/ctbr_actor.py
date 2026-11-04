@@ -94,7 +94,8 @@ class CTBRMPCActor(MPCActor):
             raise ValueError("CTBR checkpoint model, units, cost-head contract or observation features differ")
 
     def forward(self, obs, masks=None, hidden_state=None, stochastic_output=False):
-        costs = self.mlp(self.get_latent(obs))
+        costs = (obs["mpc_state"].new_zeros((len(obs["mpc_state"]), 7))
+                 if self.fixed_cost else self.mlp(self.get_latent(obs)))
         state = obs["ctbr_state"].double()
         navigation = obs["mpc_state"].double()
         navigation = torch.cat((navigation[:, :3], navigation[:, 3:].clamp(self.lower, self.upper)), -1)

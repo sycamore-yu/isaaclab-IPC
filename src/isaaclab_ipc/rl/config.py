@@ -10,7 +10,8 @@ class MPCActorCfg(RslRlMLPModelCfg):
     hidden_dims = [64, 64]
     activation = "elu"
     obs_normalization = False
-    qp_iterations = 4096
+    qp_iterations = 16384
+    compile_kernels = True
     # MPCActor supplies its fixed Gaussian/point-mass distribution.
     distribution_cfg = None
     planner_params = None
@@ -50,20 +51,7 @@ class MPCTrainCfg(RslRlOnPolicyRunnerCfg):
 
 
 @configclass
-class TurboMPCActorCfg(MPCActorCfg):
-    class_name = "isaaclab_ipc.rl.turbo_actor:TurboMPCActor"
-    qp_iterations = 16384
-    compile_kernels = True
-
-
-@configclass
-class TurboMPCTrainCfg(MPCTrainCfg):
-    experiment_name = "ipc_turbompc"
-    actor = TurboMPCActorCfg()
-
-
-@configclass
-class CTBRActorCfg(TurboMPCActorCfg):
+class CTBRActorCfg(MPCActorCfg):
     class_name = "isaaclab_ipc.rl.ctbr_actor:CTBRMPCActor"
     qp_iterations = 32768
     sqp_iterations = 60
@@ -73,5 +61,5 @@ class CTBRActorCfg(TurboMPCActorCfg):
 
 @configclass
 class CTBRTrainCfg(MPCTrainCfg):
-    experiment_name = "ipc_turbompc_ctbr"
+    experiment_name = "ipc_acmpc_ctbr"
     actor = CTBRActorCfg()

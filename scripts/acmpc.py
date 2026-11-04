@@ -484,6 +484,7 @@ def main():
                 np.random.set_state(infos["numpy_rng"])
             runner.current_learning_iteration += 1
         actor = runner.alg.get_policy()
+        actor.fixed_cost = args.fixed_cost
         initial = {k: v.detach().clone() for k, v in actor.mlp.state_dict().items()}
         start = perf_counter()
         if args.mode == "train":

@@ -482,20 +482,6 @@ class Planner:
             x = self.mpc.a @ state + self.mpc.b @ jerk
         return x, jerk, success
 
-    def step(self, state, time):
-        problem, frontend_ms = self.prepare(state)
-        start = perf_counter()
-        solution, status, primal, dual = self.mpc.solve(problem)
-        out = self.consume(problem, solution, status, time)
-        return *out, dict(
-            status=status,
-            frontend_ms=frontend_ms,
-            solve_ms=(perf_counter() - start) * 1000,
-            primal_residual=primal,
-            dual_residual=dual,
-        )
-
-
 def flatness(acceleration, jerk, rotation, yaw_target=0.0, yaw_gain=0.5):
     acc = np.asarray(acceleration) + [0, 0, 9.81]
     magnitude = np.linalg.norm(acc)

@@ -61,7 +61,6 @@ def make_actor(obs):
     actor = CTBRMPCActor(obs, {"actor": ["policy"]}, "actor", 4, compile_kernels=False).to(
         obs.device or obs["policy"].device
     )
-    actor.solver = forbid_solver
     return actor
 
 
@@ -237,7 +236,7 @@ def test_task_factory_registration_and_dynamic_observation_schema(monkeypatch):
     assert cfg.observation_space == 127 and cfg.reference_strides == (10,)
     assert CTBRTrainCfg().actor.class_name == "isaaclab_ipc.rl.ctbr_actor:CTBRMPCActor"
     for scenario in ("Avoid", "Forest"):
-        spec = gym.spec(f"Isaac-IPC-{scenario}-TurboMPC-CTBR-Direct")
+        spec = gym.spec(f"Isaac-IPC-{scenario}-ACMPC-CTBR-Direct")
         assert spec.entry_point == "isaaclab_ipc.tasks.ctbr_env:CTBRMPCEnv"
         assert spec.kwargs["rsl_rl_cfg_entry_point"] == "isaaclab_ipc.rl.config:CTBRTrainCfg"
         suffix = "make_forest_ctbr_cfg" if scenario == "Forest" else "make_ctbr_cfg"

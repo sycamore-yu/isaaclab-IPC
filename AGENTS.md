@@ -1,12 +1,13 @@
 # Isaac Lab IPC
 
 ## 项目
-- 本项目复刻 hku-mars 的四旋翼 Integrated Planning and Control。
+- 正式算法仅有固定成本 IPC 与学习成本 AC-MPC；共享 IPC 前端、PathCover/RISP 和原生 TurboMPC CUDA jerk 求解器。
+- CTBR 是 AC-MPC 的可选动力学模型；SUPER 仅作外部对比，不属于项目算法路径。
 - 必须先读 `CONTEXT.md`、`docs/adr/` 和 `docs/execution-profiles.md`。
 - 参考源码必须使用 `reference_repos/IPC/hku-mars`，不得误用上层同名接触物理项目。
 
 ## 运行与检查
-- 技术栈为 Python 3.12、Isaac Lab 3、Newton/MJWarp、Warp、Torch 和 OSQP。
+- 技术栈为 Python 3.12、Isaac Lab 3、Newton/MJWarp、Warp、Torch、TurboMPC CUDA/cuDSS。OSQP 仅用于独立数值测试。
 - 依赖必须使用本项目 `.venv` 和 `uv.lock`；安装与运行见 `README.md`。
 - 几何扩展必须使用 `scripts/build_native.py` 构建固定 IPC A* 和 vendored PathCover/RISP。
 - 单测命令：`env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest -q`。
@@ -16,6 +17,7 @@
 - `src/isaaclab_ipc/` 保存规划、QP、物理资产和标准任务注册。
 - `scripts/` 保存构建、场景测试和独立数值检查入口。
 - `docs/execution-profiles.md` 是当前配置与结果的权威说明。
+- 训练与评测使用 `scripts/acmpc.py`；MARSIM 正式评测使用 `scripts/run_marsim_ros2.py`；Newton 回归使用 `scripts/evaluate_native.py`。
 - `docs/validation.md` 只保存首次候选的历史结果。
 - `results/` 与 `recordings/` 为本地证据，不进入 Git；必须保留失败记录。
 - 参考仓库必须只读；不得修改其他项目的环境或停止其训练。

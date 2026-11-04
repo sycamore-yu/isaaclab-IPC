@@ -1,191 +1,203 @@
+"""Exercise the native actor through saved IPC context and recovery branches."""
+
 import numpy as np
-import osqp
 import pytest
 import torch
-from scipy import sparse
 from tensordict import TensorDict
 
+from isaaclab_ipc.corridor_storage import pack_corridors
 from isaaclab_ipc.mpc import Config
-from isaaclab_ipc.planner import InvalidCorridorError, Planner, flatness
+from isaaclab_ipc.planner import Planner, flatness
 from isaaclab_ipc.rl.actor import MPCActor
-from isaaclab_ipc.rl.qp import DifferentiableQP
 
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="Native actor requires CUDA")
+DEVICE = torch.device("cuda:0")
 
 
-def context():
+def forbid_native_solver(*args, **kwargs):
+    raise AssertionError("Invalid SFC must bypass TurboMPC")
+
+
+@pytest.fixture
+def ipc_context():
+    """Own a real PathCover/IPC snapshot with compact SFC storage."""
     planner = Planner(Config.load("avoid", 10), [10, 0, 1])
     state, reference, corridors = planner.context(np.array([0, 0, 1, 0.1, 0, 0, 0, 0, 0.0]))
-    planes = np.zeros((15, 32, 4))
-    mask = np.zeros((15, 32), bool)
-    for i, faces in enumerate(corridors):
-        planes[i, : len(faces)] = faces[::-1]
-        mask[i, : len(faces)] = True
-    data = dict(
-        policy=np.zeros(124, np.float32),
-        mpc_state=state,
-        reference=reference,
-        planes=planes,
-        plane_mask=mask,
-        rotation=np.eye(3).reshape(-1),
-        braking=np.array([False]),
-        yaw_target=np.array([0.0]),
-        sfc_valid=np.array([True]),
-    )
-    obs = TensorDict({k: torch.as_tensor(v, device=DEVICE).unsqueeze(0) for k, v in data.items()}, [1])
+    capacity = max(1, max(len(faces) for faces in corridors))
+    planes, mask, schedule = pack_corridors(corridors, capacity)
+    assert mask.any(), "The regression must contain actual PathCover constraints"
+    values = {
+        "policy": np.zeros(124, np.float32),
+        "mpc_state": state,
+        "reference": reference,
+        "planes": planes,
+        "plane_mask": mask,
+        "corridor_index": schedule,
+        "rotation": np.eye(3).reshape(-1),
+        "braking": np.array([False]),
+        "yaw_target": np.array([0.0]),
+        "sfc_valid": np.array([True]),
+    }
+    obs = TensorDict({key: torch.as_tensor(value, device=DEVICE).unsqueeze(0) for key, value in values.items()}, [1])
     return planner, obs, (state, reference, corridors)
 
 
-def test_qp_forward_and_cost_gradient_with_active_redundant_planes():
-    def tensor(x):
-        return torch.tensor(x, dtype=torch.float64, device=DEVICE)
-
-    h = tensor([[[2.0, 0.0], [0.0, 3.0]]]).requires_grad_()
-    g = tensor([[-4.0, -3.0]]).requires_grad_()
-    a = tensor([[[1.0, 1.0], [2.0, 2.0], [1.0, 0.0], [0.0, 1.0]]])
-    lo = tensor([[-float("inf"), -float("inf"), -2, -2]])
-    hi = tensor([[1.0, 2.0, 2.0, 2.0]])
-    solver = DifferentiableQP(eps_abs=1e-9, eps_rel=1e-9)
-    x, solved, *_ = solver(h, g, a, lo, hi)
-    assert solved.all()
-    torch.testing.assert_close(x, tensor([[0.8, 0.2]]), atol=1e-7, rtol=0)
-    assert torch.autograd.gradcheck(
-        lambda hh, gg: solver(hh, gg, a, lo, hi)[0],
-        (h, g),
-        eps=1e-4,
-        atol=2e-4,
-        rtol=2e-3,
-        check_undefined_grad=False,
-        nondet_tol=1e-6,
-        fast_mode=True,
-    )
-    # Contradictory rows exercise failure without passing inverted individual bounds.
-    bad_a = tensor([[[1.0, 0.0], [1.0, 0.0]]])
-    bad_lo, bad_hi = tensor([[2.0, -float("inf")]]), tensor([[float("inf"), 1.0]])
-    x, good, *_ = solver(h, g, bad_a, bad_lo, bad_hi)
-    assert not good.any()
-    grad = torch.autograd.grad(x.sum(), g)[0]
-    assert not grad.any()
+def make_actor(obs):
+    actor = MPCActor(obs, {"actor": ["policy"]}, "actor", 4, compile_kernels=False).to(DEVICE)
+    return actor
 
 
-def test_ipc_assembly_control_and_cost_network_gradient():
-    planner, obs, inputs = context()
-    actor = MPCActor(obs, {"actor": ["policy"]}, "actor", 4).to(DEVICE)
-    problem = actor.problem(obs, torch.zeros((1, 7), device=DEVICE))
-    original = planner.mpc.problem(*inputs)
-    np.testing.assert_allclose(problem[0][0].cpu(), original[0], atol=1e-12)
-    np.testing.assert_allclose(problem[1][0].cpu(), original[1], atol=1e-12)
-    active_rows = torch.cat((torch.ones(135, dtype=torch.bool, device=DEVICE), obs["plane_mask"].flatten()))
-    for value, expected in zip(problem[2:5], original[2:5], strict=True):
-        np.testing.assert_allclose(value[0, active_rows].cpu(), expected, atol=1e-12)
-    command = actor(obs)
-    assert actor.last_result["solved"].all()
-    oracle = osqp.OSQP()
-    oracle.setup(
-        P=sparse.csc_matrix(np.triu(original[0])),
-        q=original[1],
-        A=sparse.csc_matrix(original[2]),
-        l=original[3],
-        u=original[4],
-        eps_abs=1e-9,
-        eps_rel=1e-9,
-        max_iter=20000,
-        verbose=False,
-        polishing=True,
-    )
-    result = oracle.solve(raise_error=False)
-    assert result.info.status == "solved"
-    np.testing.assert_allclose(actor.last_result["solution"][0].cpu(), result.x, atol=2e-4, rtol=2e-4)
-    x, j, _ = planner.consume(original, actor.last_result["solution"][0].cpu().numpy(), "solved", 0)
-    expected = flatness(x[6:], j, np.eye(3))
-    expected[0] = np.clip(expected[0], 0.08 * 9.81 / 0.7, 0.9 * 9.81 / 0.7)
-    np.testing.assert_allclose(command[0].detach().cpu(), expected, atol=2e-6)
-    command[:, 2].sum().backward()
-    assert torch.isfinite(actor.mlp[-1].bias.grad).all()
-    assert actor.mlp[-1].bias.grad.abs().max() > 1e-6
-    # A shuffled minibatch must evaluate the saved context, independently of replay buffers.
-    saved = obs.clone()
-    with torch.inference_mode():
-        before = actor(obs).clone()
-    obs["planes"].add_(0.01)
-    with torch.no_grad():
-        after = actor(saved)
-    torch.testing.assert_close(after, before, atol=2e-6, rtol=0)
+def test_native_actor_forward_uses_native_solver_and_satisfies_ipc_constraints(ipc_context):
+    planner, obs, inputs = ipc_context
+    actor = make_actor(obs)
+    try:
+        with torch.no_grad():
+            command = actor(obs)
+        assert actor.native_solve_calls == 1
+        assert actor.last_native_result is not None
+        assert actor.last_native_result.status.tolist() == [0]
+        assert actor.last_native_result.trajectory.shape == (1, 16, 12)
+        assert actor.last_result["solved"].tolist() == [True]
+        assert actor.last_result["braking"].tolist() == [False]
+        torch.testing.assert_close(
+            actor.last_result["solution"],
+            actor.last_native_result.controls[:, :-1].flatten(1),
+            rtol=0,
+            atol=0,
+        )
+        # Check the independently assembled, published condensed IPC constraints.
+        _, _, matrix, lower, upper, state = planner.mpc.problem(*inputs)
+        solution = actor.last_result["solution"][0].cpu().numpy()
+        products = matrix @ solution
+        violation = max(np.maximum(lower - products, 0).max(), np.maximum(products - upper, 0).max())
+        assert violation <= 1e-5
+        predicted = (planner.mpc.M @ state + planner.mpc.C @ solution).reshape(15, 9)
+        np.testing.assert_allclose(actor.last_native_result.states[0, 1:].cpu(), predicted, atol=5e-6, rtol=0)
+        expected = flatness(predicted[0, 6:], solution[:3], np.eye(3))
+        expected[0] = np.clip(expected[0], 0.08 * 9.81 / 0.7, 0.9 * 9.81 / 0.7)
+        np.testing.assert_allclose(command[0].cpu(), expected, atol=2e-6, rtol=0)
+    finally:
+        actor.close()
 
 
-def test_braking_is_a_deterministic_atom_with_no_cost_gradient():
-    _, obs, _ = context()
-    obs["braking"][:] = True
-    obs["mpc_state"][:, 3] = 1.0
-    actor = MPCActor(obs, {"actor": ["policy"]}, "actor", 4).to(DEVICE)
-    action = actor(obs, stochastic_output=True)
-    assert actor.last_result["braking"].all()
-    torch.testing.assert_close(action, actor._backup)
-    assert actor.get_output_log_prob(action).item() == 0
-    assert actor.get_output_log_prob(action + 0.1).item() == -1e9
-    actor.output_mean.sum().backward()
-    assert not actor.mlp[-1].bias.grad.any()
+def test_fixed_and_learned_pipelines_share_the_native_solver(ipc_context):
+    from isaaclab_ipc.frontend import PlanningContext
+    from isaaclab_ipc.turbompc.ipc import FixedIPCSolver
+
+    planner, obs, (state, reference, corridors) = ipc_context
+    actor = make_actor(obs)
+    actor.fixed_cost = True
+    try:
+        with FixedIPCSolver(planner.cfg.params, compile_kernels=False) as solver, torch.no_grad():
+            fixed = solver.solve([PlanningContext(state, reference, corridors, True)])[0]
+            actor(obs)
+        assert fixed["status"] == "solved"
+        assert actor.last_result["solved"].tolist() == [True]
+        np.testing.assert_allclose(
+            actor.last_result["solution"][0].cpu(),
+            fixed["solution"],
+            atol=1e-6,
+            rtol=0,
+        )
+    finally:
+        actor.close()
 
 
-def test_invalid_corridor_is_rejected_and_only_valid_batch_members_solve(monkeypatch):
-    planner, obs, _ = context()
-    monkeypatch.setattr("isaaclab_ipc.planner._geometry.corridor", lambda *args: np.full((1, 4), np.nan))
-    # A new observed map invalidates the previously valid cached polytope.
-    planner.update_cloud([], obs["mpc_state"][0, :3].cpu().numpy())
-    with pytest.raises(InvalidCorridorError):
-        planner.context(obs["mpc_state"][0].cpu().numpy())
-    obs = torch.cat((obs, obs.clone()), dim=0)
-    obs["sfc_valid"][1] = False
-    obs["mpc_state"][1, 3] = 2.0
-    actor = MPCActor(obs, {"actor": ["policy"]}, "actor", 4).to(DEVICE)
-    original = actor.solver
+def test_native_actor_cost_network_gradient_and_saved_observation_replay(ipc_context, tmp_path):
+    planner, obs, _ = ipc_context
+    actor = make_actor(obs)
+    try:
+        command = actor(obs)
+        command[:, 2].sum().backward()
+        gradients = [parameter.grad for parameter in actor.mlp.parameters() if parameter.requires_grad]
+        assert gradients and all(value is not None and torch.isfinite(value).all() for value in gradients)
+        assert actor.mlp[-1].bias.grad.abs().max() > 1e-6
 
-    def solve_valid_only(*args):
-        assert args[0].shape[0] == 1
-        return original(*args)
-
-    actor.solver = solve_valid_only
-    actions = actor(obs, stochastic_output=True)
-    assert actor.last_result["solved"].tolist() == [True, False]
-    assert actor.last_result["braking"].tolist() == [False, True]
-    torch.testing.assert_close(actions[1], actor._backup[1])
-    actor.output_mean[0, 2].backward()
-    assert actor.mlp[-1].bias.grad.abs().max() > 1e-6
-    actor(obs[1:])  # Entirely invalid batches must skip the solver too.
-
-
-def test_sfc_capacity_expansion_preserves_constraints_and_action():
-    _, obs, _ = context()
-    actor = MPCActor(obs, {"actor": ["policy"]}, "actor", 4).to(DEVICE)
-    expanded = obs.clone()
-    expanded["planes"] = torch.nn.functional.pad(obs["planes"], (0, 0, 0, 32))
-    expanded["plane_mask"] = torch.nn.functional.pad(obs["plane_mask"], (0, 32))
-    costs = torch.zeros((1, 7), device=DEVICE)
-    original = actor.problem(obs, costs)
-    larger = actor.problem(expanded, costs)
-    for values, data in ((original, obs), (larger, expanded)):
-        active = torch.cat((torch.ones(135, dtype=torch.bool, device=DEVICE), data["plane_mask"].flatten()))
-        if values is original:
-            reference = [v[0, active] for v in values[2:5]]
-        else:
-            for actual, expected in zip(values[2:5], reference, strict=True):
-                torch.testing.assert_close(actual[0, active], expected, atol=0, rtol=0)
-    with torch.no_grad():
-        before = actor(obs)
-        after = actor(expanded)
-    torch.testing.assert_close(after, before, atol=2e-6, rtol=0)
+        saved = tmp_path / "ipc_context.pt"
+        torch.save({key: value.detach().cpu().clone() for key, value in obs.items()}, saved)
+        before = command.detach().clone()
+        # The replay must not consult mutated observations or the live planner.
+        obs["reference"].add_(3)
+        obs["planes"].add_(0.25)
+        planner.goal[:] = [-5, 2, 2]
+        planner.path = np.empty((0, 3))
+        replay = TensorDict(torch.load(saved, map_location=DEVICE, weights_only=True), [1])
+        with torch.no_grad():
+            after = actor(replay)
+        assert actor.native_solve_calls == 2
+        assert actor.last_result["solved"].all()
+        torch.testing.assert_close(after, before, atol=2e-6, rtol=0)
+    finally:
+        actor.close()
 
 
-def test_polish_ignores_stale_duals_on_slack_constraints():
-    from isaaclab_ipc.rl.qp import polish, residuals
+def test_native_actor_mixed_invalid_sfc_skips_solver_and_has_zero_cost_gradient(ipc_context, monkeypatch):
+    _, obs, _ = ipc_context
+    mixed = torch.cat((obs, obs.clone()), dim=0)
+    mixed["sfc_valid"][1] = False
+    mixed["mpc_state"][1, 3] = 2.0
+    # Invalid geometry/reference must never enter the native problem builder.
+    mixed["planes"][1] = torch.nan
+    mixed["reference"][1] = torch.nan
+    actor = make_actor(mixed)
+    outputs = []
+    hook = actor.mlp.register_forward_hook(lambda module, inputs, result: outputs.append(result))
+    try:
+        actions = actor(mixed)
+        assert actor.native_solve_calls == 1
+        assert actor.last_native_result.status.shape == (1,)
+        assert actor.last_result["solved"].tolist() == [True, False]
+        assert actor.last_result["braking"].tolist() == [False, True]
+        torch.testing.assert_close(actions[1], actor._backup[1], atol=0, rtol=0)
+        mixed_grad = torch.autograd.grad(actions[:, 2].sum(), outputs[-1])[0]
+        assert torch.isfinite(mixed_grad).all()
+        assert mixed_grad[0].abs().max() > 1e-6
+        assert torch.equal(mixed_grad[1], torch.zeros_like(mixed_grad[1]))
 
-    h = torch.eye(2, dtype=torch.float64, device=DEVICE)[None]
-    g = torch.tensor([[-0.2, 0.0]], dtype=torch.float64, device=DEVICE)
-    a = h.clone()
-    lower = torch.full_like(g, -torch.inf)
-    upper = torch.ones_like(g)
-    stale_dual = torch.full_like(g, 0.001)
-    x, dual, signs = polish(h, g, a, lower, upper, -g, stale_dual)
-    primal, stationarity, _ = residuals(h, g, a, lower, upper, x, dual)
-    assert signs.all() and (primal < 1e-12).all() and (stationarity < 1e-12).all()
-    torch.testing.assert_close(x, -g)
+        isolated = actor(obs)
+        isolated_grad = torch.autograd.grad(isolated[:, 2].sum(), outputs[-1])[0]
+        torch.testing.assert_close(actions[:1], isolated, atol=2e-6, rtol=0)
+        torch.testing.assert_close(mixed_grad[:1], isolated_grad, atol=2e-6, rtol=2e-4)
+
+        calls = actor.native_solve_calls
+        monkeypatch.setattr(actor.native_solver, "solve", forbid_native_solver)
+        invalid = mixed[1:].clone()
+        first = actor(invalid, stochastic_output=True)
+        assert actor.last_native_result is None
+        assert actor.native_solve_calls == calls
+        zero_grad = torch.autograd.grad(actor.output_mean.sum(), outputs[-1])[0]
+        assert torch.equal(zero_grad, torch.zeros_like(zero_grad))
+        second = actor(invalid, stochastic_output=True)
+        torch.testing.assert_close(first, second, atol=0, rtol=0)
+        torch.testing.assert_close(second, actor._backup, atol=0, rtol=0)
+        assert actor.native_solve_calls == calls
+        assert actor.get_output_log_prob(second).item() == 0
+    finally:
+        hook.remove()
+        actor.close()
+
+
+def test_native_actor_close_is_idempotent_and_solver_can_be_explicitly_recreated(ipc_context):
+    _, obs, _ = ipc_context
+    actor = make_actor(obs)
+    try:
+        with torch.no_grad():
+            before = actor(obs)
+        previous = actor.native_solver
+        actor.close()
+        actor.close()
+        assert actor.last_native_result is None
+
+        replacement = actor.native_solver
+        assert replacement is not previous
+        data, guess = actor.ipc_problem(obs, torch.zeros((1, 7), device=DEVICE))
+        with pytest.raises(RuntimeError, match="closed"):
+            previous.solve(data, guess)
+        with torch.no_grad():
+            after = actor(obs)
+        assert actor.native_solve_calls == 2
+        assert actor.last_result["solved"].all()
+        torch.testing.assert_close(after, before, atol=2e-6, rtol=0)
+    finally:
+        actor.close()
+        actor.close()

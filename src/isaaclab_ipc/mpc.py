@@ -1,12 +1,10 @@
-"""IPC condensed QP; preserve OSQP-Eigen 0.7 upper-triangle semantics."""
+"""IPC jerk dynamics and condensed quadratic-program data contract."""
 
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
-import osqp
 import yaml
-from scipy import sparse
 
 from .execution import ExecutionProfile
 
@@ -109,22 +107,3 @@ class MPC:
                 highs.append(-planes[:, 3] - planes[:, :3] @ offset[9 * i : 9 * i + 3])
                 lows.append(np.full(len(planes), -np.inf))
         return self.H, g, np.vstack(rows), np.concatenate(lows), np.concatenate(highs), state
-
-    def solve(self, problem):
-        h, g, a, lower, u, _ = problem
-        solver = osqp.OSQP()
-        solver.setup(
-            P=sparse.csc_matrix(np.triu(h)),
-            q=g,
-            A=sparse.csc_matrix(a),
-            l=lower,
-            u=u,
-            verbose=False,
-            eps_abs=1e-3,
-            eps_rel=1e-3,
-            max_iter=4000,
-            polishing=False,
-            warm_starting=False,
-        )
-        r = solver.solve(raise_error=False)
-        return r.x, r.info.status, r.info.prim_res, r.info.dual_res

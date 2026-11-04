@@ -53,3 +53,11 @@ _Avoid_：原版理想避障配置、物理可执行模式。
 _Avoid_：分别修改多个执行开关、用数值参数字典覆盖恢复策略。
 
 执行细节和当前结果统一见 `docs/execution-profiles.md`。
+
+## 当前正式算法路径
+
+**IPC**：固定成本、PathCover/RISP、原生 TurboMPC CUDA jerk-MPC。
+
+**AC-MPC**：相同前端与原生 TurboMPC，用 MLP 学习成本参数。CTBR 是可选预测模型，不独立定义算法路径。
+
+Isaac Lab/Newton 用于训练及回归；MARSIM 用于正式闭环评测。SUPER 为外部参考。

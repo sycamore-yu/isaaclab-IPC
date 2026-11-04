@@ -2,14 +2,16 @@
 
 import math
 
+import numpy as np
 import torch
 from torch import nn
 
-from isaaclab_ipc.corridor_storage import expand_corridors
+from isaaclab_ipc.corridor_storage import expand_corridors, pack_corridors
 from isaaclab_ipc.mpc import Config
 
 from .dynamics import LinearDynamics
-from .solver import MPCInputs
+from .native import ADMMConfig
+from .solver import MPCInputs, SQPConfig, TorchMPC
 
 
 class IPCQPBuilder(nn.Module):
@@ -157,3 +159,65 @@ class IPCQPBuilder(nn.Module):
         guess[:, 0, :9] = state
         guess[:, 1:, :9] = (state @ self.M.T).reshape(batch, horizon, 9)
         return inputs, guess
+
+
+def make_ipc_solver(builder, qp_iterations=16384, compile_kernels=True):
+    """One numerical configuration for fixed-cost IPC and learned-cost AC-MPC."""
+    return TorchMPC(
+        builder.dynamics(),
+        SQPConfig(max_iter=15, tolerance=1e-6, linesearch="none",
+                  compile_kernels=compile_kernels, require_qp_convergence=True),
+        ADMMConfig(max_iter=qp_iterations, eps_abs=1e-7, eps_rel=0.0),
+    )
+
+
+class FixedIPCSolver:
+    """Execute the published fixed IPC cost with native TurboMPC."""
+
+    def __init__(self, params=None, device="cuda:0", compile_kernels=True):
+        self.device = torch.device(device)
+        self.builder = IPCQPBuilder(Config(params) if params else Config.load("avoid")).to(self.device)
+        self.solver = make_ipc_solver(self.builder, compile_kernels=compile_kernels)
+
+    def solve(self, contexts):
+        active = [i for i, item in enumerate(contexts) if item.valid]
+        output = [dict(state=item.state, solution=None, status="invalid SFC",
+                       primal=float("inf"), dual=float("inf"), iterations=0)
+                  for item in contexts]
+        if not active:
+            return output
+        capacity = max(1, *(len(face) for i in active for face in contexts[i].corridors))
+        packed = [pack_corridors(contexts[i].corridors, capacity) for i in active]
+        with torch.inference_mode():
+            obs = {
+                "mpc_state": torch.as_tensor(
+                    np.stack([contexts[i].state for i in active]), device=self.device, dtype=torch.float64),
+                "reference": torch.as_tensor(
+                    np.stack([contexts[i].reference for i in active]), device=self.device, dtype=torch.float64),
+                "planes": torch.as_tensor(np.stack([item[0] for item in packed]), device=self.device),
+                "plane_mask": torch.as_tensor(np.stack([item[1] for item in packed]), device=self.device),
+                "corridor_index": torch.as_tensor(np.stack([item[2] for item in packed]), device=self.device),
+            }
+            data, guess = self.builder(obs)
+            result = self.solver.solve(data, guess)
+            controls = result.controls[:, :-1].flatten(1).cpu().numpy()
+            solved = ((result.status == 0) & (result.admm.status == 0)).cpu().tolist()
+            errors = result.errors.cpu().numpy()
+            iterations = result.admm.iterations.cpu().tolist()
+            states = data.initial_state.cpu().numpy()
+        for index, source, good, values, count, state in zip(
+            active, controls, solved, errors, iterations, states, strict=True
+        ):
+            output[index] = dict(state=state, solution=source,
+                                 status="solved" if good else "max iterations reached",
+                                 primal=float(max(values[1:])), dual=float(values[0]), iterations=int(count))
+        return output
+
+    def close(self):
+        self.solver.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.close()

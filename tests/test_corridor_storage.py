@@ -50,13 +50,11 @@ def test_dense_saved_context_is_still_accepted():
     assert planes is obs["planes"] and mask is obs["plane_mask"]
 
 
-def test_actor_qp_assembly_is_identical_for_compact_snapshot():
-    from tensordict import TensorDict
-
+def test_ipc_problem_is_identical_for_compact_snapshot():
     from isaaclab_ipc.corridor_storage import pack_corridors
     from isaaclab_ipc.mpc import Config
     from isaaclab_ipc.planner import Planner
-    from isaaclab_ipc.rl.actor import MPCActor
+    from isaaclab_ipc.turbompc.ipc import IPCQPBuilder
 
     planner = Planner(Config.load(), [8, 0, 1])
     state, ref, schedule = planner.context(np.array([0, 0, 1, 0.1, 0, 0, 0, 0, 0.0]))
@@ -75,14 +73,13 @@ def test_actor_qp_assembly_is_identical_for_compact_snapshot():
         yaw_target=np.array([0.0]),
         sfc_valid=np.array([True]),
     )
-    obs = TensorDict({k: torch.as_tensor(v)[None] for k, v in values.items()}, [1])
-    actor = MPCActor(obs, {"actor": ["policy"]}, "actor", 4)
-    packed = obs.clone()
+    obs = {k: torch.as_tensor(v)[None] for k, v in values.items()}
+    packed = dict(obs)
     for key, value in zip(("planes", "plane_mask", "corridor_index"), pack_corridors(schedule, 32), strict=True):
         packed[key] = torch.as_tensor(value)[None]
-    for actual, expected in zip(
-        actor.problem(packed, torch.zeros(1, 7)), actor.problem(obs, torch.zeros(1, 7)), strict=True
-    ):
-        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-    with torch.no_grad():
-        torch.testing.assert_close(actor(packed), actor(obs), atol=1e-8, rtol=0)
+    builder = IPCQPBuilder(Config.load())
+    compact, initial_compact = builder(packed)
+    dense, initial_dense = builder(obs)
+    for name in ("initial_state", "D", "E", "q", "G", "lower", "upper"):
+        torch.testing.assert_close(getattr(compact, name), getattr(dense, name), atol=0, rtol=0)
+    torch.testing.assert_close(initial_compact, initial_dense, atol=0, rtol=0)

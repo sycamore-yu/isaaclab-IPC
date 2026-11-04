@@ -1,15 +1,12 @@
-"""AC-MPC actor with IPC's linear jerk model and differentiable hard-constraint QP."""
+"""AC-MPC cost policy using the native TurboMPC jerk solver."""
 
-import numpy as np
 import torch
 from rsl_rl.models import MLPModel
 from rsl_rl.modules import MLP
 
-from isaaclab_ipc.corridor_storage import expand_corridors
 from isaaclab_ipc.execution import brake_jerk, next_braking, safe_climb_jerk
 from isaaclab_ipc.mpc import MPC, Config
-
-from .qp import DifferentiableQP
+from isaaclab_ipc.turbompc.ipc import IPCQPBuilder, make_ipc_solver
 
 
 def flatness_torch(acceleration, jerk, rotation, yaw_target, thrust_limits=(0.08 * 9.81 / 0.7, 0.9 * 9.81 / 0.7), rate_limit=None):
@@ -41,7 +38,8 @@ class MPCActor(MLPModel):
         activation="elu",
         obs_normalization=False,
         distribution_cfg=None,
-        qp_iterations=4096,
+        qp_iterations=16384,
+        compile_kernels=True,
         planner_params=None,
         thrust_limits=(0.08 * 9.81 / 0.7, 0.9 * 9.81 / 0.7),
         rate_limit=None,
@@ -61,94 +59,69 @@ class MPCActor(MLPModel):
         self.safe_climb_enabled = bool(
             planner_params and planner_params.get("frontend", {}).get("safe_climb", False)
         )
-        m = MPC(Config(planner_params) if planner_params else Config.load("avoid"))
-        for name in ("M", "C", "q", "A0", "lower", "upper", "jlow", "jhigh", "a", "b"):
+        cfg = Config(planner_params) if planner_params else Config.load("avoid")
+        m = MPC(cfg)
+        for name in ("lower", "upper", "jlow", "jhigh", "a", "b"):
             self.register_buffer(name, torch.as_tensor(getattr(m, name), dtype=torch.float64))
-        groups = []
-        for axis in range(3):
-            mask = np.zeros(135)
-            for step in range(15):
-                mask[step * 9 + axis * 3 : step * 9 + axis * 3 + 3] = 1
-            groups.append(m.q * mask)
-        qgroups = np.stack(groups)
-        hgroups = np.einsum("si,ks,sj->kij", m.C, qgroups, m.C)
-        hjerk = m.H - hgroups.sum(0)
-        self.register_buffer("qgroups", torch.tensor(qgroups, dtype=torch.float64))
-        self.register_buffer("hgroups", torch.tensor(np.concatenate((hgroups, hjerk[None])), dtype=torch.float64))
-        bias = m.C[m.pi].T @ (m.q[m.pi, None] * np.tile(np.eye(3), (15, 1)))
-        self.register_buffer("linear_bias", torch.tensor(bias, dtype=torch.float64))
-        self.solver = DifferentiableQP(max_iterations=qp_iterations)
+        self.ipc_problem = IPCQPBuilder(cfg)
+        self.qp_iterations = int(qp_iterations)
+        self.compile_kernels = bool(compile_kernels)
+        self._native_solver = None
+        self.last_native_result = None
+        self.native_solve_calls = 0
+        self.fixed_cost = False
 
-    def problem(self, obs, costs):
-        state = obs["mpc_state"].double()
-        state = torch.cat((state[:, :3], state[:, 3:].clamp(self.lower, self.upper)), -1)
-        offset = state @ self.M.T
-        error = offset - obs["reference"].double().flatten(1)
-        weights = torch.exp(np.log(2) * costs[:, :4].double().tanh())
-        h = torch.einsum("bk,kij->bij", weights, self.hgroups)
-        q = weights[:, :3] @ self.qgroups
-        g = (q * error) @ self.C - 0.2 * costs[:, 4:].double().tanh() @ self.linear_bias.T
-        planes, face_mask = expand_corridors(obs)
-        planes = planes.double()
-        normals = planes[..., :3]
-        positions = self.C.reshape(15, 9, 45)[:, :3]
-        sfc_a = torch.einsum("btki,tij->btkj", normals, positions).flatten(1, 2)
-        sfc_upper = -planes[..., 3] - (normals * offset.reshape(-1, 15, 9)[:, :, None, :3]).sum(-1)
-        mask = face_mask.bool().flatten(1)
-        sfc_upper = sfc_upper.flatten(1).masked_fill(~mask, torch.inf)
-        acceleration = offset.reshape(-1, 15, 9)[:, :, 6:].flatten(1)
-        velocity = offset.reshape(-1, 15, 9)[:, :, 3:6].flatten(1)
-        lo = torch.cat(
-            (
-                self.jlow.expand(len(state), -1),
-                self.lower[3:].repeat(15) - acceleration,
-                self.lower[:3].repeat(15) - velocity,
-                torch.full_like(sfc_upper, -torch.inf),
-            ),
-            -1,
-        )
-        hi = torch.cat(
-            (
-                self.jhigh.expand(len(state), -1),
-                self.upper[3:].repeat(15) - acceleration,
-                self.upper[:3].repeat(15) - velocity,
-                sfc_upper,
-            ),
-            -1,
-        )
-        a = torch.cat((self.A0.expand(len(state), -1, -1), sfc_a), 1)
-        return h, g, a, lo, hi, state
+    @property
+    def native_solver(self):
+        if self._native_solver is None:
+            self._native_solver = make_ipc_solver(self.ipc_problem, self.qp_iterations, self.compile_kernels)
+        return self._native_solver
 
     def _solve_context(self, obs, costs):
         """Solve this immutable observation without changing the online Planner."""
-        h, g, a, lo, hi, state = self.problem(obs, costs)
+        state = obs["mpc_state"].double()
+        state = torch.cat((state[:, :3], state[:, 3:].clamp(self.lower, self.upper)), -1)
         valid = obs["sfc_valid"].flatten().bool()
-        if valid.all():
-            solution, solved, primal, dual, iterations = self.solver(h, g, a, lo, hi)
-        else:
-            solution = torch.zeros_like(g)
-            solved = torch.zeros_like(valid)
-            primal = torch.full_like(g[:, 0], torch.inf)
-            dual = primal.clone()
-            iterations = 0
-            if valid.any():
-                x, ok, rp, rd, iterations = self.solver(h[valid], g[valid], a[valid], lo[valid], hi[valid])
-                solution[valid], solved[valid], primal[valid], dual[valid] = x, ok, rp, rd
+        solution = costs.sum(-1, keepdim=True).double().expand(-1, 45) * 0
+        solved = torch.zeros_like(valid)
+        primal = state.new_full((len(state),), torch.inf)
+        dual = primal.clone()
+        iterations = 0
+        self.last_native_result = None
+        if valid.any():
+            selected = {name: value[valid] for name, value in obs.items()}
+            data, guess = self.ipc_problem(selected, costs[valid])
+            result = self.native_solver.solve(data, guess)
+            self.last_native_result = result
+            self.native_solve_calls += 1
+            solution[valid] = result.controls[:, :-1].flatten(1)
+            solved[valid] = (result.status == 0) & (result.admm.status == 0)
+            primal[valid] = result.errors[:, 1:].amax(-1)
+            dual[valid] = result.errors[:, 0]
+            iterations = int(result.admm.iterations.max())
         return solution, solved, primal, dual, iterations, state
 
     def problem_snapshot(self, obs, costs):
         """Expose the actual problem for failed-solve diagnostics."""
-        values = self.problem(obs, costs)
-        return dict(zip(("H", "g", "A", "lower", "upper", "state"), values, strict=True))
+        from dataclasses import fields
+
+        data, guess = self.ipc_problem(obs, costs)
+        return {**{field.name: getattr(data, field.name) for field in fields(data)}, "initial_guess": guess}
 
     def close(self):
-        """The condensed Torch solver owns no external CUDA workspace handles."""
+        if self._native_solver is not None:
+            self._native_solver.close()
+            self._native_solver = None
+        self.last_native_result = None
 
     def solver_metadata(self):
-        return {"backend": "condensed-torch", "dynamics": "ipc-jerk", "horizon": 15}
+        return {"backend": "turbompc-cuda", "dynamics": "ipc-jerk", "horizon": 15,
+                "prediction_dt": 0.1, "qp_iterations": self.qp_iterations,
+                "native_solve_calls": self.native_solve_calls}
 
     def forward(self, obs, masks=None, hidden_state=None, stochastic_output=False):
-        costs = self.mlp(self.get_latent(obs))
+        costs = (obs["mpc_state"].new_zeros((len(obs["mpc_state"]), 7))
+                 if self.fixed_cost else self.mlp(self.get_latent(obs)))
         solution, solved, primal, dual, iterations, state = self._solve_context(obs, costs)
         valid = obs["sfc_valid"].flatten().bool()
         braking = next_braking(

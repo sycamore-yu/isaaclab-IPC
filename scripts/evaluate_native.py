@@ -14,6 +14,7 @@ from isaaclab_ipc.mpc import Config
 from isaaclab_ipc.planner import Planner, flatness
 from isaaclab_ipc.scenes import AvoidScene
 from isaaclab_ipc.tasks.env import IPCEnv, make_cfg
+from isaaclab_ipc.turbompc.ipc import FixedIPCSolver
 
 
 def main():
@@ -26,7 +27,6 @@ def main():
     p.add_argument("--num-envs", type=int, default=1)
     p.add_argument("--planner-workers", type=int, default=1)
     p.add_argument("--device", default="cuda:0")
-    p.add_argument("--solver", choices=["osqp", "gpu"], default="osqp")
     p.add_argument("--forest", type=Path)
     p.add_argument("--max-steps", type=int, default=3500)
     a = p.parse_args()
@@ -62,8 +62,9 @@ def main():
     timings = []
     violations = np.zeros(a.num_envs, int)
     min_clear = np.full(a.num_envs, np.inf)
-    solver = None
-    with IPCEnv(cfg) as env, PlanningBatch(a.planner_workers) as frontend:
+    with IPCEnv(cfg) as env, PlanningBatch(a.planner_workers) as frontend, FixedIPCSolver(
+        planners[0].cfg.params, device=a.device
+    ) as solver:
         obs, _ = env.reset(seed=0)
         start = perf_counter()
         for step in range(a.max_steps):
@@ -74,27 +75,20 @@ def main():
             for scene, state in zip(scenes, values, strict=True):
                 if not a.forest:
                     scene.advance(step * 0.01, state[:3], np.linalg.norm(state[3:6]))
-            problems = frontend.problems(planners, values, clouds)
+            contexts = frontend.contexts(planners, values, clouds)
             prepared = perf_counter()
-            if a.solver == "gpu":
-                from isaaclab_ipc.qp import BatchedQP
-
-                if solver is None:
-                    solver = BatchedQP(a.num_envs, 45, 1024)
-                solutions, statuses, pr, du, it = solver.solve(problems)
-            else:
-                solutions = []
-                statuses = []
-                for planner, problem in zip(planners, problems, strict=True):
-                    solution, status, *_ = planner.mpc.solve(problem)
-                    solutions.append(solution)
-                    statuses.append(status)
+            results = solver.solve(contexts)
             solved = perf_counter()
-            for i, (planner, problem, state, solution, status) in enumerate(
-                zip(planners, problems, values, solutions, statuses, strict=True)
+            for i, (planner, context, state, result) in enumerate(
+                zip(planners, contexts, values, results, strict=True)
             ):
+                status, solution = result["status"], result["solution"]
                 if status not in ("solved", "solved inaccurate") and not first_failure[i]:
                     first_failure[i] = True
+                    problem = planner.mpc.problem(
+                        result["state"], context.reference,
+                        context.corridors if context.valid else [np.empty((0, 4))] * planner.mpc.n,
+                    )
                     np.savez_compressed(
                         a.output / f"first-failed-qp-{i}.npz",
                         H=problem[0],
@@ -106,7 +100,10 @@ def main():
                         status=status,
                         step=step,
                     )
-                x, j, ok = planner.consume(problem, solution, status, step * 0.01)
+                x, j, ok = planner.consume_state(
+                    result["state"], np.zeros(3 * planner.mpc.n) if solution is None else solution,
+                    status, step * 0.01,
+                )
                 yaw = (
                     np.arctan2(planner.goal[1] - state[1], planner.goal[0] - state[0])
                     if planner.cfg.params["yaw_ctrl_flag"]
@@ -149,7 +146,7 @@ def main():
                         "profile": a.profile,
                         "recovery_events": planners[i].recovery_events,
                         "brake_steps": planners[i].brake_steps,
-                        "solver": a.solver,
+                        "solver": "turbompc-cuda",
                         "success": bool(reached and not collision and violations[i] == 0),
                         "goal_crossed": reached,
                         "collision": collision,
@@ -186,7 +183,7 @@ def main():
                     "goal_x": cfg.goal_x,
                     "stride": a.stride,
                     "trigger_distance_m": a.distance,
-                    "solver": a.solver,
+                    "solver": "turbompc-cuda",
                     "dt": cfg.sim.dt,
                     "decimation": cfg.decimation,
                     "timing_columns": ["sensor_frontend_qp_assembly_ms", "qp_solve_ms", "control_physics_ms"],
