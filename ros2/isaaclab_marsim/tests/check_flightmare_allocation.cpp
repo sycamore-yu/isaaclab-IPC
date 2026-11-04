@@ -41,7 +41,8 @@ int main() {
     const Matrix<4, 4> inverse = allocation.inverse();
     const Scalar high = dynamics.collective_thrust_max() / 4;
     Scalar max_collective_error = 0, max_feasible_error = 0;
-    int cases = 0, feasible_cases = 0;
+    Scalar max_rp_error = 0, max_collective_projection_error = 0;
+    int cases = 0, feasible_cases = 0, collective_adjusted_cases = 0;
     const std::vector<Scalar> rates{-10, -3, -0.1, 0, 0.1, 3, 10};
     for (int level = 0; level <= 10; ++level) {
       const Scalar collective = dynamics.collective_thrust_max() / mass * level / 10;
@@ -57,9 +58,24 @@ int main() {
                 "Allocated rotor force outside native limits");
         const Vector<4> achieved = allocation * actual;
         max_collective_error = std::max(max_collective_error, std::abs(achieved[0] - requested[0]));
+        collective_adjusted_cases += std::abs(achieved[0] - requested[0]) > 1e-4;
         if ((original.array() >= 0).all() && (original.array() <= high).all()) {
           max_feasible_error = std::max(max_feasible_error, (actual - original).cwiseAbs().maxCoeff());
           ++feasible_cases;
+        } else {
+          Vector<4> rp = inverse * Vector<4>(0, torque.x(), torque.y(), 0);
+          const Scalar spread = rp.maxCoeff() - rp.minCoeff();
+          const Scalar scale = spread > high ? high / spread : 1;
+          rp *= scale;
+          max_rp_error = std::max(max_rp_error,
+            (achieved.segment<2>(1) - scale * torque.head<2>()).norm());
+          const Scalar closest = 4 * std::max(-rp.minCoeff(),
+            std::min(requested[0] / 4, high - rp.maxCoeff()));
+          max_collective_projection_error = std::max(max_collective_projection_error,
+            std::abs(achieved[0] - closest));
+          if ((level == 0 || level == 10) && torque.head<2>().norm() > 1e-4)
+            require(achieved.segment<2>(1).norm() > 1e-4,
+                    "Zero/max collective removed roll/pitch authority");
         }
         // Roll and pitch retain their requested ratio and sign under saturation.
         require(std::abs(achieved[1] * requested[2] - achieved[2] * requested[1]) < 1e-4,
@@ -71,7 +87,10 @@ int main() {
     }
     require(feasible_cases > 0 && max_feasible_error < 1e-6,
             "A feasible native allocation was changed");
-    require(max_collective_error < 1e-4, "Collective thrust was not preserved");
+    require(max_rp_error < 1e-4, "Saturation failed to preserve feasible roll/pitch torque");
+    require(max_collective_projection_error < 1e-4,
+            "Saturation did not choose the closest feasible collective thrust");
+    require(collective_adjusted_cases > 0, "Collective was never adjusted to preserve attitude authority");
 
     // Reproduce the measured high-speed failure's rate/braking demand.
     QuadState state;
@@ -98,6 +117,9 @@ int main() {
     std::cout << "{\"cases\":" << cases << ",\"feasible_cases\":" << feasible_cases
               << ",\"max_feasible_force_error_N\":" << max_feasible_error
               << ",\"max_collective_force_error_N\":" << max_collective_error
+              << ",\"collective_adjusted_cases\":" << collective_adjusted_cases
+              << ",\"max_roll_pitch_torque_error_Nm\":" << max_rp_error
+              << ",\"max_closest_collective_error_N\":" << max_collective_projection_error
               << ",\"baseline_rp_torque_Nm\":[" << clipped[1] << ',' << clipped[2]
               << "],\"restored_rp_torque_Nm\":[" << restored[1] << ',' << restored[2]
               << "],\"initial_rp_rate_error_radps\":" << initial_rate_error

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -62,9 +63,16 @@ def main():
     monitor_command = [sys.executable, str(ROOT / "scripts/evaluate_marsim_ros2.py"),
                        "--mode", args.mode, "--benchmark", args.benchmark, "--policy", args.policy,
                        "--output", str(output), "--timeout", str(args.timeout)]
+    binaries = [ROOT / "build/marsim_ros2/install" / package / "lib" / package / executable
+                for package, executable in (("isaaclab_marsim", "flightmare_node"),
+                                            ("isaaclab_marsim", "marsim_lidar_node"),
+                                            ("perfect_drone_sim", "perfect_drone_node"),
+                                            ("super_planner", "fsm_node"))]
     (output / "run.json").write_text(json.dumps({
         "launch": command, "monitor": monitor_command, "ros_domain_id": args.domain,
         "git_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "executable_sha256": {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+                              for path in binaries if path.exists()},
         "executor_parameters_sha256": hashlib.sha256(args.executor_parameters.read_bytes()).hexdigest()
         if args.executor_parameters else None,
         "middleware_environment": {name: environment.get(name) for name in (
@@ -78,6 +86,7 @@ def main():
         },
     }, indent=2) + "\n")
     launcher = monitor = None
+    started_wall = time.time()
     try:
         with (output / "launch.log").open("w") as launch_log, (output / "monitor.log").open("w") as monitor_log:
             monitor = subprocess.Popen(monitor_command, stdout=monitor_log, stderr=subprocess.STDOUT,
@@ -93,6 +102,9 @@ def main():
     finally:
         stop(monitor)
         stop(launcher)
+        super_timing = ROOT / "build/marsim_ros2/src/SUPER/super_planner/log/time_consuming.csv"
+        if args.policy == "super" and super_timing.exists() and super_timing.stat().st_mtime >= started_wall:
+            shutil.copy2(super_timing, output / "super_time_consuming.csv")
         if (output / "metrics.json").exists():
             print((output / "metrics.json").read_text(), flush=True)
 

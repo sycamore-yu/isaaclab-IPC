@@ -8,7 +8,9 @@ CTBR uses collective specific thrust [m/s^2] and body rates [rad/s].
 import copy
 import hashlib
 import json
+import multiprocessing
 from pathlib import Path
+from queue import Full
 from time import perf_counter
 
 import numpy as np
@@ -19,9 +21,18 @@ from tensordict import TensorDict
 from isaaclab_ipc.benchmark_config import load_case, planner_params
 from isaaclab_ipc.corridor_storage import pack_corridors
 from isaaclab_ipc.frontend import PlanningBatch, PlanningContext
-from isaaclab_ipc.mpc import Config, dynamics
+from isaaclab_ipc.mpc import MPC, Config
 from isaaclab_ipc.planner import Planner
-from isaaclab_ipc.rl.actor import MPCActor, flatness_torch
+from isaaclab_ipc.rl.actor import MPCActor
+from isaaclab_ipc.ros_control import (
+    IdealCommand,
+    accept_plan,
+    check_plan_constraints,
+    ctbr_from_jerk,
+    ctbr_from_reference,
+    select_jerk,
+    sequence_reference,
+)
 
 
 def observation(physical, goal, context, braking=False, yaw_target=0.0, climb_target=None, device="cpu"):
@@ -81,6 +92,153 @@ def load_checkpoint(path):
     return checkpoint, actor_cfg, environment
 
 
+def planning_worker(requests, results, options, params, actor_cfg):
+    """Own Planner and QP in a process so geometry cannot hold the ROS GIL."""
+    torch.set_num_threads(1)
+    config = Config(params, profile="real")
+    planner = Planner(config, np.asarray(load_case(options["benchmark"])["start"], dtype=float))
+    batch = PlanningBatch(1)
+    actor = None
+    device = torch.device(options["device"])
+    if options["policy"] == "acmpc":
+        checkpoint, _, _ = load_checkpoint(options["checkpoint"])
+        blank = PlanningContext(np.zeros(9), np.zeros((15, 9)), [np.empty((0, 4))] * 15, False)
+        sample = observation(np.r_[np.zeros(9), np.eye(3).ravel()], np.zeros(3), blank, device=device)
+        actor_cfg = dict(actor_cfg, planner_params=params)
+        actor = MPCActor(sample, {"actor": ["policy"]}, "actor", 4, **actor_cfg).to(device)
+        actor.load_state_dict(checkpoint["actor_state_dict"], strict=True)
+        actor.eval()
+    goal_id = None
+    sequence_id = qp_failures = 0
+    try:
+        while (request := requests.get()) is not None:
+            started = perf_counter()
+            state, rotation = request["state"], request["rotation"]
+            if request["goal_id"] != goal_id:
+                goal_id = request["goal_id"]
+                planner.goal = request["goal"].copy()
+                planner.replan = True
+            if request["expired"] or request.get("replan", False):
+                planner.braking = True
+                planner.replan = True
+            cloud = request["cloud"]
+            context = batch.contexts([planner], [state], {} if cloud is None else {0: cloud})[0]
+            frontend_ms = 1000 * (perf_counter() - started)
+            observation_started = perf_counter()
+            yaw = float(np.arctan2(planner.goal[1] - state[1], planner.goal[0] - state[0])) if params["yaw_ctrl_flag"] else 0.0
+            if actor is not None:
+                obs = observation(np.r_[state, rotation.ravel()], planner.goal, context,
+                                  planner.braking, yaw, planner.recovery_target, device)
+                # Preserve every actual SFC face; remove only absent trailing slots.
+                count = max(1, int(obs["plane_mask"].sum(-1).max()))
+                obs["planes"] = obs["planes"][:, :, :count, :]
+                obs["plane_mask"] = obs["plane_mask"][:, :, :count]
+            observation_ms = 1000 * (perf_counter() - observation_started)
+            solve_started = perf_counter()
+            with torch.inference_mode():
+                if actor is not None:
+                    actor(obs)
+                    result = actor.last_result
+                    solved = bool(result["solved"][0])
+                    solution = result["solution"][0].cpu().numpy()
+                    solver_state = result["state"][0].cpu().numpy()
+                    iterations = int(result["iterations"])
+                    primal = float(result["primal"][0])
+                    status = "solved" if solved else "max iterations reached"
+                elif context.valid:
+                    problem = planner.mpc.problem(context.state, context.reference, context.corridors)
+                    solution, status, primal, _ = planner.mpc.solve(problem)
+                    solver_state, iterations = problem[-1], None
+                    solved = status in ("solved", "solved inaccurate")
+                else:
+                    solver_state, solution, solved = context.state, np.zeros(3 * planner.mpc.n), False
+                    iterations, primal, status = None, float("inf"), "invalid SFC"
+            solve_ms = 1000 * (perf_counter() - solve_started)
+            planner.consume_state(solver_state, solution, status if context.valid else "invalid SFC",
+                                  request["source_stamp_ns"] * 1e-9)
+            sequence_id += 1
+            qp_failed = bool(context.valid and not solved)
+            qp_failures += int(qp_failed)
+            sequence = np.asarray(solution).reshape(planner.mpc.n, 3).copy()
+            corridors = context.corridors or [np.empty((0, 4))] * planner.mpc.n
+            faces, masks, schedule = pack_corridors(corridors, max(map(len, corridors)))
+            # Retain the original face order for MPC.problem; pack_corridors reverses it.
+            unique = [block[mask][::-1].copy() for block, mask in zip(faces, masks, strict=True)]
+            # These are MPC.solve's OSQP primal tolerances. Solved-inaccurate
+            # uses OSQP's existing tenfold termination tolerance.
+            multiplier = 10 if status == "solved inaccurate" else 1
+            eps_abs = actor.solver.eps_abs if actor is not None else multiplier * 1e-3
+            eps_rel = 0.0 if actor is not None else multiplier * 1e-3
+            plan = dict(sequence=sequence,
+                        source_stamp_ns=request["source_stamp_ns"], plan_sequence_id=sequence_id,
+                        goal_id=goal_id, braking=bool(planner.braking), sfc_valid=context.valid,
+                        climb_target=None if planner.recovery_target is None else planner.recovery_target.copy(),
+                        source_state=solver_state.copy(), source_measurement=state.copy(),
+                        corridors=unique, corridor_index=schedule,
+                        constraint_eps_abs=eps_abs, constraint_eps_rel=eps_rel, solver_status=status)
+            stats = dict(event="solve", plan_sequence_id=sequence_id,
+                         source_stamp=request["source_stamp_ns"] * 1e-9,
+                         qp_ok=solved, qp_failed=qp_failed, qp_failures=qp_failures,
+                         sfc_valid=context.valid, qp_iterations=iterations,
+                         primal_residual=primal if np.isfinite(primal) else None,
+                         frontend_ms=frontend_ms, observation_ms=observation_ms, solve_ms=solve_ms,
+                         planning_ms=1000 * (perf_counter() - started),
+                         request_wait_ms=1000 * (started - request["sent_monotonic"]),
+                         braking=bool(planner.braking), frontend_failures=planner.frontend_failures)
+            results.send((plan, stats))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        batch.close()
+        if actor is not None:
+            actor.close()
+        results.close()
+
+
+class PlanningWorker:
+    """At most one in-flight snapshot; the next request uses the latest sensors."""
+
+    def __init__(self, options, params, actor_cfg):
+        context = multiprocessing.get_context("spawn")
+        self.requests = context.Queue(maxsize=1)
+        self.results, sender = context.Pipe(duplex=False)
+        self.process = context.Process(target=planning_worker,
+                                       args=(self.requests, sender, options, params, actor_cfg),
+                                       name="marsim-mpc-planner", daemon=True)
+        self.process.start()
+        sender.close()
+        self.busy = False
+
+    def submit(self, request):
+        if self.busy:
+            return False
+        self.requests.put_nowait(request)
+        self.busy = True
+        return True
+
+    def poll(self):
+        if self.results.poll():
+            self.busy = False
+            return self.results.recv()
+        if not self.process.is_alive():
+            raise RuntimeError(f"MPC planning worker exited with code {self.process.exitcode}")
+        return None
+
+    def close(self):
+        if self.process.is_alive():
+            try:
+                self.requests.put(None, timeout=0.2)
+            except Full:
+                pass
+            self.process.join(timeout=5)
+            if self.process.is_alive():
+                self.process.terminate()
+                self.process.join(timeout=5)
+        self.requests.cancel_join_thread()
+        self.requests.close()
+        self.results.close()
+
+
 def main(args=None):
     import rclpy
     from geometry_msgs.msg import AccelStamped, PoseStamped, TwistStamped
@@ -109,7 +267,6 @@ def main(args=None):
                 raise ValueError("frequency must be positive")
             self.options = p
             torch.set_num_threads(1)
-            self.device = torch.device(p["device"])
             case, params = load_case(p["benchmark"]), planner_params(p["benchmark"])
             bounds = case["planner"]["traj_opt"]["boundary"]
             self.thrust_limits = (bounds["min_acc_thr"], bounds["max_acc_thr"])
@@ -132,17 +289,11 @@ def main(args=None):
             if p["policy"] == "acmpc" and checkpoint is None:
                 raise ValueError("policy:=acmpc requires checkpoint:=/absolute/path/checkpoint.pt")
             self.config = Config(params, profile="real")
-            self.command_a, self.command_b = dynamics(1.0 / p["frequency"], [params["mpc"]["D_" + axis] for axis in "xyz"])
-            self.planner = Planner(self.config, np.asarray(case["start"], dtype=float))
-            self.batch = PlanningBatch(1)
-            self.actor = None
-            if p["policy"] == "acmpc":
-                blank = PlanningContext(np.zeros(9), np.zeros((15, 9)), [np.empty((0, 4))] * 15, False)
-                sample = observation(np.r_[np.zeros(9), np.eye(3).ravel()], np.zeros(3), blank, device=self.device)
-                actor_cfg["planner_params"] = params
-                self.actor = MPCActor(sample, {"actor": ["policy"]}, "actor", 4, **actor_cfg).to(self.device)
-                self.actor.load_state_dict(checkpoint["actor_state_dict"], strict=True)
-                self.actor.eval()
+            self.mpc = MPC(self.config)
+            self.ideal_command = IdealCommand(
+                [params["mpc"]["D_" + axis] for axis in "xyz"],
+                history_size=max(2, int(np.ceil(self.mpc.n * self.mpc.dt * p["frequency"])) + 1),
+            )
             directory = Path(p["output_directory"]).expanduser()
             directory.mkdir(parents=True, exist_ok=True)
             self.record = (directory / "policy.jsonl").open("w", buffering=1)
@@ -155,14 +306,25 @@ def main(args=None):
                             thrust_limits=list(self.thrust_limits), rate_limit=self.rate_limit,
                             planner_profile="real", rotation="ROS xyzw to body-to-world R",
                             command_step_s=1.0 / p["frequency"], mpc_prediction_step_s=params["mpc"]["step"],
-                            acceleration_source=p["acceleration_topic"] if p["execution"] == "dynamic" else "published_PositionCommand.acceleration",
-                            solver="condensed-torch" if self.actor is not None else "osqp-fixed-ipc")
+                            scheduling="one planning process; 100 Hz time-sampled jerk trajectory execution",
+                            sequence_clock="acceptance timestamp; source age separately limits full-horizon validity",
+                            reference_origin="execution PVA at acceptance (measured dynamic; current published ideal); original 0.1 s model knots",
+                            acceptance="original jerk/state/SFC constraints rechecked at the execution PVA; rejected plans brake and replan",
+                            ctbr_acceleration="time-sampled reference a; original one-step state feedback only during recovery",
+                            ideal_integration="previous published PVA and jerk over actual publication interval",
+                            statistics="event=solve records each QP once; event=control records each command",
+                            acceleration_source=p["acceleration_topic"] if p["execution"] == "dynamic" else "PositionCommand.acceleration_matched_to_odometry_PV",
+                            solver="condensed-torch" if p["policy"] == "acmpc" else "osqp-fixed-ipc")
             (directory / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
             self.state = self.rotation = self.cloud = None
             self.acceleration = np.zeros(3)
-            self.odom_stamp = self.accel_stamp = None
+            self.odom_stamp_ns = self.accel_stamp_ns = None
             self.last_tick = None
-            self.qp_failures = self.controls = 0
+            self.controls = self.goal_id = 0
+            self.goal = None
+            self.plan = None
+            self.replan_required = False
+            self.reanchor_rejections = 0
             self.have_goal = False
             self.have_cloud = False
             odom_topic = p["odom_topic"] or ("/marsim/odometry" if p["execution"] == "dynamic" else "/lidar_slam/odom")
@@ -179,12 +341,13 @@ def main(args=None):
             command_topic = p["ctbr_topic"] if p["execution"] == "dynamic" else p["position_command_topic"]
             self.command_pub = self.create_publisher(command_type, command_topic, 10)
             self.stats_pub = self.create_publisher(String, p["stats_topic"], 10)
+            self.worker = PlanningWorker(p, params, actor_cfg)
             self.timer = self.create_timer(1.0 / p["frequency"], self.control)
-            self.get_logger().info(f"{p['policy']}/{p['execution']}: {odom_topic}, {p['cloud_topic']} -> {command_topic}; {p['frequency']} Hz requested")
+            self.get_logger().info(f"{p['policy']}/{p['execution']}: {odom_topic}, {p['cloud_topic']} -> {command_topic}; {p['frequency']} Hz control, asynchronous MPC")
 
         @staticmethod
-        def seconds(stamp):
-            return stamp.sec + stamp.nanosec * 1e-9
+        def nanoseconds(stamp):
+            return stamp.sec * 1_000_000_000 + stamp.nanosec
 
         def on_odom(self, message):
             q = message.pose.pose.orientation
@@ -193,15 +356,18 @@ def main(args=None):
             velocity = np.array([v.x, v.y, v.z])
             if self.body_twist:
                 velocity = rotation @ velocity
-            stamp = self.seconds(message.header.stamp)
+            stamp = self.nanoseconds(message.header.stamp)
             position = message.pose.pose.position
-            self.state = np.r_[[position.x, position.y, position.z], velocity, self.acceleration]
-            self.rotation, self.odom_stamp = rotation, stamp
+            position_velocity = np.r_[[position.x, position.y, position.z], velocity]
+            if self.options["execution"] == "ideal" and self.ideal_command.state is not None:
+                self.acceleration = self.ideal_command.observed_acceleration(position_velocity)
+            self.state = np.r_[position_velocity, self.acceleration]
+            self.rotation, self.odom_stamp_ns = rotation, stamp
 
         def on_acceleration(self, message):
             a = message.accel.linear
             self.acceleration = np.array([a.x, a.y, a.z])
-            self.accel_stamp = self.seconds(message.header.stamp)
+            self.accel_stamp_ns = self.nanoseconds(message.header.stamp)
             if self.state is not None:
                 self.state[6:] = self.acceleration
 
@@ -216,95 +382,118 @@ def main(args=None):
             goal = np.array([g.x, g.y, g.z])
             if not np.isfinite(goal).all():
                 raise ValueError("Received a nonfinite mission goal")
-            self.planner.goal = goal
-            self.planner.replan = True
+            self.goal = goal
+            self.goal_id += 1
+            self.plan = None
             self.have_goal = True
             self.get_logger().info(f"Mission goal: {goal.tolist()}")
 
         def control(self):
+            started = perf_counter()
+            completed = self.worker.poll()
             if self.state is None or not self.have_cloud or not self.have_goal:
                 return
-            if self.options["execution"] == "dynamic" and self.accel_stamp is None:
+            if self.options["execution"] == "dynamic" and self.accel_stamp_ns is None:
                 return
-            started = perf_counter()
             interval = None if self.last_tick is None else 1000 * (started - self.last_tick)
             self.last_tick = started
             stamp = self.get_clock().now()
-            elapsed = stamp.nanoseconds * 1e-9
-            cloud, self.cloud = self.cloud, None
-            context = self.batch.contexts([self.planner], [self.state], {} if cloud is None else {0: cloud})[0]
-            yaw = float(np.arctan2(self.planner.goal[1] - self.state[1], self.planner.goal[0] - self.state[0])) if self.config.params["yaw_ctrl_flag"] else 0.0
-            if self.actor is not None:
-                obs = observation(np.r_[self.state, self.rotation.ravel()], self.planner.goal, context,
-                                  self.planner.braking, yaw, self.planner.recovery_target, self.device)
-                # Keep every actual SFC face; absent trailing slots only add zero QP rows.
-                count = max(1, int(obs["plane_mask"].sum(-1).max()))
-                obs["planes"] = obs["planes"][:, :, :count, :]
-                obs["plane_mask"] = obs["plane_mask"][:, :, :count]
-            solve_started = perf_counter()
-            with torch.inference_mode():
-                if self.actor is not None:
-                    command = self.actor(obs)[0].cpu().numpy()
-                    result = self.actor.last_result
-                    solved = bool(result["solved"][0])
-                    solution = result["solution"][0].cpu().numpy()
-                    state = result["state"][0].cpu().numpy()
-                    iterations = int(result["iterations"])
-                    primal = float(result["primal"][0])
-                    status = "solved" if solved else "max iterations reached"
-                elif context.valid:
-                    problem = self.planner.mpc.problem(context.state, context.reference, context.corridors)
-                    solution, status, primal, _ = self.planner.mpc.solve(problem)
-                    state, iterations = problem[-1], None
-                    solved = status in ("solved", "solved inaccurate")
-                else:
-                    state, solution, solved, iterations, primal, status = context.state, np.zeros(45), False, None, float("inf"), "invalid SFC"
-                solve_ms = 1000 * (perf_counter() - solve_started)
-                predicted, jerk, _ = self.planner.consume_state(state, solution, status if context.valid else "invalid SFC", elapsed)
-                if self.actor is None:
-                    command = flatness_torch(torch.as_tensor(predicted[None, 6:]), torch.as_tensor(jerk[None]),
-                                             torch.as_tensor(self.rotation[None]), torch.as_tensor([yaw]),
-                                             self.thrust_limits, self.rate_limit)[0].cpu().numpy()
+            execution_state = self.state
+            if self.options["execution"] == "ideal":
+                # Advance the previous command first. The gate must check the
+                # PVA actually published this tick, not an older odometry sample.
+                execution_state = self.ideal_command.advance(self.state, self.ideal_command.jerk, stamp.nanoseconds)
+            if completed is not None:
+                plan, stats = completed
+                source_expired = stamp.nanoseconds - plan["source_stamp_ns"] >= round(self.mpc.n * self.mpc.dt * 1e9)
+                accepted = plan["goal_id"] == self.goal_id and not source_expired
+                check = None
+                acceptance_ms = 0.0
+                if accepted and not plan["braking"] and plan["sfc_valid"]:
+                    check_started = perf_counter()
+                    check = check_plan_constraints(plan, execution_state, self.mpc)
+                    acceptance_ms = 1000 * (perf_counter() - check_started)
+                rejected = check is not None and not check["feasible"]
+                if rejected:
+                    accepted = False
+                    self.reanchor_rejections += 1
+                    self.plan = None
+                    self.replan_required = True
+                if accepted:
+                    self.plan = accept_plan(plan, execution_state, stamp.nanoseconds, self.mpc)
+                stats.update(stamp=stamp.nanoseconds * 1e-9, accepted=accepted, source_expired=source_expired,
+                             reanchor_rejected=rejected, reanchor_rejections=self.reanchor_rejections,
+                             reanchor_violation=None if check is None else check["violation"],
+                             reanchor_tolerance=None if check is None else check["tolerance"],
+                             reanchor_constraint=None if check is None else check["constraint"],
+                             acceptance_ms=acceptance_ms, acceptance_state=execution_state.tolist(),
+                             sequence=plan["sequence"].tolist(), source_state=plan["source_state"].tolist(),
+                             source_measurement=plan["source_measurement"].tolist(),
+                             corridors=[faces.tolist() for faces in plan["corridors"]],
+                             corridor_index=plan["corridor_index"].tolist(),
+                             constraint_eps_abs=plan["constraint_eps_abs"], constraint_eps_rel=plan["constraint_eps_rel"],
+                             solver_status=plan["solver_status"])
+                self.publish_stats(stats)
+            jerk, sequence_index, braking, expired = select_jerk(self.plan, execution_state, stamp.nanoseconds, self.mpc)
+            yaw = float(np.arctan2(self.goal[1] - self.state[1], self.goal[0] - self.state[0])) if self.config.params["yaw_ctrl_flag"] else 0.0
             message = TwistStamped() if self.options["execution"] == "dynamic" else PositionCommand()
-            published = self.get_clock().now()
-            message.header.stamp = published.to_msg()
+            message.header.stamp = stamp.to_msg()
             message.header.frame_id = "base_link" if self.options["execution"] == "dynamic" else "world"
+            reference_acceleration = None
             if self.options["execution"] == "dynamic":
+                if braking:
+                    command = ctbr_from_jerk(self.state, self.rotation, jerk, yaw, self.mpc,
+                                             self.thrust_limits, self.rate_limit)
+                else:
+                    reference_acceleration = sequence_reference(self.plan, stamp.nanoseconds, self.mpc)[6:]
+                    command = ctbr_from_reference(reference_acceleration, self.rotation, jerk, yaw,
+                                                 self.thrust_limits, self.rate_limit)
                 message.twist.linear.z = float(command[0])
                 message.twist.angular.x, message.twist.angular.y, message.twist.angular.z = map(float, command[1:])
             else:
-                # consume_state advances the 0.1 s MPC prediction. PerfectDrone
-                # needs the same selected jerk advanced by one control period.
-                predicted = self.command_a @ state + self.command_b @ jerk
+                predicted = execution_state
+                self.ideal_command.jerk = jerk.copy()
+                reference_acceleration = predicted[6:]
                 for field, values in ((message.position, predicted[:3]), (message.velocity, predicted[3:6]),
                                       (message.acceleration, predicted[6:]), (message.jerk, jerk)):
                     field.x, field.y, field.z = map(float, values)
                 message.yaw = yaw
                 message.trajectory_flag = PositionCommand.TRAJECTORY_STATUS_READY
             self.command_pub.publish(message)
-            if self.options["execution"] == "ideal":
-                # PerfectDrone assigns this acceleration directly. Differencing its
-                # independently assigned velocity would fabricate another state.
-                self.acceleration = predicted[6:].copy()
-            self.qp_failures += int(context.valid and not solved)
+            if not self.worker.busy:
+                request = dict(state=self.state.copy(), rotation=self.rotation.copy(),
+                               goal=self.goal.copy(), goal_id=self.goal_id, cloud=self.cloud,
+                               source_stamp_ns=self.odom_stamp_ns, expired=expired, replan=self.replan_required,
+                               sent_monotonic=perf_counter())
+                if self.worker.submit(request):
+                    self.cloud = None
+                    self.replan_required = False
             self.controls += 1
-            row = dict(stamp=published.nanoseconds * 1e-9, policy=self.options["policy"], execution=self.options["execution"],
-                       control_index=self.controls, qp_ok=solved, qp_failed=bool(context.valid and not solved),
-                       qp_failures=self.qp_failures, sfc_valid=context.valid, qp_iterations=iterations,
-                       primal_residual=primal if np.isfinite(primal) else None, solve_ms=solve_ms,
+            row = dict(event="control", stamp=stamp.nanoseconds * 1e-9,
+                       control_index=self.controls,
+                       plan_sequence_id=None if self.plan is None else self.plan["plan_sequence_id"],
+                       sequence_index=sequence_index,
+                       solution_age=None if self.plan is None else (stamp.nanoseconds - self.plan["source_stamp_ns"]) * 1e-9,
+                       sequence_age=None if self.plan is None else (stamp.nanoseconds - self.plan["accepted_stamp_ns"]) * 1e-9,
+                       state_age=(stamp.nanoseconds - self.odom_stamp_ns) * 1e-9,
+                       command_age=(stamp.nanoseconds - self.odom_stamp_ns) * 1e-9,
+                       jerk=jerk.tolist(), measured_acceleration=self.state[6:].tolist(),
+                       reference_acceleration=None if reference_acceleration is None else reference_acceleration.tolist(),
+                       sfc_valid=False if self.plan is None else self.plan["sfc_valid"],
                        control_ms=1000 * (perf_counter() - started), timer_interval_ms=interval,
-                       command_age=published.nanoseconds * 1e-9 - self.odom_stamp, braking=self.planner.braking,
-                       frontend_failures=self.planner.frontend_failures)
+                       braking=braking, plan_expired=expired)
+            self.publish_stats(row)
+
+        def publish_stats(self, row):
+            row.update(policy=self.options["policy"], execution=self.options["execution"])
             encoded = json.dumps(row, allow_nan=False)
             self.record.write(encoded + "\n")
             self.stats_pub.publish(String(data=encoded))
 
         def close(self):
             self.timer.cancel()
+            self.worker.close()
             self.record.close()
-            self.batch.close()
-            if self.actor is not None:
-                self.actor.close()
 
     rclpy.init(args=args)
     node = None

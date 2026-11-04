@@ -37,6 +37,7 @@ target_include_directories(flightlib_dynamics PUBLIC ${F}/include ${OpenCV_INCLU
 target_link_libraries(flightlib_dynamics PUBLIC Eigen3::Eigen yaml-cpp ${OpenCV_LIBS})
 
 add_executable(flightmare_node src/flightmare_node.cpp)
+target_include_directories(flightmare_node PRIVATE ${SUPER_ROOT}/super_planner/include)
 target_link_libraries(flightmare_node flightlib_dynamics)
 ament_target_dependencies(flightmare_node rclcpp geometry_msgs nav_msgs tf2_ros mars_quadrotor_msgs)
 
@@ -55,5 +56,8 @@ if(BUILD_TESTING)
   add_executable(check_flightmare_allocation tests/check_flightmare_allocation.cpp)
   target_link_libraries(check_flightmare_allocation PRIVATE flightlib_dynamics)
   add_test(NAME flightmare_allocation COMMAND check_flightmare_allocation)
+  add_executable(replay_position_commands tests/replay_position_commands.cpp)
+  target_include_directories(replay_position_commands PRIVATE ${SUPER_ROOT}/super_planner/include)
+  target_link_libraries(replay_position_commands PRIVATE flightlib_dynamics)
 endif()
 ament_package()

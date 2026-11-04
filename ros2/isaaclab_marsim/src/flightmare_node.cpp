@@ -22,10 +22,10 @@
 
 #include "flightlib/common/command.hpp"
 #include "flightlib/objects/quadrotor.hpp"
+#include "position_command_tracking.hpp"
 
 namespace {
 using Vec3 = flightlib::Vector<3>;
-using Mat3 = flightlib::Matrix<3, 3>;
 using Quat = flightlib::Quaternion;
 using Scalar = flightlib::Scalar;
 using PositionCommand = mars_quadrotor_msgs::msg::PositionCommand;
@@ -90,6 +90,9 @@ class FlightmareNode : public rclcpp::Node {
     }
     quad_ = std::make_unique<flightlib::Quadrotor>(dynamics);
     quad_->setBodyrateGains(Vec3::Constant(rate_gain));
+    flatness_.reset(mass, 9.81, 0.0, 0.0, 0.0, 1e-4);
+    rate_limit_ = rate_limit;
+    collective_limit_ = 4.0 * max_thrust / mass;
     flightlib::Matrix<3, 2> world_box;
     world_box.col(0).setConstant(-1e6);
     world_box.col(1).setConstant(1e6);
@@ -145,44 +148,15 @@ class FlightmareNode : public rclcpp::Node {
     const Vec3 force = vector(target_.acceleration) +
       Scalar(kp_) * (vector(target_.position) - state_.p) +
       Scalar(kd_) * (vector(target_.velocity) - state_.v) + Vec3(0.0, 0.0, 9.81);
-    const Scalar norm = force.norm();
-    if (norm < 1e-5) {
-      collective_ = 0.0;
-      rates_.setZero();
-      return;
-    }
-    const Vec3 z = force / norm;
-    const Vec3 heading(std::cos(target_.yaw), std::sin(target_.yaw), 0.0);
-    const Vec3 cross = z.cross(heading);
-    if (cross.norm() < 1e-5) return;
-    const Vec3 y = cross.normalized();
-    const Vec3 x = y.cross(z);
-    Mat3 desired;
-    desired.col(0) = x;
-    desired.col(1) = y;
-    desired.col(2) = z;
-    Quat error = state_.q().conjugate() * Quat(desired);
-    if (error.w() < 0.0) error.coeffs() *= -1.0;
-
     // Differentiate the complete feedback force; state_.a is net world acceleration.
     const Vec3 force_dot = vector(target_.jerk) +
       Scalar(kp_) * (vector(target_.velocity) - state_.v) +
       Scalar(kd_) * (vector(target_.acceleration) - state_.a);
-    const Vec3 zdot = (Mat3::Identity() - z * z.transpose()) * force_dot / norm;
-    const Vec3 heading_dot = Scalar(target_.yaw_dot) *
-      Vec3(-std::sin(target_.yaw), std::cos(target_.yaw), 0.0);
-    const Vec3 ydot = (Mat3::Identity() - y * y.transpose()) *
-      (zdot.cross(heading) + z.cross(heading_dot)) / cross.norm();
-    Mat3 desired_dot;
-    desired_dot.col(0) = ydot.cross(z) + y.cross(zdot);
-    desired_dot.col(1) = ydot;
-    desired_dot.col(2) = zdot;
-    const Mat3 omega_matrix = desired.transpose() * desired_dot;
-    const Vec3 feedforward(omega_matrix(2, 1), omega_matrix(0, 2), omega_matrix(1, 0));
-    // Transport desired angular velocity into actual body axes.
-    rates_ = Scalar(2.0 * attitude_gain_) * error.vec() +
-      state_.R().transpose() * desired * feedforward;
-    collective_ = std::max(Scalar(0), force.dot(state_.R().col(2)));
+    const auto command = isaaclab_marsim::track_thrust_direction(
+      state_, force, force_dot, target_.yaw, target_.yaw_dot,
+      attitude_gain_, rate_limit_, collective_limit_, flatness_);
+    rates_ = command.omega;
+    collective_ = command.collective_thrust;
   }
 
   void step() {
@@ -242,10 +216,11 @@ class FlightmareNode : public rclcpp::Node {
   }
 
   std::unique_ptr<flightlib::Quadrotor> quad_;
+  flatness::FlatnessMap flatness_;
   flightlib::QuadState state_;
   PositionCommand target_;
   Vec3 rates_;
-  Scalar collective_;
+  Scalar collective_, rate_limit_, collective_limit_;
   double dt_, kp_, kd_, attitude_gain_;
   bool position_control_;
   rclcpp::TimerBase::SharedPtr timer_;

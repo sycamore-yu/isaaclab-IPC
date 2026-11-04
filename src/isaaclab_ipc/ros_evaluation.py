@@ -136,19 +136,49 @@ class MissionRecorder:
         odometry_timing = timing_summary(stamps)
         durations = []
         solve_durations = []
+        frontend_durations = []
+        observation_durations = []
+        planning_durations = []
+        acceptance_durations = []
+        control_stamps = []
+        solve_stamps = []
+        state_ages = []
+        solution_ages = []
         qp_failures = []
         cumulative_qp_failures = []
+        reanchor_rejections = []
+        cumulative_reanchor_rejections = []
         for entry in self.stats:
             data = entry["data"]
-            if "control_ms" in data:
-                durations.append(float(data["control_ms"]))
-            if "solve_ms" in data:
-                solve_durations.append(float(data["solve_ms"]))
-            if "qp_failed" in data:
-                qp_failures.append(bool(data["qp_failed"]))
+            event = data.get("event")
+            if event in (None, "control"):
+                value = data.get("control_ms", data.get("command_ms"))
+                if value is not None:
+                    durations.append(float(value))
+                if "stamp" in data:
+                    control_stamps.append(float(data["stamp"]))
+                for name, values in (("state_age", state_ages), ("solution_age", solution_ages)):
+                    if data.get(name) is not None:
+                        values.append(1000 * float(data[name]))
+            if event in (None, "solve"):
+                if "solve_ms" in data:
+                    solve_durations.append(float(data["solve_ms"]))
+                    if "stamp" in data:
+                        solve_stamps.append(float(data["stamp"]))
+                for name, values in (("frontend_ms", frontend_durations), ("observation_ms", observation_durations),
+                                     ("planning_ms", planning_durations), ("acceptance_ms", acceptance_durations)):
+                    if name in data:
+                        values.append(float(data[name]))
+                if "qp_failed" in data:
+                    qp_failures.append(bool(data["qp_failed"]))
+                if "reanchor_rejected" in data:
+                    reanchor_rejections.append(bool(data["reanchor_rejected"]))
             if "qp_failures" in data:
                 cumulative_qp_failures.append(int(data["qp_failures"]))
+            if "reanchor_rejections" in data:
+                cumulative_reanchor_rejections.append(int(data["reanchor_rejections"]))
         commands = np.asarray(self.commands, dtype=float).reshape(-1, 6)
+        position_commands = np.asarray(self.position_commands, dtype=float).reshape(-1, 16)
         clouds = np.asarray(self.clouds, dtype=float).reshape(-1, 4)
         lidar_poses = np.asarray(self.lidar_poses, dtype=float).reshape(-1, 9)
         metrics = {
@@ -190,10 +220,22 @@ class MissionRecorder:
             "qp_failures": max(cumulative_qp_failures)
             if cumulative_qp_failures
             else (sum(qp_failures) if qp_failures else None),
+            "reanchor_rejections": max(cumulative_reanchor_rejections)
+            if cumulative_reanchor_rejections
+            else (sum(reanchor_rejections) if reanchor_rejections else None),
             "computation_time_ms": duration_summary(durations),
             "qp_solve_time_ms": duration_summary(solve_durations),
+            "frontend_time_ms": duration_summary(frontend_durations),
+            "observation_time_ms": duration_summary(observation_durations),
+            "planning_time_ms": duration_summary(planning_durations),
+            "plan_acceptance_time_ms": duration_summary(acceptance_durations),
+            "policy_control_timing": timing_summary(control_stamps),
+            "policy_solve_timing": timing_summary(solve_stamps),
+            "policy_state_age_ms": duration_summary(state_ages),
+            "policy_solution_age_ms": duration_summary(solution_ages),
             "ctbr_timing": timing_summary(commands[:, 0]),
             "ctbr_reception_timing": timing_summary(commands[:, 1]),
+            "position_command_timing": timing_summary(position_commands[:, 0]),
             "array_columns": {
                 "acceleration": ["stamp_s", "elapsed_s", "ax_world_mps2", "ay_world_mps2", "az_world_mps2"],
                 "ctbr": [
@@ -243,7 +285,7 @@ class MissionRecorder:
                 ctbr=commands,
                 lidar=clouds,
                 lidar_pose=lidar_poses,
-                position_commands=np.asarray(self.position_commands, dtype=float).reshape(-1, 16),
+                position_commands=position_commands,
             )
         with targets[2].open("x") as stream:
             for entry in self.stats:

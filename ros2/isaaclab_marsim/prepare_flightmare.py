@@ -25,20 +25,19 @@ def prepare(source: Path, target: Path) -> Path:
         if archive.wait():
             raise RuntimeError("Flightmare git archive failed")
 
-    patches = []
+    originals, prepared = {}, {}
     base = target / "flightlib"
 
     def replace(relative, before, after):
-        path = base / relative
-        original = path.read_text()
-        if after in original:
-            return
+        if relative not in prepared:
+            originals[relative] = subprocess.check_output(
+                ["git", "-C", str(source), "show", f"{REVISION}:flightlib/{relative}"], text=True
+            )
+            prepared[relative] = originals[relative]
+        original = prepared[relative]
         if original.count(before) != 1:
             raise ValueError(f"Source patch no longer matches: {relative}: {before[:60]}")
-        updated = original.replace(before, after, 1)
-        patches.extend(difflib.unified_diff(original.splitlines(True), updated.splitlines(True),
-                                           f"a/flightlib/{relative}", f"b/flightlib/{relative}"))
-        path.write_text(updated)
+        prepared[relative] = original.replace(before, after, 1)
 
     # CTBR is acceleration, while clampThrust accepts a single rotor force.
     replace("src/objects/quadrotor.cpp", "dynamics_.clampThrust(cmd_.collective_thrust);",
@@ -48,8 +47,8 @@ def prepare(source: Path, target: Path) -> Path:
     replace("src/objects/quadrotor.cpp", "state_.qx /= state_.qx.norm();",
             "next_state.qx /= next_state.qx.norm();")
     # Independent rotor clipping can spend all authority on yaw and cancel roll/pitch.
-    # Preserve feasible allocations exactly; otherwise preserve collective thrust,
-    # then roll/pitch direction, and allocate only the remaining authority to yaw.
+    # Preserve feasible allocations exactly. At saturation, prioritize roll/pitch,
+    # then the closest feasible collective thrust, then yaw.
     replace("src/objects/quadrotor.cpp",
             "  const Vector<4> motor_thrusts_des = B_allocation_inv_ * thrust_and_torque;\n\n"
             "  return dynamics_.clampThrust(motor_thrusts_des);",
@@ -58,24 +57,24 @@ def prepare(source: Path, target: Path) -> Path:
             "  const Scalar hi = dynamics_.collective_thrust_max() / 4;\n"
             "  if ((motor_thrusts_des.array() >= lo).all() &&\n"
             "      (motor_thrusts_des.array() <= hi).all()) return motor_thrusts_des;\n\n"
-            "  // Saturation priority: collective, roll/pitch, then yaw.\n"
-            "  Vector<4> thrust = Vector<4>::Constant(dynamics_.clampThrust(force / 4));\n"
-            "  const Vector<4> roll_pitch = B_allocation_inv_ *\n"
+            "  // Keep attitude authority at both zero and maximum collective thrust.\n"
+            "  Vector<4> roll_pitch = B_allocation_inv_ *\n"
             "    Vector<4>(0, body_torque_des.x(), body_torque_des.y(), 0);\n"
+            "  const Scalar spread = roll_pitch.maxCoeff() - roll_pitch.minCoeff();\n"
+            "  if (spread > hi - lo) roll_pitch *= (hi - lo) / spread;\n"
+            "  const Scalar collective = std::max(lo - roll_pitch.minCoeff(),\n"
+            "    std::min(force / 4, hi - roll_pitch.maxCoeff()));\n"
+            "  Vector<4> thrust = roll_pitch + Vector<4>::Constant(collective);\n"
             "  const Vector<4> yaw = B_allocation_inv_ *\n"
             "    Vector<4>(0, 0, 0, body_torque_des.z());\n"
-            "  const auto add_feasible = [&](const Vector<4>& differential) {\n"
-            "    Scalar scale = 1;\n"
-            "    for (int i = 0; i < 4; ++i) {\n"
-            "      if (differential[i] > 0)\n"
-            "        scale = std::min(scale, (hi - thrust[i]) / differential[i]);\n"
-            "      else if (differential[i] < 0)\n"
-            "        scale = std::min(scale, (lo - thrust[i]) / differential[i]);\n"
-            "    }\n"
-            "    thrust += std::max(Scalar(0), scale) * differential;\n"
-            "  };\n"
-            "  add_feasible(roll_pitch);\n"
-            "  add_feasible(yaw);\n"
+            "  Scalar yaw_scale = 1;\n"
+            "  for (int i = 0; i < 4; ++i) {\n"
+            "    if (yaw[i] > 0)\n"
+            "      yaw_scale = std::min(yaw_scale, (hi - thrust[i]) / yaw[i]);\n"
+            "    else if (yaw[i] < 0)\n"
+            "      yaw_scale = std::min(yaw_scale, (lo - thrust[i]) / yaw[i]);\n"
+            "  }\n"
+            "  thrust += std::max(Scalar(0), yaw_scale) * yaw;\n"
             "  return dynamics_.clampThrust(thrust);")
     replace("include/flightlib/dynamics/quadrotor_dynamics.hpp", "  bool setMass(const Scalar mass);",
             "  bool setInertiaDiagonal(const Vector<3>& diagonal) {\n"
@@ -95,9 +94,14 @@ def prepare(source: Path, target: Path) -> Path:
             "  }\n  // low-level controller\n")
     replace("include/flightlib/objects/quadrotor.hpp", "  const Matrix<3, 3> Kinv_ang_vel_tau_ =",
             "  Matrix<3, 3> Kinv_ang_vel_tau_ =")
-    if patches:
-        with (target / "isaaclab_marsim.patch").open("a") as stream:
-            stream.writelines(patches)
+    patches = []
+    for relative, updated in prepared.items():
+        path = base / relative
+        if path.read_text() != updated:
+            path.write_text(updated)
+        patches.extend(difflib.unified_diff(originals[relative].splitlines(True), updated.splitlines(True),
+                                           f"a/flightlib/{relative}", f"b/flightlib/{relative}"))
+    (target / "isaaclab_marsim.patch").write_text("".join(patches))
     (target / "isaaclab_marsim_source.json").write_text(json.dumps({
         "source": str(source), "revision": REVISION, "license": "MIT",
         "patch": "isaaclab_marsim.patch",

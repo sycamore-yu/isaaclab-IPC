@@ -1,6 +1,6 @@
 # MARSIM ROS 2 评测
 
-**当前验收状态：接口和构建已完成。SUPER high_speed 在 ideal、dynamic 两种模式下均完成完整往返。密集场景和 AC-MPC 的 100 Hz 策略输出要求尚未通过，不能认定全部验收完成。**
+**当前状态：SUPER 的 ideal high_speed、ideal dense 和 dynamic high_speed 已完成完整往返。动态基本动作及实际 LiDAR 验证通过。AC-MPC 和固定 IPC 已实测约 100 Hz CTBR 输出。dynamic dense 仍碰撞，最新 Python 策略任务均超时，不能认定全部导航验收完成。最新证据见第 11 节。**
 
 MARSIM 负责正式评测，提供 `ideal` 和 `dynamic` 两种执行模式。Isaac Lab/Newton 继续使用原训练入口。ROS 节点复用项目的 Planner、PathCover/RISP、MPCActor 和 QP，不启动 Isaac Lab 仿真进程。本文记录当前实现、复现方法和实际成功／失败结果。
 
@@ -132,7 +132,7 @@ Launch 按 `execution` 分支只创建一个执行器。监控完成，或执行
 
 `dynamic + ipc/acmpc` 由 Python 节点直接发布 CTBR。`ideal + ipc/acmpc` 发布同一策略求得的 PositionCommand，由原 PerfectDrone 执行。两种模式都使用实际收到的速度构造观测。
 
-ideal 发布端按 0.01 s 控制步长推进选定的 jerk，得到本步位置、速度和加速度；MPC 仍使用训练时的 0.1 s 预测步长。原 PerfectDrone 没有独立加速度话题，策略使用最近已发布的 PositionCommand.acceleration。dynamic 使用实际 AccelStamped。两种步长和加速度来源都写入策略 metadata。
+ideal 发布端按实际发布间隔推进上一条已发命令及其 jerk，得到本步位置、速度和加速度；正常发布间隔约为 0.01 s。MPC 仍使用训练时的 0.1 s 预测步长。原 PerfectDrone 没有独立加速度话题，策略用收到的精确位置、速度匹配已发 PositionCommand，再取该命令的加速度，避免拼接不同执行时刻的状态。历史按里程计确认清理，并限制为完整预测时域内的命令数量。dynamic 使用实际 AccelStamped。
 
 ### 推荐的自动记录入口
 
@@ -277,7 +277,17 @@ DISPLAY=:11 .venv/bin/python scripts/run_marsim_ros2.py \
   --output results/example-dynamic-acmpc --timeout 120
 ```
 
-Actor 和 QP 默认在 CPU 上运行；现有增量地图前端仍使用 CUDA。控制 timer 请求 100 Hz，但实际频率取决于点云处理、规划、QP 和调度。热态单次 QP 耗时不能替代完整控制频率测量。当前记录没有拆分各前端阶段耗时，不能将控制回调中的全部额外耗时归因于 GPU。
+Actor 和 QP 默认在 CPU 上运行；现有增量地图前端仍使用 CUDA。规划、观测构造和 QP 在一个独立进程中运行。ROS 主进程读取最新状态，以 100 Hz 执行已有 jerk 序列并生成 CTBR。一次只提交一个规划请求，完成后再提交最新状态和点云。这样不会积压历史请求，也不会让持有 Python GIL 的几何前端阻塞控制回调。
+
+控制频率与求解频率分别测量。`solve` 事件记录一次真实求解，`control` 事件记录一次实际发布。复用同一条序列时，不重复累计 QP 失败或求解耗时。前端、观测、QP、总规划、控制回调耗时分别保存；同时记录状态年龄、解的源状态年龄和执行序列年龄。
+
+新解从接受时刻开始执行，不能把求解期间的时间当作该序列已经执行的时间。正常动态控制在接受解时，以最新实测 PVA 建立执行参考；各 0.1 s 结点使用原 `mpc.a/b`，区间内按相同 jerk 动力学和真实经过时间求参考状态。控制回调将参考加速度、当前段 jerk 和最新姿态交给原 `flatness_torch`。源状态超过完整 1.5 s 预测时域时仍进入原恢复逻辑。
+
+接受前还会复查同一条 jerk 序列。复查使用未截断的实际执行 PVA、原 `MPC.problem` 约束、原 `M/C` 以及原求解器的原始可行性容差。它涵盖 jerk、加速度、速度和安全飞行走廊约束。不可行的延迟计划进入已有制动和重规划流程，不改变预测模型、成本或边界。ideal 先将上一条已发布 PVA 推进到当前控制时间戳，再用同一 PVA 复查和发布，避免检查与执行状态不一致。
+
+`reanchor_rejected` 表示延迟计划在实际执行状态下不可行，累计数为 `reanchor_rejections`；它与 QP 求解失败分开统计。每个 `solve` 事件保存完整小型 jerk 序列、源状态、未截断源观测、接受状态、紧凑走廊与索引、容差、约束类别和残差。`control` 事件不重复这些数组。完整复查耗时另存为 `acceptance_ms`。
+
+这是多速率执行适配，不等同于每 10 ms 重解 MPCActor。不能在每个 10 ms 回调中反复计算“最新实测加速度 + 0.1 × 缓存 jerk”；该做法会重复施加前视量。恒定竖直 jerk 为 1 m/s³ 时，旧做法在理想推力响应下于 0.1 s 内累计到 1.0 m/s²，正确推进为 0.1 m/s²。控制日志保存参考加速度、实测加速度和 jerk，支持复算。
 
 ## 7. 输出、判定与频率
 
@@ -285,15 +295,16 @@ Actor 和 QP 默认在 CPU 上运行；现有增量地图前端仍使用 CUDA。
 
 | 文件 | 内容 |
 |---|---|
-| `run.json` | Launch／监控命令、ROS domain、Git HEAD、`source_sha256`、`middleware_environment` 和可选 `executor_parameters_sha256` |
+| `run.json` | Launch／监控命令、ROS domain、Git HEAD、源码及执行文件 SHA256、中间件环境和可选执行器参数 SHA256 |
 | `launch.log`、`monitor.log` | 本次进程日志 |
-| `metrics.json` | success/collision/timeout、任务进度、速度、净空、频率、QP 失败和耗时 |
+| `metrics.json` | success/collision/timeout、任务进度、速度、净空、频率、QP 失败、延迟计划拒绝和各阶段耗时 |
 | `trajectory.npz` | 实际轨迹、速度、四元数、加速度、CTBR、PositionCommand、LiDAR 及渲染位姿 |
 | `policy_stats.jsonl` | 监控收到的完整策略统计 |
-| `policy/policy.jsonl` | 策略节点直接写出的每次控制统计 |
+| `policy/policy.jsonl` | 策略节点直接写出的控制及求解事件 |
 | `policy/metadata.json` | 检查点路径及 `checkpoint_sha256`、实际模型配置、观测顺序、推力限制和求解器 |
+| `super_time_consuming.csv` | 本轮 SUPER 实际产生的规划阶段耗时；运行结束后归档 |
 
-`source_sha256` 保存本次运行纳入记录的 Python、C++、shell、XML 等源码文件哈希，包含 Fast DDS profile。`middleware_environment` 保存 RMW、发现范围、`FASTDDS_BUILTIN_TRANSPORTS` 和 profile 路径，便于复现传输环境。原始参考版本另见 `build/marsim_ros2/sources.json`。
+`source_sha256` 保存本次运行纳入记录的 Python、C++、shell、XML 等源码文件哈希，包含 Fast DDS profile。`executable_sha256` 保存已安装的 Flightmare、MARSIM LiDAR、PerfectDrone 和 SUPER 可执行文件哈希，可区分源码已修改但尚未重编译的情况。`middleware_environment` 保存 RMW、发现范围、`FASTDDS_BUILTIN_TRANSPORTS` 和 profile 路径。原始参考版本另见 `build/marsim_ros2/sources.json`。
 
 `trajectory.npz` 的 `position_commands` 数组保存收到的 `/planning/pos_cmd` 原始指令，形状为 `(N, 16)`。列顺序为消息时间、接收 elapsed、世界系位置 3 维、速度 3 维、加速度 3 维、jerk 3 维、yaw 和 yaw_dot。单位为 SI；完整列名写入 `metrics.json` 的 `array_columns.position_commands`，消息数为 `position_command_messages`。这些记录用于离线分析跟踪误差，不改变任务判据。
 
@@ -373,7 +384,15 @@ LiDAR 检查同时要求：渲染位姿匹配同时间戳里程计；点云与�
 
 SUPER 副本切换到上游自带的 ROS 2 CMake 和 package.xml。额外补齐消息依赖、GLFW include 导出、`pcl_conversions`、`std::isnan` 及 `<cstdint>`，并移除覆盖依赖搜索路径的 IDE 提示。
 
-任务节点保留首个待发布目标，直到发现订阅者才发送。原配置的 `publish_dt=99999` 使首次目标丢失后很难再次触发。构建副本还将任务目标发布端和 SUPER 的 `/planning/click_goal` 订阅端改为可靠、持久、深度 1 的 QoS；Python 策略端同步匹配。该补丁只作用于任务目标事件，普通 `/goal_pose` 点击入口和传感器 QoS 保持原约定。航点、阈值和任务顺序不变。**PerfectDrone 的 C++ 执行源码没有修改。**
+任务节点保留首个待发布目标，直到发现订阅者才发送。原配置的 `publish_dt=99999` 使首次目标丢失后很难再次触发。构建副本还将任务目标发布端和 SUPER 的 `/planning/click_goal` 订阅端改为可靠、持久、深度 1 的 QoS；Python 策略端同步匹配。该补丁只作用于任务目标事件，普通 `/goal_pose` 点击入口和传感器 QoS 保持原约定。航点、阈值和任务顺序不变。**PerfectDrone 执行类及其定时回调保持原源码。**
+
+私有 ROS 2 main 另修复一个已复现的 SIGINT 关闭竞态：全局地图的 1 ms 定时器可能在 context 关闭后调用 `count_subscribers`，抛出 `std::runtime_error`。main 仅在该节点 context 已关闭且错误文本匹配这条订阅者计数异常时正常收尾。运行中异常和其他关闭异常仍抛出。该补丁不改变飞行期间的执行行为，也不修改原参考仓库。
+
+后续实飞定位了 SUPER ROS 2 的起步时间问题。原代码把静止起步轨迹的时间原点设在求解开始时，首次发布会跳过求解期间的轨迹段。它还将滚动重规划的 100 ms 衔接期限用于静止起步，导致大量有效解被丢弃。私有副本改为在提交静止轨迹时设置时间原点，并同步平移 Exp、Backup 的绝对起点。多项式、相对衔接时刻和原滚动重规划期限保持不变。
+
+该修正要求起步前和提交时的实际速度均不超过 0.05 m/s，里程计年龄不超过 0.1 s，求解期间位移不超过地图分辨率的 1/10。ROGMap ROS 2 原回调未填充速度，现从原世界系里程计补齐，并用短互斥锁读取一致的状态快照。静止条件不满足时仍保持原任务状态并重试。
+
+同时删除一次输出未被使用的 Backup 重复优化。SUPER 多线程执行器新增 `executor_threads` 参数，默认 4；原来的自动线程数在本机创建了 40 个工作线程。构建脚本创建上游二进制轨迹日志需要的空目录，避免 `git archive` 未包含空目录而使退出保存报错。这些是私有副本中的运行修正，不能称为完全未修改的原 SUPER 规划过程。
 
 Flightmare 副本的补丁记录在 `build/marsim_ros2/flightmare/isaaclab_marsim.patch`：
 
@@ -385,11 +404,15 @@ Flightmare 副本的补丁记录在 `build/marsim_ros2/flightmare/isaaclab_marsi
 6. 提供电机初始推力设置接口，以悬停转速初始化。
 7. 修正饱和时的旋翼力分配；可行的原始分配逐元素保持。
 
-原实现先用逆分配矩阵计算旋翼力，再独立截断各旋翼。较大的 yaw 请求会消耗推力裕量，部分组合会将 roll/pitch 力矩抵消为 0。私有副本仅在原分配超限时采用新处理：先保留总推力，再以同一比例缩放 roll/pitch 分量，最后将剩余裕量分配给 yaw。该处理改变了饱和行为，不能表述为完全保留上游分配算法；原矩阵、电机响应和 RK4 仍保留。
+原实现先用逆分配矩阵计算旋翼力，再独立截断各旋翼。较大的 yaw 请求会消耗推力裕量，部分组合会将 roll/pitch 力矩抵消为 0。私有副本仅在原分配超限时采用新处理：优先保留可实现的 roll/pitch 力矩，再选择最接近请求值的可行总推力，最后分配 yaw。roll/pitch 同比例缩放，保留力矩方向。饱和时实际总推力可能偏离请求值；原分配矩阵、电机响应和 RK4 仍保留。
 
 桥接位置跟踪器同时修正反馈比力的导数：`F_dot = jerk_d + kp * (v_d - v) + kd * (a_d - a_actual)`。姿态角速度前馈使用完整导数，其中 `a_actual` 为积分得到的世界系实际加速度。
 
-数值检查 `ros2/isaaclab_marsim/tests/check_flightmare_allocation.cpp` 链接与执行器相同的 Flightmare 动力学库。`results/marsim-ros2-20261104/native-allocation.json` 记录 3773 组边界检查通过；其中 173 组原始可行分配的最大逐元素误差为 0 N，总推力最大误差为 1.90735e-6 N。这些结果验证分配实现，不替代 ROS 飞行、LiDAR 或完整任务验收。
+最终跟踪器复用 SUPER 的 `FlatnessMap`。姿态反馈参考 [PX4 reduced-attitude 构造](https://px4.github.io/Firmware-Doxygen/db/de4/_attitude_control_8cpp_source.html)，优先对齐机体推力轴，再处理 yaw。yaw 权重为 0.4，未补偿 yaw 增益，因此也降低 yaw 带宽。控制器将负竖直合力及其导数投影到 0；完整角速度前馈的范数上限为原生角速度限值的一半，即 5 rad/s。姿态反馈优先，前馈在剩余绝对速率预算内统一缩放。输出满足各轴 ±10 rad/s、总比推力 [0,29.43] m/s²。
+
+上述限制是新增的执行控制规则，不是对 PX4 整个控制器的移植，也不保证实际倾角始终小于 90°。生产节点和 `tests/replay_position_commands.cpp` 共用 `position_command_tracking.hpp`。PVAJ 外推、水平与竖直解耦、signed 前馈预算等未通过反例检查，均未加入生产路径。
+
+数值检查 `ros2/isaaclab_marsim/tests/check_flightmare_allocation.cpp` 链接与执行器相同的 Flightmare 动力学库。最新 `results/marsim-ros2-followup-20261104/native-allocation-rp-priority.json` 覆盖 3773 组边界输入。其中 173 组原始可行分配的逐元素误差为 0 N；2912 组需要调整总推力，最大调整为 11.0363 N。可实现 roll/pitch 目标的最大力矩误差为 1.55e-7 N·m。数值检查不替代实际飞行。
 
 完成正常构建后，可单独启用并运行这项 CTest：
 
@@ -401,9 +424,13 @@ cmake --build build/isaaclab_marsim --target check_flightmare_allocation -j2
 ctest --test-dir build/isaaclab_marsim -R '^flightmare_allocation$' --output-on-failure
 ```
 
+同一 `BUILD_TESTING=ON` 配置还提供 `replay_position_commands` 目标。输入是无标题 CSV：时间、P/V/A/jerk 各 3 维、yaw、yaw_dot，共 15 列。时间以首个 CTBR tick 为 0。运行方式为 `replay_position_commands input.csv output.csv [kp kd attitude_gain]`，默认增益与节点一致，为 4/3/6。它复用生产控制函数及原生动力学，但不会重新规划或渲染 LiDAR，因此只用于分析已捕获指令，不能代替 ROS 任务验收。
+
 桥接节点直接编译所需 Flightmare 动力学源码，不引入 Unity 运行链路。MARSIM 渲染节点的头文件配置以 `perfect_drone_sim` 为 PCD 根目录；原渲染库保留自己的 shader 和扫描模式根目录。这是桥接构建路径修复，未重写 LiDAR 算法。
 
-## 10. 实测结果与未通过项
+## 10. 第一阶段结果（历史记录）
+
+本节保留首次实现的成功和失败证据。后续修复及当前验收结论见第 11 节；本节的控制频率、分配优先级和失败结论只对应当时版本。
 
 以下结果来自本次独立功能工作树的实际源码运行。运行时包含未提交改动，不能表述为测试了干净的 `7d6da6b` 提交。`run.json` 的 `git_revision` 只记录当时 HEAD；实际文件版本还应核对 `source_sha256`、参数文件哈希和构建副本来源。
 
@@ -463,3 +490,103 @@ ideal AC-MPC 运行 120.0416 s 后超时，未到达第一个航点。它发布�
 `preservation-check.json` 记录原 main 工作树仍保留已有未提交改动。SUPER、Flightmare 和 IPC 参考仓库的 tracked／staged diff 均为空，检查点 SHA256 与运行记录一致。这不表示原工作树或参考目录没有既有未跟踪文件。
 
 运行结束后的检查显示，3 个原有 `isaaclab-navrl` 训练进程仍在 GPU 进程列表，本次评测进程列表为空。较早记录的 PID 820562 未出现在该快照中；本次没有停止它，其退出原因未核实。因此只能报告检查时仍运行的进程，不能声称所有历史训练 PID 始终存活。
+
+## 11. 后续修复与当前实飞结果
+
+本节结果位于 `results/marsim-ros2-followup-20261104/`。仍使用原 PCD、原 2 个航点、严格小于 1 m 的航点判据、0.2 m 碰撞半径和 120 s 截止时间。没有通过降低速度、放宽净空或延长超时取得通过结果。
+
+该目录的 `summary.json` 汇总最新 7 项完整任务、动作检查、约束复算、源码及二进制哈希、回归检查和保留检查。它同时索引两阶段共 50 份实际运行指标，并明确记录 `all_acceptance_criteria_passed=false`。运行时的未提交源码由各 `run.json` 哈希标识，交付提交另行记录，不能用后来生成的提交号替换原运行的 HEAD。
+
+### SUPER 官方任务
+
+| 结果目录 | 执行模式 | 结果／航点 | 墙钟 s | 轨迹 m | 最小净空 m |
+|---|---|---|---:|---:|---:|
+| `official-ideal-dense-rest-clock` | ideal | success，2/2 | 84.959 | 218.716 | 0.175609 |
+| `official-ideal-dense-rest-clock-repeat` | ideal | success，2/2 | 88.586 | 219.585 | 0.142427 |
+| `official-ideal-high-speed-rest-clock` | ideal | timeout，1/2 | 120.017 | 174.807 | 0.347029 |
+| `official-ideal-high-speed-rest-clock-repeat` | ideal | success，2/2 | 24.844 | 204.736 | 0.395609 |
+| `official-ideal-high-speed-shutdown-fixed` | ideal | success，2/2 | 20.138 | 203.383 | 0.424550 |
+| `dynamic-super-high-speed-bounded-default` | dynamic | success，2/2 | 16.800 | 202.466 | 1.049630 |
+| `dynamic-super-dense-bounded-default` | dynamic | collision，0/2 | 5.849 | 4.814 | -0.029024 |
+| `dynamic-super-dense-bounded` | dynamic，增益 16/8/12 | collision，0/2 | 6.816 | 7.350 | -0.004892 |
+
+最终默认增益保持 4/3/6。16/8/12 只作为已记录的诊断对照，没有设为默认。最新官方 high_speed、dense 成功运行均正常退出，二进制规划日志保存成功。规划器仍会报告优化失败和重规划超时警告，这些警告会影响任务完成率。
+
+`official-ideal-high-speed-shutdown-fixed` 使用已重编译的 PerfectDrone main。4 个官方入口节点全部正常退出，日志没有 ERROR；这验证了关闭补丁后的完整任务路径。此前 ideal v5 的关闭异常及失败日志仍保留，详见 `perfect-drone-shutdown-fix.json`。
+
+ideal dense 的两次成功支持起步时间修正有效，但不是成功率统计。高速首次复测在途中静止约 98 s，反复报告 Exp 优化失败，最终超时；相同配置重复运行成功。该失败记录保留，不能据一次成功宣称所有重复运行都无回归或必然成功。
+
+### 最终动态动作和 LiDAR
+
+`dynamic-motion-bounded-default/metrics.json` 中全部检查为 true。该检查使用最终默认位置跟踪器，完成悬停、加速、转向、制动及终点保持。实测 CTBR 为 99.9996 Hz。
+
+- 101 帧点云均匹配对应渲染位姿。
+- 101 个渲染位姿均匹配实际里程计时间戳。
+- 位置差为 0 m，最大姿态差为 2.73e-8 rad。
+- 点云有 99 个不同载荷摘要。
+- 实际位置与全部已发位置目标之间存在最大 0.00715 m 的最小距离，排除了位置直接赋值。
+
+原 PerfectDrone 执行类仍未修改。第 9 节的 main 关闭修复只处理已关闭的 context。此前 `ideal-contract.json` 的位置、速度直通及姿态验证继续适用。
+
+### Python 策略实飞
+
+以下 v3、v4 运行保留了执行前可行性复查加入前的诊断证据。
+
+| 结果目录 | 结果 | 轨迹 m | 命令频率 Hz | 真实求解更新 Hz | QP 失败 |
+|---|---|---:|---:|---:|---:|
+| `dynamic-acmpc-async-v3` | collision | 59.504 | 99.9742 | 15.6767 | 0 |
+| `dynamic-ipc-async-v3` | collision | 86.498 | 99.9760 | 15.3670 | 2 |
+| `ideal-acmpc-async-v3` | timeout | 109.771 | 99.3541，PositionCommand | 5.6206 | 127 |
+| `ideal-acmpc-async-v4` | collision | 48.056 | 99.7002，PositionCommand | 14.0820 | 0 |
+
+两种动态策略使用同一检查点配置。AC-MPC 控制回调均值／P95／最大值为 1.158／1.623／7.547 ms，3926 个回调均未超过 10 ms。固定 IPC 为 1.191／1.665／19.187 ms，5438 个回调中 1 个超过 10 ms。持续频率约为 100 Hz，不表示每次调度都满足硬实时期限。
+
+动态 AC-MPC 实际运行到 44.348 s 后撞地。最后位置高度为 0.19316 m，对 0.2 m 半径的机体构成碰撞。末 1 s 有 81/100 次命中检查点保留的 12.6129 m/s² 推力上限。一个末段参考需要 21.2294 m/s²，虽然仍满足 MPC 的分量加速度边界，却超过推力能力。末段参考更新也降至约 5.65 Hz，解年龄均值达到 342 ms。证据同时涉及物理可执行性和计算延迟，不能把失败完全归因于检查点。
+
+3449 个正常动态控制样本的推力及横向角速度重算误差不超过 1.78e-15；同计划区间内的参考积分误差不超过 3.24e-15。此前重复施加 0.1 s 前视量的缺陷未重现。独立里程计与加速度订阅在 3926 个回调中有 4 个出现约 10 ms 的一帧错位，加速度差最大为 0.01914 m/s²；它们发生在正常飞行段，不能解释末段失稳。
+
+ideal v3 还暴露出独立的观测拼接缺陷：它会将某条已执行命令的位置、速度与较新命令的加速度拼接。最新代码已按精确 P/V 匹配同一命令的加速度。该修正不改变动态路径，也不能消除长时间求解期间复用旧 jerk 的稳定性限制。
+
+修正后的 ideal v4 已完成真实复测，在 34.410 s 后报告碰撞。共发出 2956 条 PositionCommand；控制回调均值／P95／最大值为 0.673／1.136／5.891 ms，没有 QP 失败或节点异常。该结果验证最新适配代码实际运行并记录失败，不表示检查点完成了原往返任务。
+
+v4 还暴露出延迟计划的状态偏移：最后一条计划的求解源加速度为 `[9.023,-15.176,-4.275]` m/s²，接受时的执行加速度已变为 `[21.420,-18.830,-11.401]` m/s²。因此不能直接把同一解平移到新 PVA 并声称仍满足原约束。第 6 节的接受前复查修复了这一契约缺口；它不等于重新求解 QP。
+
+最新 v5 使用该复查，实际完成以下 3 次完整时限运行。它们都在原 120 s 截止时间内未完成第一个航点。
+
+| 结果目录 | 结果 | 轨迹 m | 命令频率 Hz | 真实求解更新 Hz | QP 失败 | 延迟计划拒绝 |
+|---|---|---:|---:|---:|---:|---:|
+| `ideal-acmpc-async-v5` | timeout，0/2 | 52.937 | 98.7135，PositionCommand | 9.9530 | 0 | 115 |
+| `dynamic-acmpc-async-v5` | timeout，0/2 | 11.850 | 99.5210，CTBR | 5.3049 | 117 | 28 |
+| `dynamic-ipc-async-v5` | timeout，0/2 | 12.126 | 99.8940，CTBR | 32.2400 | 2976 | 31 |
+
+三次运行的最小净空分别为 0.668347、1.278089 和 1.277897 m。动态两次没有节点异常；ideal 在超时停止后出现 PerfectDrone 关闭错误，详见对应 `launch.log`。第 9 节记录了随后完成的关闭修复，其后官方 high_speed 完整运行和关闭均通过。不能把保持无碰撞或 QP 成功当作完成任务。
+
+动态 AC-MPC 与固定 IPC 的命令间隔 P95 分别为 11.211 和 11.788 ms，最大间隔分别为 375.130 和 24.376 ms。平均输出接近 100 Hz，但不满足每次调度均在 10 ms 内完成的硬实时保证。`control_ms` 在最终控制统计序列化和发布前采样，因此也不是完整回调上界。实际命令时间戳的间隔才覆盖该调度结果。
+
+动态 AC-MPC 的 QP 耗时均值／P95 为 137.356／653.100 ms；固定 IPC 为 5.768／8.898 ms。后者的更新频率较高包含大量失败求解，不表示有效轨迹更新更快。v5 日志保留每次求解、拒绝、恢复和执行事件，支持后续核对停滞原因。
+
+三组运行共执行 329 次接受前检查。独立复算与全部日志判定一致；174 次拒绝均存在真实走廊约束违反，没有误拒绝证据。动态 AC-MPC 最终停在高度 4.79416 m，固定 IPC 停在 4.91673 m，均超过当前走廊顶面 4.75 m。末段速度和加速度已接近 0，未触发源状态截断。
+
+原模型步长为 0.1 s，竖直 jerk 下界为 -50 m/s³，因此静止状态在第 1 个预测结点最多下降约 0.008333 m。两组末状态仍分别违反顶面约 0.03582 和 0.15840 m。独立线性可行性求解也确认原约束不可行。现有制动规则基于速度减速，不会主动将位置移回走廊；未发现“已静止且 QP 成功，却无法退出制动”的状态机样本。这解释了持续失败，但不等于完成导航验收。证据位于各运行的 `analysis-v5.json`。
+
+抬升主要发生在制动区间，两组分别在这些区间上升约 3.015 和 3.100 m。全部竖直 jerk 符合原普通制动公式，没有检测到 safe-climb 指令。这是阶段关联，当前证据没有隔离抬升的单一原因。
+
+### dense 尚未解决的执行问题
+
+两次最终 dense 碰撞都发生在高于地面的 PCD 障碍处。默认增益运行的参考位置曲线最小净空为 0.23677 m，最终实际跟踪误差为 0.79523 m。16/8/12 对照的末端参考净空仅为 0.03580 m，实际误差为 0.07251 m，发生擦碰。
+
+当前分配矩阵和每旋翼 5.518125 N 上限给出的全局力矩范数上界为 1.560761 N·m。惯量为 0.012 I，因此世界系角速度平均变化率的宽松上界为 130.063 rad/s²。两个实际捕获的参考分别要求 337.646 和 1428.300 rad/s²，已有正常相邻命令区间超过该上界。计算还忽略了电机延迟和同时满足指定总推力的要求，因此不能靠当前控制器精确执行这两条完整姿态参考。
+
+这只证明具体参考区间不可精确执行，不证明整个 dense 任务无法完成。剩余问题是规划参考、旋翼能力和停车点跟踪余量尚未匹配。当前没有通过修改官方速度、地图、任务判据、Newton 训练代码或 MPC 模型来掩盖失败。
+
+对应证据包括两次 dense 目录中的 `reference-feasibility-analysis.json`、`tracking-analysis.json`、`holding-causality-analysis.json`，以及 `bounded-replays/` 和 `signed-budget/`。负结果和中间失败均保留。
+
+### 构建和保留检查
+
+后续已重编译 ROGMap、SUPER 规划器和 MARSIM 桥接包。新建的干净 SUPER 副本与实际构建副本比较，553 个源码文件完全一致，证据为 `super-fresh-prepare.json`。这验证了修复可从固定参考版本重建，不依赖手工修改后的旧构建目录。
+
+此后仅新增 PerfectDrone main 的关闭补丁。该 main 已另行验证从固定参考源码生成的一致性和重复 prepare 的幂等性，并完成增量编译和上述官方完整任务复测。原 PerfectDrone 执行类的哈希仍与参考一致。
+
+最新 Python 回归检查为 41 项通过，没有跳过项。它涵盖 ROS 策略、评测统计、执行语义、MPC 和 SUPER 任务配置；Newton 任务工厂使用原有地图资产完成配置检查。Ruff 与 `git diff --check` 通过。原生分配 CTest 为 1/1 通过，覆盖 3773 组输入。上述检查补充软件和数值证据，不替代本节记录的真实任务运行。
+
+最终 `preservation-final.json` 记录：原目录仍在 main，HEAD 为 `7d6da6b`；已有工作树改动列表与前一阶段一致。3 个参考仓库的 tracked/staged diff 均为空。RL、Planner、执行模型和 MPC 源码相对任务基线没有差异。检查时原 `isaaclab-navrl` 训练进程 PID 1647733 仍在 GPU 上运行，本次评测进程列表为空。
