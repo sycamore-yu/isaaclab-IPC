@@ -1,5 +1,7 @@
 # TurboMPC 原生移植进度
 
+**2026-11-04 配置变更：** 用户选择恢复 cuDSS 默认 IR=0，接受已记录的 KKT/梯度误差；原生 KKT 不再强制 IR2。下文 M4 final-v8 等仍为历史 IR2 构建数据，不是 IR0 的复测。当前回归与合并记录见 [交付说明](turbompc-port-delivery.md)。
+
 更新：2026-11-03（UTC）。计划：`docs/turbompc-torch-port-plan.md`；集中交付说明：[turbompc-port-delivery.md](turbompc-port-delivery.md)。
 
 **原生Torch求解器已实现，提交 `403fc2d` 的 M4 `final-v8` 已正式通过；后续参考前端 `1a71d69` 的导航v4和PPO v5也已独立验收通过。** M4四批400对完整前向加反向、双步长有限差分、全部固定数值及性能门槛、328个源文件和10个构建产物来源守卫全部通过。A 明确为 `7050a4f + 三行 IR2`，原版 A0 仍失败。编译SFC四例/112次独立OSQP有限差分、CTBR模型v6的116个开环/有限差分样本和四例各60步、Newton600步、真实状态29次公共求解保留其实际403核心身份。最新导航在原seed0协议下完成1076步并达到原目标判据；PPO的一次更新/重载通过49项检查。历史导航v1/v2/v3失败不改写。

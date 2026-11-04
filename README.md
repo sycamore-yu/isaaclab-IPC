@@ -6,8 +6,8 @@ Newton/MJWarp IPC 和 CUDA 可微 MPC 的 PPO 训练已能运行。
 新执行配置与复测见 [执行配置](docs/execution-profiles.md)。
 共享森林 BVH、紧凑 Mid-360 与规划缓存已默认启用；实测与边界见 [规模优化](docs/scale-optimization.md)。
 
-独立 TurboMPC 原生 Torch 分支已实现 CUDA ADMM/cuDSS、Torch SQP 与隐式反传，支持切换 CUDA 12.8/13.0。
-**提交 `403fc2d` 的 M4 final-v8 已通过**：固定 `float64`、N=15，Batch 1/16/64/256 各100对完整前向加反向、各端10次预热；全部数值、梯度、约束、性能及来源门槛通过。M4 使用默认 `polisher=None`，正式汇总为
+TurboMPC 原生 Torch 已实现 CUDA ADMM/cuDSS、Torch SQP 与隐式反传，支持 CUDA 12.8/13.0。**当前 KKT 使用 cuDSS 默认 IR=0**，不再设置 `IR_N_STEPS=2`。默认配置接受上游 KKT 的数值偏差；附加测试观察到最高约 0.426% 的方向梯度误差，不能将历史 IR2 精度结论视为当前配置的结果。
+**历史提交 `403fc2d` 的 IR2 M4 final-v8 已通过**：固定 `float64`、N=15，Batch 1/16/64/256 各100对完整前向加反向、各端10次预热；全部数值、梯度、约束、性能及来源门槛通过。M4 使用默认 `polisher=None`，正式汇总为
 [`m4-ir2-accepted-final-v8.json`](results/turbompc-port/m4-ir2-accepted-final-v8.json)。
 A 明确采用上游 `7050a4f` 加三行 cuDSS IR2 配置，B 同样使用 IR2；**未经修改的原版 A0 仍未通过**，失败证据及原版库均保留。
 

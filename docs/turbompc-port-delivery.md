@@ -1,5 +1,9 @@
 # TurboMPC 原生 Torch 移植交付
 
+2026-11-04 合并决策：原生 CUDA 稀疏 KKT 已取消 `IR_N_STEPS=2` 设置，恢复 cuDSS 默认 IR=0。上游 JAX A0 的成本梯度相对误差约 0.166%；原生默认 IR0 的独立有限差分测试最大相对误差约 0.426%。当前回归按用户接受的精度偏差，限定梯度误差为 0.5%、KKT 残差和绝对解差各为 `4e-4`，原物理和安全约束保持不变。以下 M4、SFC、CTBR、Newton、导航和 PPO 结果仍是**历史 IR2 构建**的证据，不冒称已在 IR0 下完整重跑。两种配置的二进制与记录应分开保留。
+
+默认 IR0 使用隔离的 `build/turbompc/native-default/cu128` 和 `cu130` 编译产物，两套构建的来源校验均通过。cu128 原生求解、隐式梯度、流生命周期及 SFC 单测 **42/42** 通过；cu130 CTBR、精修/伴随、参考前端与状态接口单测 **122/122** 通过。cu130 原协议四例基础求解和 VJP 检查通过（`results/turbompc-port/ctbr-ir-default-base-20261104.json`），但 `--base-only` 不能作为完整 CTBR 模型闭环验收。原 400 对 M4 计时和 1076 步 Newton 导航均未在默认 IR0 下重跑。原 IR2 二进制及其报告均保留。
+
 日期：2026-11-03 UTC。工作树：`/home/tong/tongworkspace/free/.worktrees/isaaclab-IPC/turbompc-torch-native-verified`；独立分支：`feat/turbompc-torch-native-verified`。
 
 两个已测参考前端提交已顺序集成为 `a37cf21` 和 `282a3fa92c8b738e520ec331a081b61a84d5ce92`。集成后的144项冻结源码、155项追踪运行/测试文件（含二进制fixture）、CUDA12基准产物、CUDA13实际加载库与manifest均核对一致；与被测候选的Git差异只有文档。源码映射检查12项全真，未重新执行GPU测试。[集成一致性报告](../results/turbompc-port/native-port-integrated-source-v1.json)

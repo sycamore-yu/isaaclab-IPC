@@ -88,11 +88,8 @@ struct SparseKktWorkspace {
         cudss_allocator = allocator;
         CUDSS_CHECK(turbompc::SetCudssDeviceMemory(handle, cudss_allocator));
         CUDSS_CHECK(cudssConfigCreate(&config));
-        // Native-port correction: unrefined indefinite KKT solves can retain
-        // pivot-perturbation error despite a well-conditioned original system.
-        int refinement_steps = 2;
-        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_IR_N_STEPS,
-                                   &refinement_steps, sizeof(refinement_steps)));
+        // Keep cuDSS's default iterative-refinement configuration, matching
+        // the unmodified upstream KKT solver (IR_N_STEPS defaults to zero).
         CUDSS_CHECK(cudssDataCreate(handle, &data));
         cudssReorderingAlg_t reorder_alg = CUDSS_REORDERING_ALG_DEFAULT;
         CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG,
