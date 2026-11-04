@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Use with ROS_AUTOMATIC_DISCOVERY_RANGE=SYSTEM_DEFAULT.
+     Explicit loopback discovery preserves single-host evaluation. -->
+<dds xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+  <profiles>
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>marsim_shm</transport_id>
+        <type>SHM</type>
+        <segment_size>33554432</segment_size>
+        <maxMessageSize>8388608</maxMessageSize>
+      </transport_descriptor>
+      <transport_descriptor>
+        <transport_id>marsim_loopback</transport_id>
+        <type>UDPv4</type>
+        <maxInitialPeersRange>32</maxInitialPeersRange>
+        <interfaceWhiteList>
+          <address>127.0.0.1</address>
+        </interfaceWhiteList>
+      </transport_descriptor>
+    </transport_descriptors>
+    <participant profile_name="marsim_local" is_default_profile="true">
+      <rtps>
+        <useBuiltinTransports>false</useBuiltinTransports>
+        <userTransports>
+          <transport_id>marsim_shm</transport_id>
+          <transport_id>marsim_loopback</transport_id>
+        </userTransports>
+        <builtin>
+          <discovery_config>
+            <discoveryProtocol>SIMPLE</discoveryProtocol>
+          </discovery_config>
+          <!-- A nonempty unicast list prevents Fast DDS from adding multicast
+               locators. Fast DDS 2.14 rejects an explicit empty locator list. -->
+          <metatrafficUnicastLocatorList>
+            <locator>
+              <udpv4>
+                <address>127.0.0.1</address>
+              </udpv4>
+            </locator>
+          </metatrafficUnicastLocatorList>
+          <initialPeersList>
+            <locator>
+              <udpv4>
+                <address>127.0.0.1</address>
+              </udpv4>
+            </locator>
+          </initialPeersList>
+        </builtin>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

@@ -1,5 +1,9 @@
 # 理想配置、真实配置与长森林测试
 
+正式评测现采用 MARSIM 的 `ideal/dynamic` 双执行模式，见 [ADR-0007](adr/0007-marsim-formal-evaluation.md)
+和 [MARSIM ROS 2 评测](marsim-ros2.md)。Isaac Lab/Newton 继续用于训练。
+下文保留 IPC 历史复现配置与 Newton 回归证据；其 `real` 命名不改为 `dynamic`。
+
 当前执行决策见 [ADR-0003](adr/0003-execution-profiles.md)。
 本页维护执行配置含义、恢复逻辑及走廊切换前的场景结果和录制索引。
 当前默认走廊为 PathCover/RISP，结果见 [走廊说明](pathcover.md)。

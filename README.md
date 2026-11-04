@@ -1,5 +1,10 @@
 # Isaac Lab IPC
 
+正式评测使用 MARSIM。`ideal` 保留 SUPER PerfectDrone，`dynamic` 使用 Flightmare 动力学。
+同一 ROS 2 Launch 支持 SUPER、固定成本 IPC 和学习成本 AC-MPC。
+构建、启动、接口与闭环结果见 [MARSIM 双模式评测](docs/marsim-ros2.md)。
+Isaac Lab/Newton 继续负责 RL 训练；下文保留既有训练和回归结果。
+
 Newton/MJWarp IPC 和 CUDA 可微 MPC 的 PPO 训练已能运行。
 **成功率尚未达到原版水平**：中速突现障碍测试仍失败。
 历史结果见 [场景验证](docs/validation.md)。
