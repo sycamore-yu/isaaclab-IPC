@@ -172,22 +172,92 @@ def prepare_super(source: Path, target: Path):
                   "                if (goal_pub_->get_subscription_count() == 0) return;\n"
                   "                new_goal = false;")
     mission_text = mission.read_text().replace(pending_goal, ready_goal)
+    if 'nh_->get_parameter("simulated_time").as_bool()' not in mission_text:
+        mission_text = mission_text.replace(
+            'nh_->declare_parameter<std::string>("data_name", dft_data_name);',
+            'nh_->declare_parameter<std::string>("data_name", dft_data_name);\n'
+            '            nh_->declare_parameter<bool>("simulated_time", false);')
+        mission_text = mission_text.replace(
+            'goal_pub_timer_ = nh_->create_wall_timer(',
+            'goal_pub_timer_ = nh_->get_parameter("simulated_time").as_bool()\n'
+            '                ? nh_->create_timer(std::chrono::milliseconds(10),\n'
+            '                    std::bind(&WaypointPlanner::GoalPubTimerCallback, this), goal_pub_timer_cb_group_)\n'
+            '                : nh_->create_wall_timer(')
+    mission_text = mission_text.replace(
+        'goal_pub_timer_cbk_group_', 'goal_pub_timer_cb_group_')
     mission_text = mission_text.replace(
         "goal_pub_ = nh_->create_publisher<geometry_msgs::msg::PoseStamped>(cfg_.goal_pub_topic, qos);",
         "goal_pub_ = nh_->create_publisher<geometry_msgs::msg::PoseStamped>(\n"
         "                cfg_.goal_pub_topic, rclcpp::QoS(1).reliable().transient_local());")
     write_changed(mission, mission_text)
     fsm = target / "super_planner/include/ros_interface/ros2/fsm_ros2.hpp"
-    write_changed(fsm, fsm.read_text().replace(
+    fsm_text = fsm.read_text().replace(
         "cfg_.click_goal_topic,\n                        qos,",
         'cfg_.click_goal_topic,\n                        cfg_.click_goal_topic == "/planning/click_goal"\n'
-        "                            ? rclcpp::QoS(1).reliable().transient_local() : qos,"))
+        "                            ? rclcpp::QoS(1).reliable().transient_local() : qos,")
+    if '#include <std_msgs/msg/u_int64.hpp>' not in fsm_text:
+        fsm_text = fsm_text.replace(
+            '#include <rclcpp/rclcpp.hpp>',
+            '#include <rclcpp/rclcpp.hpp>\n#include <std_msgs/msg/u_int64.hpp>')
+    if '"/marsim/sim_policy_done"' not in fsm_text:
+        fsm_text = fsm_text.replace(
+            'rclcpp::TimerBase::SharedPtr execution_timer_, replan_timer_, cmd_timer_;',
+            'rclcpp::TimerBase::SharedPtr execution_timer_, replan_timer_, cmd_timer_;\n'
+            '        rclcpp::Subscription<std_msgs::msg::UInt64>::SharedPtr sim_tick_sub_;\n'
+            '        rclcpp::Publisher<std_msgs::msg::UInt64>::SharedPtr sim_done_pub_;\n'
+            '        double next_sim_replan_time_{0.0};')
+        fsm_text = fsm_text.replace(
+            '            if (cfg_.timer_en) {',
+            '''            if (nh_->get_parameter("simulated_time").as_bool()) {
+                sim_done_pub_ = nh_->create_publisher<std_msgs::msg::UInt64>(
+                    "/marsim/sim_policy_done", 10);
+                sim_tick_sub_ = nh_->create_subscription<std_msgs::msg::UInt64>(
+                    "/marsim/sim_tick", rclcpp::QoS(10).reliable(),
+                    [this](std_msgs::msg::UInt64::ConstSharedPtr tick) {
+                        const auto expected_ns = static_cast<int64_t>(tick->data) * 10000000LL;
+                        if (nh_->now().nanoseconds() != expected_ns) {
+                            RCLCPP_ERROR(nh_->get_logger(),
+                                "SUPER simulation clock mismatch at step %lu", tick->data);
+                            return;
+                        }
+                        // Run the whole planning/control update before acknowledging
+                        // a simulation step. No wall-clock time elapses for physics.
+                        callMainFsmOnce();
+                        const double t = nh_->now().seconds();
+                        if (machine_state_ == FOLLOW_TRAJ) {
+                            if (next_sim_replan_time_ == 0.0) {
+                                next_sim_replan_time_ = t + 1.0 / cfg_.replan_rate;
+                            } else if (t + 1e-9 >= next_sim_replan_time_) {
+                                next_sim_replan_time_ += 1.0 / cfg_.replan_rate;
+                                callReplanOnce();
+                            }
+                        } else {
+                            next_sim_replan_time_ = 0.0;
+                        }
+                        const bool command = machine_state_ == FOLLOW_TRAJ ||
+                                             machine_state_ == EMER_STOP;
+                        pubCmdTimerCallback();
+                        std_msgs::msg::UInt64 done;
+                        done.data = (tick->data << 1) | static_cast<uint64_t>(command);
+                        sim_done_pub_->publish(done);
+                    });
+            } else if (cfg_.timer_en) {''', 1)
+    write_changed(fsm, fsm_text)
     entry = target / "super_planner/Apps/fsm_node_ros2.cpp"
-    write_changed(entry, entry.read_text().replace(
+    entry_text = entry.read_text().replace(
         "rclcpp::executors::MultiThreadedExecutor executor;",
         'const int executor_threads = node->declare_parameter<int>("executor_threads", 4);\n'
         '    RCLCPP_INFO(node->get_logger(), "Executor threads: %d", executor_threads);\n'
-        "    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), executor_threads);"))
+        "    rclcpp::executors::MultiThreadedExecutor executor(rclcpp::ExecutorOptions(), executor_threads);")
+    if 'if (!node->declare_parameter<bool>("simulated_time", false))' not in entry_text:
+        entry_text = entry_text.replace(
+            '    // 检查是否使用仿真时间\n    while (rclcpp::ok()) {',
+            '    // Keep upstream wall-clock mode; preserve /clock in lockstep mode.\n'
+            '    if (!node->declare_parameter<bool>("simulated_time", false)) {\n'
+            '    while (rclcpp::ok()) {')
+        entry_text = entry_text.replace(
+            '    // 初始化FSM', '    }\n\n    // 初始化FSM')
+    write_changed(entry, entry_text)
     perfect_entry = target / "mars_uav_sim/perfect_drone_sim/src/ros2_perfect_drone_node.cpp"
     perfect_text = perfect_entry.read_text()
     if "catch (const std::runtime_error& error)" not in perfect_text:

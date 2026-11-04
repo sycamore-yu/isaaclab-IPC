@@ -123,7 +123,7 @@ class MissionRecorder:
             self.status = status
             self.reason = reason
 
-    def save(self, output, *, mode, benchmark, policy, pcd, topics, timeout):
+    def save(self, output, *, mode, benchmark, policy, pcd, topics, timeout, time_mode="wall"):
         output = Path(output)
         output.mkdir(parents=True, exist_ok=True)
         targets = [output / name for name in ("metrics.json", "trajectory.npz", "policy_stats.jsonl")]
@@ -142,6 +142,8 @@ class MissionRecorder:
         acceptance_durations = []
         control_stamps = []
         solve_stamps = []
+        control_wall_stamps = []
+        solve_wall_stamps = []
         state_ages = []
         solution_ages = []
         qp_failures = []
@@ -157,6 +159,8 @@ class MissionRecorder:
                     durations.append(float(value))
                 if "stamp" in data:
                     control_stamps.append(float(data["stamp"]))
+                if "wall_stamp_s" in data:
+                    control_wall_stamps.append(float(data["wall_stamp_s"]))
                 for name, values in (("state_age", state_ages), ("solution_age", solution_ages)):
                     if data.get(name) is not None:
                         values.append(1000 * float(data[name]))
@@ -165,6 +169,8 @@ class MissionRecorder:
                     solve_durations.append(float(data["solve_ms"]))
                     if "stamp" in data:
                         solve_stamps.append(float(data["stamp"]))
+                    if "wall_stamp_s" in data:
+                        solve_wall_stamps.append(float(data["wall_stamp_s"]))
                 for name, values in (("frontend_ms", frontend_durations), ("observation_ms", observation_durations),
                                      ("planning_ms", planning_durations), ("acceptance_ms", acceptance_durations)):
                     if name in data:
@@ -185,10 +191,13 @@ class MissionRecorder:
             "status": self.status,
             "reason": self.reason,
             "mode": mode,
+            "time_mode": time_mode,
             "benchmark": benchmark,
             "policy": policy,
             "timeout_s": timeout,
             "elapsed_wall_s": self.elapsed(),
+            "real_time_factor": (
+                (stamps[-1] - stamps[0]) / self.elapsed() if len(rows) > 1 and self.elapsed() > 0 else 0.0),
             "trajectory_duration_s": float(stamps[-1] - stamps[0]) if len(rows) else 0.0,
             "trajectory_length_m": trajectory_length,
             "odometry_samples": len(rows),
@@ -231,6 +240,8 @@ class MissionRecorder:
             "plan_acceptance_time_ms": duration_summary(acceptance_durations),
             "policy_control_timing": timing_summary(control_stamps),
             "policy_solve_timing": timing_summary(solve_stamps),
+            "policy_control_wall_timing": timing_summary(control_wall_stamps),
+            "policy_solve_wall_timing": timing_summary(solve_wall_stamps),
             "policy_state_age_ms": duration_summary(state_ages),
             "policy_solution_age_ms": duration_summary(solution_ages),
             "ctbr_timing": timing_summary(commands[:, 0]),
@@ -299,6 +310,7 @@ class MissionRecorder:
 def parser():
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--mode", choices=("ideal", "dynamic"), required=True)
+    result.add_argument("--time-mode", choices=("wall", "sim"), default="wall")
     result.add_argument("--benchmark", choices=("high_speed", "dense"), required=True)
     result.add_argument("--policy", choices=("super", "ipc", "acmpc"), required=True)
     result.add_argument("--output", type=Path, required=True)
@@ -418,8 +430,12 @@ def main(argv=None):
     try:
         while rclpy.ok() and recorder.status is None:
             rclpy.spin_once(node, timeout_sec=0.05)
-            if recorder.elapsed() >= args.timeout:
+            simulated_elapsed = (
+                recorder.rows[-1][0] - recorder.rows[0][0] if len(recorder.rows) > 1 else 0.0)
+            if (simulated_elapsed if args.time_mode == "sim" else recorder.elapsed()) >= args.timeout:
                 recorder.finish("timeout", "mission_deadline" if recorder.rows else "no_odometry")
+            if args.time_mode == "sim" and recorder.elapsed() > args.timeout * 20:
+                recorder.finish("timeout", "wall_safety_deadline")
     except (KeyboardInterrupt, ExternalShutdownException):
         recorder.finish("timeout", "interrupted")
     finally:
@@ -435,6 +451,7 @@ def main(argv=None):
                 for name in ("odom", "cloud", "lidar_pose", "accel", "ctbr", "position_command", "stats")
             },
             timeout=args.timeout,
+            time_mode=args.time_mode,
         )
         node.destroy_node()
         if rclpy.ok():

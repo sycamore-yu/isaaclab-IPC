@@ -18,6 +18,9 @@ def start(context):
         return LaunchConfiguration(name).perform(context)
 
     execution, policy, benchmark = value("execution"), value("policy"), value("benchmark")
+    simulated = value("time_mode") == "sim"
+    if simulated and execution != "dynamic":
+        raise ValueError("Lockstep sim mode currently requires Flightmare dynamic execution")
     root = Path(__file__).resolve().parents[3]
     python = value("python")
     output = str(Path(value("output")).expanduser().absolute())
@@ -35,17 +38,21 @@ def start(context):
         executor_parameters = [value("executor_parameters")] if value("executor_parameters") else []
         executor = Node(package="isaaclab_marsim", executable="flightmare_node", output="screen",
                         parameters=executor_parameters + [{"config_path": config,
+                                     "simulated_time": simulated, "use_sim_time": simulated,
                                      "command_source": "position_command" if policy == "super" else "ctbr"}])
         lidar = Node(package="isaaclab_marsim", executable="marsim_lidar_node", output="log",
-                     parameters=[{"config_path": config, "odom_topic": "/marsim/odometry"}], prefix=render_prefix)
+                     parameters=[{"config_path": config, "odom_topic": "/marsim/odometry",
+                                  "simulated_time": simulated, "use_sim_time": simulated}], prefix=render_prefix)
         actions += [executor, lidar]
 
     if value("mission") == "true":
         actions.append(Node(package="mission_planner", executable="waypoint_mission", output="log",
-                            parameters=[{"config_name": "waypoint.yaml", "data_name": "benchmark.txt"}]))
+                            parameters=[{"config_name": "waypoint.yaml", "data_name": "benchmark.txt",
+                                         "simulated_time": simulated, "use_sim_time": simulated}]))
     if policy == "super":
         controller = Node(package="super_planner", executable="fsm_node", output="log",
-                          parameters=[{"config_name": f"static_{benchmark}.yaml"}])
+                          parameters=[{"config_name": f"static_{benchmark}.yaml",
+                                       "simulated_time": simulated, "use_sim_time": simulated}])
     else:
         if policy == "acmpc" and not value("checkpoint"):
             raise ValueError("policy:=acmpc requires checkpoint:=/absolute/path/model.pt")
@@ -54,17 +61,28 @@ def start(context):
             "-p", f"policy:={'fixed' if policy == 'ipc' else 'acmpc'}",
             "-p", f"execution:={execution}", "-p", f"benchmark:={benchmark}",
             "-p", f"output_directory:={output}/policy",
+            "-p", f"simulated_time:={'true' if simulated else 'false'}",
+            "-p", f"use_sim_time:={'true' if simulated else 'false'}",
         ]
         if value("checkpoint"):
             policy_command += ["-p", f"checkpoint:={value('checkpoint')}"]
         controller = ExecuteProcess(cmd=policy_command, output="screen")
     actions.append(controller)
+    if simulated:
+        driver = ExecuteProcess(
+            cmd=[python, "-m", "isaaclab_ipc.ros_sim_clock"],
+            output="screen",
+        )
+        actions.append(driver)
+        actions.append(RegisterEventHandler(OnProcessExit(
+            target_action=driver, on_exit=[EmitEvent(event=Shutdown(reason="Lockstep driver exited"))])))
 
     if value("record") == "true":
         monitor = ExecuteProcess(cmd=[
             python, str(root / "scripts/evaluate_marsim_ros2.py"),
             "--mode", execution, "--benchmark", benchmark, "--policy", policy,
             "--output", output, "--timeout", value("timeout"),
+            "--time-mode", value("time_mode"),
         ], output="screen")
         actions += [monitor, RegisterEventHandler(OnProcessExit(
             target_action=monitor, on_exit=[EmitEvent(event=Shutdown(reason="Evaluation completed"))]))]
@@ -81,6 +99,7 @@ def generate_launch_description():
     root = Path(__file__).resolve().parents[3]
     return LaunchDescription([
         DeclareLaunchArgument("execution", default_value="ideal", choices=["ideal", "dynamic"]),
+        DeclareLaunchArgument("time_mode", default_value="wall", choices=["wall", "sim"]),
         DeclareLaunchArgument("policy", default_value="super", choices=["super", "ipc", "acmpc"]),
         DeclareLaunchArgument("benchmark", default_value="high_speed", choices=["high_speed", "dense"]),
         DeclareLaunchArgument("checkpoint", default_value=""),

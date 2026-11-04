@@ -28,6 +28,7 @@ def stop(process):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("ideal", "dynamic"), required=True)
+    parser.add_argument("--time-mode", choices=("wall", "sim"), default="wall")
     parser.add_argument("--benchmark", choices=("high_speed", "dense"), required=True)
     parser.add_argument("--policy", choices=("super", "ipc", "acmpc"), default="super")
     parser.add_argument("--checkpoint", type=Path)
@@ -40,6 +41,8 @@ def main():
     args = parser.parse_args()
     if args.official and (args.mode != "ideal" or args.policy != "super"):
         parser.error("--official uses the upstream ideal SUPER executor; use the unified launch for dynamic")
+    if args.time_mode == "sim" and (args.mode != "dynamic" or args.official):
+        parser.error("--time-mode sim requires the unified dynamic Flightmare executor")
     if args.policy == "acmpc" and args.checkpoint is None:
         parser.error("--policy acmpc requires --checkpoint")
     if args.executor_parameters and args.mode != "dynamic":
@@ -55,6 +58,7 @@ def main():
     else:
         command = ["ros2", "launch", "isaaclab_marsim", "benchmark.launch.py",
                    f"execution:={args.mode}", f"benchmark:={args.benchmark}", f"policy:={args.policy}",
+                   f"time_mode:={args.time_mode}",
                    f"output:={output}", "record:=false", f"render_prefix:={args.render_prefix}"]
         if args.checkpoint:
             command.append(f"checkpoint:={args.checkpoint.absolute()}")
@@ -63,6 +67,7 @@ def main():
     monitor_command = [sys.executable, str(ROOT / "scripts/evaluate_marsim_ros2.py"),
                        "--mode", args.mode, "--benchmark", args.benchmark, "--policy", args.policy,
                        "--output", str(output), "--timeout", str(args.timeout)]
+    monitor_command += ["--time-mode", args.time_mode]
     binaries = [ROOT / "build/marsim_ros2/install" / package / "lib" / package / executable
                 for package, executable in (("isaaclab_marsim", "flightmare_node"),
                                             ("isaaclab_marsim", "marsim_lidar_node"),
@@ -70,6 +75,7 @@ def main():
                                             ("super_planner", "fsm_node"))]
     (output / "run.json").write_text(json.dumps({
         "launch": command, "monitor": monitor_command, "ros_domain_id": args.domain,
+        "time_mode": args.time_mode,
         "git_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "executable_sha256": {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
                               for path in binaries if path.exists()},

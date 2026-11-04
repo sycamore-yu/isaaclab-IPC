@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 
 #include <chrono>
+#include <cmath>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -11,6 +12,7 @@
 #include <pcl_conversions/pcl_conversions.h>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_msgs/msg/u_int64.hpp>
 #include <yaml-cpp/yaml.h>
 
 #include "marsim_render/marsim_render.hpp"
@@ -21,6 +23,7 @@ class MarsimLidarNode : public rclcpp::Node {
   MarsimLidarNode() : Node("marsim_lidar_node") {
     const auto path = declare_parameter<std::string>("config_path", "");
     const auto config = YAML::LoadFile(path);
+    simulated_time_ = declare_parameter<bool>("simulated_time", false);
     const double sensing_rate = config["sensing_rate"] ? config["sensing_rate"].as<double>() : 10.0;
     if (!std::isfinite(sensing_rate) || sensing_rate <= 0.0) {
       throw std::invalid_argument("sensing_rate must be positive");
@@ -43,6 +46,16 @@ class MarsimLidarNode : public rclcpp::Node {
           orientation_ = orientation.normalized();
           pose_stamp_ = rclcpp::Time(message->header.stamp);
           have_pose_ = true;
+          if (simulated_time_) {
+            const auto step = pose_stamp_.nanoseconds() / 10000000;
+            if (step % scan_stride_ == 0 && step != previous_scan_step_) {
+              scan();
+              std_msgs::msg::UInt64 done;
+              done.data = static_cast<uint64_t>(step);
+              scan_done_pub_->publish(done);
+              previous_scan_step_ = step;
+            }
+          }
         }
       });
     pcl::PointCloud<marsim::PointType>::Ptr global;
@@ -54,13 +67,21 @@ class MarsimLidarNode : public rclcpp::Node {
     global_map_.header.frame_id = "world";
     global_map_.header.stamp = now();
     global_pub_->publish(global_map_);
-    global_timer_ = create_wall_timer(std::chrono::seconds(5), [this]() {
-      global_map_.header.stamp = now();
-      global_pub_->publish(global_map_);
-    });
-    scan_timer_ = create_wall_timer(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(1.0 / sensing_rate)),
-      [this]() { scan(); });
+    if (simulated_time_) {
+      scan_stride_ = static_cast<int64_t>(std::llround(100.0 / sensing_rate));
+      if (scan_stride_ <= 0 || std::abs(100.0 / sensing_rate - scan_stride_) > 1e-6) {
+        throw std::invalid_argument("Simulated LiDAR rate must divide 100 Hz");
+      }
+      scan_done_pub_ = create_publisher<std_msgs::msg::UInt64>("/marsim/sim_scan_done", 10);
+    } else {
+      global_timer_ = create_wall_timer(std::chrono::seconds(5), [this]() {
+        global_map_.header.stamp = now();
+        global_pub_->publish(global_map_);
+      });
+      scan_timer_ = create_wall_timer(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(1.0 / sensing_rate)),
+        [this]() { scan(); });
+    }
     RCLCPP_INFO(get_logger(), "Original MARSIM LiDAR at %.1f Hz, driven by actual odometry", sensing_rate);
   }
 
@@ -91,11 +112,14 @@ class MarsimLidarNode : public rclcpp::Node {
   Eigen::Vector3f position_{Eigen::Vector3f::Zero()};
   Eigen::Quaternionf orientation_{Eigen::Quaternionf::Identity()};
   bool have_pose_{false};
+  bool simulated_time_{false};
+  int64_t scan_stride_{10}, previous_scan_step_{-1};
   rclcpp::Time pose_stamp_{0, 0, RCL_ROS_TIME};
   sensor_msgs::msg::PointCloud2 global_map_;
   rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub_;
   rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr cloud_pub_, global_pub_;
   rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr render_pose_pub_;
+  rclcpp::Publisher<std_msgs::msg::UInt64>::SharedPtr scan_done_pub_;
   rclcpp::TimerBase::SharedPtr scan_timer_, global_timer_;
 };
 }  // namespace

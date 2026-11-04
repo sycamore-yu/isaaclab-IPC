@@ -11,7 +11,7 @@ import json
 import multiprocessing
 from pathlib import Path
 from queue import Full
-from time import perf_counter
+from time import perf_counter, sleep
 
 import numpy as np
 import torch
@@ -248,13 +248,14 @@ def main(args=None):
     from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
     from sensor_msgs.msg import PointCloud2
     from sensor_msgs_py.point_cloud2 import read_points_numpy
-    from std_msgs.msg import String
+    from std_msgs.msg import String, UInt64
 
     class PolicyNode(Node):
         def __init__(self):
             super().__init__("ipc_policy")
             defaults = dict(policy="fixed", execution="dynamic", benchmark="high_speed", checkpoint="",
                             output_directory="results/marsim-policy", device="cpu", frequency=100.0,
+                            simulated_time=False, replan_frequency=10.0,
                             odom_topic="", cloud_topic="/cloud_registered", goal_topic="/planning/click_goal",
                             acceleration_topic="/marsim/acceleration", ctbr_topic="/marsim/ctbr",
                             position_command_topic="/planning/pos_cmd", stats_topic="/marsim/policy_stats")
@@ -265,6 +266,8 @@ def main(args=None):
                 raise ValueError("policy must be fixed|acmpc; execution must be ideal|dynamic")
             if p["frequency"] <= 0:
                 raise ValueError("frequency must be positive")
+            if p["simulated_time"] and (p["frequency"] != 100.0 or p["replan_frequency"] != 10.0):
+                raise ValueError("Lockstep MPC requires 100 Hz control and 10 Hz replanning")
             self.options = p
             torch.set_num_threads(1)
             case, params = load_case(p["benchmark"]), planner_params(p["benchmark"])
@@ -306,7 +309,9 @@ def main(args=None):
                             thrust_limits=list(self.thrust_limits), rate_limit=self.rate_limit,
                             planner_profile="real", rotation="ROS xyzw to body-to-world R",
                             command_step_s=1.0 / p["frequency"], mpc_prediction_step_s=params["mpc"]["step"],
-                            scheduling="one planning process; 100 Hz time-sampled jerk trajectory execution",
+                            scheduling=("lockstep 100 Hz; solve every 10 simulation ticks"
+                                        if p["simulated_time"] else
+                                        "one planning process; 100 Hz time-sampled jerk trajectory execution"),
                             sequence_clock="acceptance timestamp; source age separately limits full-horizon validity",
                             reference_origin="execution PVA at acceptance (measured dynamic; current published ideal); original 0.1 s model knots",
                             acceptance="original jerk/state/SFC constraints rechecked at the execution PVA; rejected plans brake and replan",
@@ -342,8 +347,38 @@ def main(args=None):
             self.command_pub = self.create_publisher(command_type, command_topic, 10)
             self.stats_pub = self.create_publisher(String, p["stats_topic"], 10)
             self.worker = PlanningWorker(p, params, actor_cfg)
-            self.timer = self.create_timer(1.0 / p["frequency"], self.control)
+            self.completed_sync = None
+            self.timer = None
+            if p["simulated_time"]:
+                self.sim_done_pub = self.create_publisher(UInt64, "/marsim/sim_policy_done", 10)
+                self.sim_tick_sub = self.create_subscription(
+                    UInt64, "/marsim/sim_tick", lambda msg: self.on_sim_tick(msg.data), 10)
+            else:
+                self.timer = self.create_timer(1.0 / p["frequency"], self.control)
             self.get_logger().info(f"{p['policy']}/{p['execution']}: {odom_topic}, {p['cloud_topic']} -> {command_topic}; {p['frequency']} Hz control, asynchronous MPC")
+
+        def on_sim_tick(self, tick):
+            expected_ns = tick * 10_000_000
+            if self.get_clock().now().nanoseconds != expected_ns:
+                raise RuntimeError(f"ROS simulation clock differs from control tick {tick}")
+            if tick % 10 == 0 and self.state is not None and self.have_cloud and self.have_goal:
+                if self.worker.busy:
+                    raise RuntimeError("Previous lockstep MPC solve still active")
+                request = dict(
+                    state=self.state.copy(), rotation=self.rotation.copy(),
+                    goal=self.goal.copy(), goal_id=self.goal_id, cloud=self.cloud,
+                    source_stamp_ns=self.odom_stamp_ns, expired=False, replan=self.replan_required,
+                    sent_monotonic=perf_counter())
+                if not self.worker.submit(request):
+                    raise RuntimeError("Cannot submit lockstep MPC request")
+                self.cloud = None
+                self.replan_required = False
+                while (completed := self.worker.poll()) is None:
+                    sleep(0.002)
+                self.completed_sync = completed
+            prior = self.controls
+            self.control()
+            self.sim_done_pub.publish(UInt64(data=(tick << 1) | int(self.controls > prior)))
 
         @staticmethod
         def nanoseconds(stamp):
@@ -390,7 +425,8 @@ def main(args=None):
 
         def control(self):
             started = perf_counter()
-            completed = self.worker.poll()
+            completed = self.completed_sync if self.options["simulated_time"] else self.worker.poll()
+            self.completed_sync = None
             if self.state is None or not self.have_cloud or not self.have_goal:
                 return
             if self.options["execution"] == "dynamic" and self.accel_stamp_ns is None:
@@ -460,7 +496,7 @@ def main(args=None):
                 message.yaw = yaw
                 message.trajectory_flag = PositionCommand.TRAJECTORY_STATUS_READY
             self.command_pub.publish(message)
-            if not self.worker.busy:
+            if not self.options["simulated_time"] and not self.worker.busy:
                 request = dict(state=self.state.copy(), rotation=self.rotation.copy(),
                                goal=self.goal.copy(), goal_id=self.goal_id, cloud=self.cloud,
                                source_stamp_ns=self.odom_stamp_ns, expired=expired, replan=self.replan_required,
@@ -485,13 +521,15 @@ def main(args=None):
             self.publish_stats(row)
 
         def publish_stats(self, row):
-            row.update(policy=self.options["policy"], execution=self.options["execution"])
+            row.update(policy=self.options["policy"], execution=self.options["execution"],
+                       wall_stamp_s=perf_counter())
             encoded = json.dumps(row, allow_nan=False)
             self.record.write(encoded + "\n")
             self.stats_pub.publish(String(data=encoded))
 
         def close(self):
-            self.timer.cancel()
+            if self.timer is not None:
+                self.timer.cancel()
             self.worker.close()
             self.record.close()
 

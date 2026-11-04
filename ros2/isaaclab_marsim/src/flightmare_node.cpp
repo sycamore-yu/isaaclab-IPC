@@ -17,6 +17,7 @@
 #include <mars_quadrotor_msgs/msg/position_command.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 #include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/u_int64.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 #include <yaml-cpp/yaml.h>
 
@@ -52,6 +53,7 @@ class FlightmareNode : public rclcpp::Node {
       throw std::invalid_argument("command_source must be ctbr or position_command");
     }
     position_control_ = source == "position_command";
+    simulated_time_ = declare_parameter<bool>("simulated_time", false);
     const double frequency = declare_parameter<double>("control_frequency", 100.0);
     if (!std::isfinite(frequency) || frequency <= 0.0) {
       throw std::invalid_argument("control_frequency must be positive");
@@ -124,7 +126,11 @@ class FlightmareNode : public rclcpp::Node {
         [this](PositionCommand::ConstSharedPtr msg) {
           if (vector(msg->position).allFinite() && vector(msg->velocity).allFinite() &&
               vector(msg->acceleration).allFinite() && vector(msg->jerk).allFinite() &&
-              std::isfinite(msg->yaw) && std::isfinite(msg->yaw_dot)) target_ = *msg;
+              std::isfinite(msg->yaw) && std::isfinite(msg->yaw_dot)) {
+            target_ = *msg;
+            latest_command_ns_ = rclcpp::Time(msg->header.stamp).nanoseconds();
+            try_pending_step();
+          }
         });
     } else {
       ctbr_sub_ = create_subscription<geometry_msgs::msg::TwistStamped>(
@@ -132,18 +138,47 @@ class FlightmareNode : public rclcpp::Node {
           if (std::isfinite(msg->twist.linear.z) && vector(msg->twist.angular).allFinite()) {
             collective_ = msg->twist.linear.z;
             rates_ = vector(msg->twist.angular);
+            latest_command_ns_ = rclcpp::Time(msg->header.stamp).nanoseconds();
+            try_pending_step();
           }
         });
     }
-    timer_ = create_wall_timer(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(dt_)),
-      [this]() { step(); });
+    if (simulated_time_) {
+      step_done_pub_ = create_publisher<std_msgs::msg::UInt64>("/marsim/sim_step_done", 10);
+      step_sub_ = create_subscription<std_msgs::msg::UInt64>(
+        "/marsim/sim_step", rclcpp::QoS(10).reliable(),
+        [this](std_msgs::msg::UInt64::ConstSharedPtr msg) {
+          pending_step_ = msg->data >> 1;
+          pending_command_ = (msg->data & 1U) != 0;
+          try_pending_step();
+        });
+    } else {
+      timer_ = create_wall_timer(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::duration<double>(dt_)),
+        [this]() { step(); });
+    }
     RCLCPP_INFO(get_logger(),
       "Native Flightmare: %s, %.1f Hz, mass %.3f kg, motor tau %.3f s; RK4 substeps <= 0.0025 s",
       source.c_str(), frequency, mass, motor_tau);
   }
 
  private:
+  void try_pending_step() {
+    if (!simulated_time_ || pending_step_ < 0) return;
+    const int64_t expected_ns = pending_step_ * static_cast<int64_t>(std::llround(dt_ * 1e9));
+    if (pending_command_ && latest_command_ns_ != expected_ns) return;
+    // Step 0 publishes the initial state. Subsequent requests integrate once.
+    if (pending_step_ != 0) {
+      step();
+    } else {
+      publish_state();
+    }
+    std_msgs::msg::UInt64 done;
+    done.data = static_cast<uint64_t>(pending_step_);
+    step_done_pub_->publish(done);
+    pending_step_ = -1;
+  }
+
   void track_position() {
     const Vec3 force = vector(target_.acceleration) +
       Scalar(kp_) * (vector(target_.position) - state_.p) +
@@ -176,6 +211,10 @@ class FlightmareNode : public rclcpp::Node {
       rclcpp::shutdown();
       return;
     }
+    publish_state(previous_rates);
+  }
+
+  void publish_state(const Vec3& previous_rates = Vec3::Zero()) {
     const auto stamp = now();
     const auto q = state_.q();
     nav_msgs::msg::Odometry odom;
@@ -222,8 +261,12 @@ class FlightmareNode : public rclcpp::Node {
   Vec3 rates_;
   Scalar collective_, rate_limit_, collective_limit_;
   double dt_, kp_, kd_, attitude_gain_;
-  bool position_control_;
+  bool position_control_, simulated_time_;
+  int64_t pending_step_{-1}, latest_command_ns_{-1};
+  bool pending_command_{false};
   rclcpp::TimerBase::SharedPtr timer_;
+  rclcpp::Subscription<std_msgs::msg::UInt64>::SharedPtr step_sub_;
+  rclcpp::Publisher<std_msgs::msg::UInt64>::SharedPtr step_done_pub_;
   rclcpp::Subscription<geometry_msgs::msg::TwistStamped>::SharedPtr ctbr_sub_;
   rclcpp::Subscription<PositionCommand>::SharedPtr position_sub_;
   rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_, legacy_odom_pub_;

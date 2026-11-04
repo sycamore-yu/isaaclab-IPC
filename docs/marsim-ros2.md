@@ -624,3 +624,49 @@ rerun rrd verify recordings/my_super_dense_ideal.rrd
 Rerun 中蓝色为逐步累计的真实飞行轨迹，灰色为完整真实轨迹，洋红色为**已发布**的 `PositionCommand` 样本，绿色为实际到达航点。速度和净空使用评测保存的原始数值。录制还保留了航点切换、末端碰撞或成功状态。
 
 评测 NPZ **没有保存原始 LiDAR 点云帧和 SUPER 优化器候选轨迹**。因此 RRD 不提供这两类数据，不使用 PCD 地图伪装实时 LiDAR，也不把已发布的 PositionCommand 样本冒充完整的规划曲线。四份录制均通过 Rerun 的 `rrd verify` 解码检查。
+
+## 13. 同步仿真时间（100 Hz）执行模式
+
+新增 `--time-mode sim` / `time_mode:=sim`，**仅用于 Flightmare dynamic**。默认的 `wall` 模式及上游 SUPER PerfectDrone ideal 路径均保持原行为。原版 SUPER 的 15 Hz 重规划是配置的墙钟规划频率，不等于 IPC 的 MPC；本模式将其改为 15 Hz *仿真时间*重规划，同时按仿真步发布 100 Hz PositionCommand。
+
+独立 `ros_sim_clock.py` 是步进协调者。每个 tick 在 `/clock` 发布确切的 `t=n×0.01 s` 后等待 `/marsim/sim_policy_done`。策略处理本次传感器与规划，发布当前时间戳的 PositionCommand 或 CTBR；之后才向 Flightmare 发送 `/marsim/sim_step` 并等待 `/marsim/sim_step_done`。原生 Flightmare 只积分 **1 个 0.01 s 步**（RK4 子步保留）。每 10 步，MARSIM 按实际里程计执行一次原生 LiDAR 渲染并确认 `/marsim/sim_scan_done`。下一个仿真步必须等待这些确认；任何 MPC 求解、OpenGL 渲染或 ROS 执行耗时都只消耗墙钟时间，**不插入额外物理积分**。
+
+AC-MPC 使用同一个训练检查点和 jerk/QP／走廊约束，按每 10 个仿真步求解 1 次（10 Hz *仿真时间*），其间每个 0.01 s 步执行已接受的序列。控制发布 **100 Hz 仿真时间**。真实求解器仍在独立进程运行，但模拟时钟等待计算结果，避免因为机器速度变慢使轨迹被动老化。记录 `policy_*_timing`（仿真时间频率）与 `policy_*_wall_timing`（墙钟频率），另记 `real_time_factor=trajectory_duration_s/elapsed_wall_s`。
+
+使用同一套完整往返任务与原始 PCD，仿真时间截止 `--timeout 120` 秒：
+
+```bash
+source scripts/marsim_ros2_env.sh
+export DISPLAY=:11
+.venv/bin/python scripts/run_marsim_ros2.py \
+  --mode dynamic --time-mode sim --benchmark high_speed --policy super \
+  --output results/my-super-high-speed-simtime --timeout 120 --domain 147 \
+  --render-prefix 'vglrun -d egl0'
+```
+
+对于 AC-MPC，把 `--policy super` 改为 `--policy acmpc`，并提供此前正式评测使用的相同 `--checkpoint`。dense 场景只替换 `--benchmark dense` 和独立结果目录及 ROS domain。结果记录在 `results/marsim-simtime-20261104` 下；不把仿真时间频率冒充硬件实时控制能力。
+
+### 完整 120 s 仿真时间评测（2026-11-04）
+
+四组均已完成真实 ROS 2 图、Flightmare 原生动力学、MARSIM LiDAR 和原始 PCD 的监控；不存在用离线轨迹代替闭环运行的情况。全部保持相同 100 Hz 控制和 10 Hz LiDAR 仿真时间频率。SUPER 保留原先 15 Hz 轨迹重规划目标；AC-MPC 固定每 0.1 s 仿真时间求解 1 次。
+
+| 结果目录 | 策略／场景 | 结果／航点 | 仿真时间 s | 墙钟耗时 s | 实时因子 | 最小净空 m |
+|---|---|---|---:|---:|---:|---:|
+| `full-super-high_speed` | SUPER high_speed | success，2/2 | 16.49 | 28.18 | 0.585 | 0.8031 |
+| `full-super-dense` | SUPER dense | collision，0/2 | 4.15 | 10.03 | 0.414 | −0.0125 |
+| `full-acmpc-high_speed` | AC-MPC high_speed | timeout，1/2 | 120.00 | 238.92 | 0.502 | 0.6715 |
+| `full-acmpc-dense` | AC-MPC dense | timeout，0/2 | 120.00 | 1048.03 | 0.115 | 0.8584 |
+
+在四个原始 `trajectory.npz` 中，所有相邻里程计时间戳均相差 0.01 s（绝对误差小于 `1e-14 s`）；LiDAR 每 0.1 s 采样，全部点云时间戳匹配实际渲染位姿。每组 `run.json` 的 114 个源码和 4 个二进制哈希均与此次构建一致。对应证据：`summary.json` 和 `timing_validation.json`。
+
+AC-MPC 两场景都有 11701 次控制发布和 1171 次 QP 求解，仿真时间测得 100/10 Hz。墙钟下高速度场景的控制／求解更新为 **51.03/5.10 Hz**，dense 为 **11.27/1.13 Hz**。这两个低频是实际计算速度，并未改变仿真控制步长。
+
+AC-MPC high_speed 在仿真时间 63.39 s 到达第 1 航点；返航到 120 s 时位于约 `[0.154, -43.831, 1.654] m`，尚未进入最后 1 m 到达半径。最大实飞速度为 **1.954 m/s**，QP 失败及重锚约束拒绝均为 **0 次**。它未完成 120 s 任务，不应计为成功。
+
+AC-MPC dense 仅飞行 **1.142 m**，最终停在约 `[-0.430, -49.532, 2.442] m`。1171 次求解中 **1161 次达到迭代上限而未被判为成功**，QP 达到 **4096 次迭代**，原始残差约 `2e-5`。这不是 LiDAR 帧率或仿真时钟故障。对仿真时间 5.0、8.0、30.2 s 的失败样本，使用原始 MPC 的 jerk、速度、加速度和 SFC 约束构造线性可行性问题，HiGHS 均找到可行解。详见 `acmpc_dense_linear_feasibility.json`；**不能将此失败解释为走廊约束必然不可行**，后续应优先分析求解器收敛和目标成本。所用检查点任务为 `Isaac-IPC-Avoid-ACMPC-Direct`，并不是针对 SUPER 两场景训练的策略。
+
+SUPER dense 即使使用同步仿真时间仍在高于地面的 PCD 障碍处碰撞。与上一轮墙钟 dynamic dense 失败相符，时间切换没有修复其旋翼动力学的轨迹跟踪能力限制。
+
+从已完成的 SUPER 两场景生成了新 Rerun 回放：`recordings/super_marsim_high_speed_simtime.rrd` 和 `recordings/super_marsim_dense_simtime_collision.rrd`，均通过 `rerun rrd verify`。结果目录以及录制文件不提交 Git；只提交实现与本文。
+
+独立进行了原 `--time-mode wall` 的 SUPER dynamic high_speed 6 s 回归探针：里程计实测 **99.9996 Hz 墙钟**，收到 49 帧 LiDAR、227 条 PositionCommand 和 526 条 CTBR；程序按预设 6 s 墙钟截止，无异常退出。证据在 `wall-regression-super-high-6s/`。此短时探针用于确认墙钟接口保留，不计入完整往返任务成功率。
