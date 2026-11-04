@@ -171,9 +171,12 @@ class ForestRecording:
         else:
             r.log("world/reference", rr.Clear(recursive=True))
         if mode[1] and not mode[2]:
-            mpc = env.planners[0].mpc
-            prediction = mpc.M @ result["state"][0].cpu().numpy() + mpc.C @ result["solution"][0].cpu().numpy()
-            positions = prediction.reshape(15, 9)[:, :3]
+            if "prediction_positions" in result:
+                positions = result["prediction_positions"][0].cpu().numpy()
+            else:
+                mpc = env.planners[0].mpc
+                prediction = mpc.M @ result["state"][0].cpu().numpy() + mpc.C @ result["solution"][0].cpu().numpy()
+                positions = prediction.reshape(15, 9)[:, :3]
             r.log("world/prediction/qp", rr.LineStrips3D([positions], radii=0.025, colors=[240, 110, 240]))
         if mode[2]:
             r.log(

@@ -47,3 +47,31 @@ class MPCTrainCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
         use_clipped_value_loss=True,
     )
+
+
+@configclass
+class TurboMPCActorCfg(MPCActorCfg):
+    class_name = "isaaclab_ipc.rl.turbo_actor:TurboMPCActor"
+    qp_iterations = 16384
+    compile_kernels = True
+
+
+@configclass
+class TurboMPCTrainCfg(MPCTrainCfg):
+    experiment_name = "ipc_turbompc"
+    actor = TurboMPCActorCfg()
+
+
+@configclass
+class CTBRActorCfg(TurboMPCActorCfg):
+    class_name = "isaaclab_ipc.rl.ctbr_actor:CTBRMPCActor"
+    qp_iterations = 32768
+    sqp_iterations = 60
+    sqp_tolerance = 1e-7
+    admm_tolerance = 1e-8
+
+
+@configclass
+class CTBRTrainCfg(MPCTrainCfg):
+    experiment_name = "ipc_turbompc_ctbr"
+    actor = CTBRActorCfg()

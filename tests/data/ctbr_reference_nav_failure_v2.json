@@ -1,0 +1,29 @@
+{
+  "source": "/home/tong/tongworkspace/free/.worktrees/isaaclab-IPC/turbompc-torch-native-verified/results/turbompc-port/ctbr-real-low-v2/first-unsolved-seed-0.pt",
+  "source_sha256": "65599edcb1b3759766794c8229a5322914cf4bb7c65471b2fc89708a18618d0f",
+  "fixture_sha256": "e3dd081414ce843a48bacd3aa7027c09bf99cbc432ae00532ba4aa7b7a5efb39",
+  "scope": "Exact saved measured state/reference and both full original SFC blocks. No generated path or changes to physical input. Observation packing reverses face rows, so valid block rows are reversed back to PlanningContext order. Mathematical tests only; not navigation acceptance.",
+  "keys": {
+    "ctbr_state": [
+      10
+    ],
+    "mpc_state": [
+      9
+    ],
+    "reference": [
+      15,
+      9
+    ],
+    "corridor_index": [
+      15
+    ],
+    "old_planes": [
+      22,
+      4
+    ],
+    "new_planes": [
+      14,
+      4
+    ]
+  }
+}

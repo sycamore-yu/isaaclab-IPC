@@ -1,0 +1,20 @@
+# Original TurboMPC JAX bridge and Torch CUDA 12 comparison environment.
+torch==2.11.0+cu128
+cuda-toolkit[cublas,nvrtc]==12.8.1
+nvidia-cudss-cu12==1.0.0.35
+jax[cuda12]==0.6.2
+jaxlib==0.6.2
+nvidia-cuda-nvcc-cu12==12.8.93
+diffrax==0.6.2
+osqp==0.6.7.post3
+numpy
+scipy
+pyyaml
+pytest
+matplotlib
+scikit-build-core
+pybind11
+ninja
+packaging
+setuptools
+wheel

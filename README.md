@@ -6,6 +6,22 @@ Newton/MJWarp IPC 和 CUDA 可微 MPC 的 PPO 训练已能运行。
 新执行配置与复测见 [执行配置](docs/execution-profiles.md)。
 共享森林 BVH、紧凑 Mid-360 与规划缓存已默认启用；实测与边界见 [规模优化](docs/scale-optimization.md)。
 
+TurboMPC 原生 Torch 已实现 CUDA ADMM/cuDSS、Torch SQP 与隐式反传，支持 CUDA 12.8/13.0。**当前 KKT 使用 cuDSS 默认 IR=0**，不再设置 `IR_N_STEPS=2`。默认配置接受上游 KKT 的数值偏差；附加测试观察到最高约 0.426% 的方向梯度误差，不能将历史 IR2 精度结论视为当前配置的结果。
+**历史提交 `403fc2d` 的 IR2 M4 final-v8 已通过**：固定 `float64`、N=15，Batch 1/16/64/256 各100对完整前向加反向、各端10次预热；全部数值、梯度、约束、性能及来源门槛通过。M4 使用默认 `polisher=None`，正式汇总为
+[`m4-ir2-accepted-final-v8.json`](results/turbompc-port/m4-ir2-accepted-final-v8.json)。
+A 明确采用上游 `7050a4f` 加三行 cuDSS IR2 配置，B 同样使用 IR2；**未经修改的原版 A0 仍未通过**，失败证据及原版库均保留。
+
+本轮206条负载记录的 GPU 利用率为90%–100%、中位数99%。四批 P50 B/A 为 `0.604/0.843/0.883/0.894`，P95 B/A 为 `0.616/0.663/0.670/0.669`；
+完整性能与数值表见[移植进度](docs/turbompc-torch-progress.md)。`final-v1/v2/v3/v7` 的失败不被覆盖：`final-v7` 中 B16 P50 为 `1.157486×`，剖析后增加编译矩阵向量积融合，再执行完整 final-v8。
+本轮通过适用于记录的共享测试条件，不外推为其他负载或独占 GPU 性能，也不代表100 Hz墙钟实时控制保证。
+最终代码采用外层 SQP 融合、数值前向 detach 与反向准备融合、精确线性模型解析组装和编译矩阵向量积融合；负收益的成本组装编译、ADMM准备融合候选均未采用，实验与源码归档保留。
+
+IPC SFC 的独立数值、低速与森林真实闭环验证已完成；当前 `403fc2d` 的编译 SFC 数值回归也通过，保留四个固定场景和112次独立OSQP有限差分。低速与森林闭环数据对应其报告中的历史提交。
+`403fc2d` 的 CTBR 模型v6已通过116个开环/有限差分样本和四例各60步模型闭环；Newton v6已通过悬停200步和位置阶跃400步，保存真实状态的29次公共求解/有限差分也通过。后续参考前端候选 `1a71d69` 保留这些核心与原生库，按当前可见走廊余量选择参考速度。[导航v4](results/turbompc-port/ctbr-real-low-v4-acceptance.json)已在原seed0、stride10、目标10m、障碍距离1m、35s协议下完成1076步、达到原目标判据，碰撞/超时/物理违反/求解失败/恢复/制动均为0，最小物理间距0.219417m；31项独立检查通过。[PPO v5](results/turbompc-port/ctbr-train-smoke-v5-acceptance.json)的一次实际更新与checkpoint重载通过49项检查。完整记录保留32次额外参考余量未认证的名义参考回退，以及1次原SQP迭代上限后经既定finisher认证通过的行。
+原导航v1/v2/v3失败及其不可行证据保留。这些结果覆盖一条固定成本低速导航、既定模型/物理样本和一次PPO更新，不声明CTBR森林、多seed成功率、训练收敛或100Hz墙钟实时性。各测试保留实际被测提交身份；当前核心的来源等价性与新前端的实际执行证据分别核验。
+完整交付与当前范围先见 [移植交付](docs/turbompc-port-delivery.md)。当前结果、调度开销诊断和逐阶段边界见 [移植进度](docs/turbompc-torch-progress.md)、[原生接口](docs/turbompc-native.md)、
+[SFC 验证](docs/turbompc-sfc.md)和 [CTBR 验证](docs/turbompc-ctbr.md)。
+
 ## 安装与运行
 
 需要 Linux、Python 3.12、CUDA GPU、`uv`、G++、Eigen3 和 Qhull 头文件（`libqhull-dev`）。

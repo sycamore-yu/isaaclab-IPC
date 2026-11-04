@@ -425,31 +425,41 @@ class Planner:
             self.safe_climb_steps += 1
         else:
             jerk = brake_jerk(state, self.mpc.lower, self.mpc.upper, self.mpc.jlow, self.mpc.jhigh, self.mpc.dt)
-        self.brake_steps += 1
         return self.mpc.a @ state + self.mpc.b @ jerk, jerk, False
 
     def consume(self, problem, solution, status, time):
         return self.consume_state(problem[-1], solution, status, time)
 
+    def consume_recovery(self, state, success):
+        """Record one executed control result without interpreting its input vector.
+
+        Both jerk and CTBR controllers use the measured navigation [p,v,a] state
+        for the existing real-flight recovery policy. Call only during env.step.
+        """
+        if self.cfg.profile.recovery is not RecoveryPolicy.BRAKE_REPLAN:
+            return False
+        if not success:
+            self.failures += 1
+            if not self.braking:
+                self.recovery_events += 1
+                self.replan = True
+        braking = bool(
+            next_braking(
+                np.bool_(self.braking), np.bool_(success), np.linalg.norm(state[3:6]), np.linalg.norm(state[6:])
+            )
+        )
+        if self.braking and not braking:
+            self.replan = True
+        self.braking = braking
+        if braking:
+            self._safe_prediction = None
+        self.brake_steps += int(braking)
+        return braking
+
     def consume_state(self, state, solution, status, time):
         success = status in ("solved", "solved inaccurate")
-        if self.cfg.profile.recovery is RecoveryPolicy.BRAKE_REPLAN:
-            if not success:
-                self.failures += 1
-                if not self.braking:
-                    self.recovery_events += 1
-                    self.replan = True
-            braking = bool(
-                next_braking(
-                    np.bool_(self.braking), np.bool_(success), np.linalg.norm(state[3:6]), np.linalg.norm(state[6:])
-                )
-            )
-            if self.braking and not braking:
-                self.replan = True
-            self.braking = braking
-            if braking:
-                self._safe_prediction = None
-                return self._brake(state)
+        if self.consume_recovery(state, success):
+            return self._brake(state)
         if success:
             self.previous = np.asarray(solution).reshape(self.mpc.n, 3).copy()
             self.last_time = time

@@ -260,7 +260,8 @@ class IPCEnv(DirectRLEnv):
         pose, _ = self.body_state()
         distance = (pose[:, :3] - self.scene.env_origins - self.goal).norm(dim=-1)
         reward = self.previous_distance - distance - 10 * self.hit.float() + 10 * (distance < 0.5).float()
-        self.previous_distance = distance
+        # Keep normal persistent storage when steps run inside inference_mode.
+        self.previous_distance.copy_(distance)
         self.recorder_manager.record_post_step()
         return reward
 

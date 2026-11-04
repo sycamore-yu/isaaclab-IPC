@@ -81,6 +81,10 @@ class IPCMPCEnv(IPCEnv):
         self.state_violations = np.zeros(self.num_envs, int)
         self.qp_residual_max = np.zeros(self.num_envs)
         self.qp_failures = np.zeros(self.num_envs, int)
+        self.accepted_qp_residual_max = np.zeros(self.num_envs)
+        self.accepted_qp_steps = np.zeros(self.num_envs, int)
+        self.sfc_constrained_steps = np.zeros(self.num_envs, int)
+        self.maximum_sfc_planes = np.zeros(self.num_envs, int)
         self.reported = np.zeros(self.num_envs, bool)
         self.episode_ids = np.zeros(self.num_envs, int)
         self.current_context = None
@@ -115,8 +119,16 @@ class IPCMPCEnv(IPCEnv):
             self.command_violations[i] = self.thrust_violations[i] = self.state_violations[i] = 0
             self.qp_residual_max[i] = 0
             self.qp_failures[i] = 0
+            self.accepted_qp_residual_max[i] = 0
+            self.accepted_qp_steps[i] = 0
+            self.sfc_constrained_steps[i] = 0
+            self.maximum_sfc_planes[i] = 0
             self.reported[i] = False
             self.episode_ids[i] += 1
+
+    def _adapt_planning_contexts(self, contexts):
+        """Default IPC identity; subclasses adapt before packing and feature construction."""
+        return contexts
 
     def _get_observations(self):
         tick = perf_counter()
@@ -134,6 +146,7 @@ class IPCMPCEnv(IPCEnv):
         sfc_valid = np.ones((self.num_envs, 1), bool)
         refs, states, margins, braking, yaw, climb_active, climb_targets = [], [], [], [], [], [], []
         contexts = self.planning_batch.contexts(self.planners, values, clouds)
+        contexts = self._adapt_planning_contexts(contexts)
         for i, (planner, state, context) in enumerate(zip(self.planners, values, contexts, strict=True)):
             x, ref, corridor = context.state, context.reference, context.corridors
             if elapsed[i] < self.cfg.mission_start_delay:
@@ -157,9 +170,10 @@ class IPCMPCEnv(IPCEnv):
             refs.append(ref)
             margins.append(clearance)
             braking.append([planner.braking])
-            climb_active.append([planner.recovery_target is not None])
+            recovery_target = getattr(planner, "recovery_target", None)
+            climb_active.append([recovery_target is not None])
             climb_targets.append(
-                planner.recovery_target.copy() if planner.recovery_target is not None else np.zeros(3)
+                recovery_target.copy() if recovery_target is not None else np.zeros(3)
             )
             yaw.append(
                 [
@@ -216,6 +230,17 @@ class IPCMPCEnv(IPCEnv):
             raise RuntimeError("Previous MPC result has not been consumed by env.step")
         self._pending = result
 
+    def _consume_control_result(self, planner, data, index, time, action):
+        """Consume the IPC jerk schema and return its command-bound violation."""
+        status = "solved" if data["solved"][index] else "max iterations reached"
+        if not data["sfc_valid"][index]:
+            status = "invalid SFC"
+        planner.consume_state(data["state"][index], data["solution"][index], status, time)
+        val = np.r_[data["predicted"][index, 3:], data["jerk"][index]]
+        low = np.r_[planner.mpc.lower, planner.mpc.jlow[:3]]
+        high = np.r_[planner.mpc.upper, planner.mpc.jhigh[:3]]
+        return bool(np.any((val < low - 0.001 - 0.001 * abs(low)) | (val > high + 0.001 + 0.001 * abs(high))))
+
     def _pre_physics_step(self, actions):
         if self._pending is None:
             raise RuntimeError("Call record_mpc_result(actor.last_result) before env.step")
@@ -224,27 +249,24 @@ class IPCMPCEnv(IPCEnv):
         data = {k: v.cpu().numpy() for k, v in result.items() if isinstance(v, torch.Tensor)}
         elapsed = self.elapsed.cpu().numpy()
         sampled = actions.cpu().numpy()
+        schedule = self.current_context["corridor_index"]
+        face_counts = self.current_context["plane_mask"].sum(-1).gather(1, schedule.clamp_min(0))
+        max_faces = face_counts.masked_fill(schedule < 0, 0).amax(-1).cpu().numpy()
         for i, planner in enumerate(self.planners):
-            status = "solved" if data["solved"][i] else "max iterations reached"
-            if not data["sfc_valid"][i]:
-                status = "invalid SFC"
-            planner.consume_state(
-                data["state"][i],
-                data["solution"][i],
-                status,
-                float(elapsed[i]),
-            )
+            violation = self._consume_control_result(planner, data, i, float(elapsed[i]), sampled[i])
             if not self.reported[i]:
-                val = np.r_[data["predicted"][i, 3:], data["jerk"][i]]
-                low = np.r_[planner.mpc.lower, planner.mpc.jlow[:3]]
-                high = np.r_[planner.mpc.upper, planner.mpc.jhigh[:3]]
-                self.command_violations[i] += bool(
-                    np.any((val < low - 0.001 - 0.001 * abs(low)) | (val > high + 0.001 + 0.001 * abs(high)))
-                )
+                self.sfc_constrained_steps[i] += max_faces[i] > 0
+                self.maximum_sfc_planes[i] = max(self.maximum_sfc_planes[i], int(max_faces[i]))
+                self.command_violations[i] += violation
                 self.thrust_violations[i] += not (self.cfg.thrust_limits[0] <= sampled[i, 0] <= self.cfg.thrust_limits[1])
                 if data["sfc_valid"][i]:
                     self.qp_failures[i] += not data["solved"][i]
                     self.qp_residual_max[i] = max(self.qp_residual_max[i], float(data["primal"][i]))
+                    if data["solved"][i] and not data["braking"][i]:
+                        self.accepted_qp_steps[i] += 1
+                        self.accepted_qp_residual_max[i] = max(
+                            self.accepted_qp_residual_max[i], float(data["primal"][i])
+                        )
         super()._pre_physics_step(actions)
 
     def _get_rewards(self):
@@ -273,7 +295,9 @@ class IPCMPCEnv(IPCEnv):
         self.reward_sums += terms
         names = ("progress", "time", "smooth", "terminal")
         self.extras["reward_terms"] = dict(zip(names, terms.unbind(-1), strict=True))
-        self.extras.setdefault("log", {}).update(
+        # RSL retains each step's mapping by reference until rollout logging.
+        self.extras["log"] = dict(self.extras.get("log", {}))
+        self.extras["log"].update(
             {"Reward/" + name: value.mean() for name, value in self.extras["reward_terms"].items()}
         )
         self.extras["log"].update(
@@ -331,6 +355,10 @@ class IPCMPCEnv(IPCEnv):
                     recovery_events=planner.recovery_events,
                     brake_steps=planner.brake_steps,
                     maximum_qp_primal_residual=float(self.qp_residual_max[i]),
+                    accepted_qp_steps=int(self.accepted_qp_steps[i]),
+                    maximum_accepted_qp_primal_residual=float(self.accepted_qp_residual_max[i]),
+                    sfc_constrained_steps=int(self.sfc_constrained_steps[i]),
+                    maximum_sfc_planes=int(self.maximum_sfc_planes[i]),
                     minimum_physics_step_clearance_m=float(self.min_clearance[i]),
                     final_position=self.extras["terminal_position"][i].cpu().tolist(),
                 )

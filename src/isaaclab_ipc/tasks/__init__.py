@@ -27,6 +27,26 @@ for scenario in ("Avoid", "Forest"):
         },
     )
 
+    gym.register(
+        id=f"Isaac-IPC-{scenario}-TurboMPC-Direct",
+        entry_point="isaaclab_ipc.tasks.mpc_env:IPCMPCEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"isaaclab_ipc.tasks.mpc_env:make_{'forest_' if scenario == 'Forest' else ''}mpc_cfg",
+            "rsl_rl_cfg_entry_point": "isaaclab_ipc.rl.config:TurboMPCTrainCfg",
+        },
+    )
+
+    gym.register(
+        id=f"Isaac-IPC-{scenario}-TurboMPC-CTBR-Direct",
+        entry_point="isaaclab_ipc.tasks.ctbr_env:CTBRMPCEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"isaaclab_ipc.tasks.ctbr_env:make_{'forest_' if scenario == 'Forest' else ''}ctbr_cfg",
+            "rsl_rl_cfg_entry_point": "isaaclab_ipc.rl.config:CTBRTrainCfg",
+        },
+    )
+
 for name, factory in (("HighSpeed", "high_speed"), ("Dense", "dense")):
     gym.register(
         id=f"Isaac-IPC-SUPER-{name}-ACMPC-Direct",
