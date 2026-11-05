@@ -137,6 +137,56 @@ def test_receding_local_goal_advances_toward_global_waypoint():
     np.testing.assert_array_equal(p.goal, [0, 50, 1.5])
 
 
+def test_high_speed_corridor_switch_waits_for_reachable_distance(monkeypatch):
+    from types import SimpleNamespace
+
+    from scipy.optimize import linprog
+
+    from isaaclab_ipc.planner import Planner
+
+    planner = Planner(Config(planner_params("high_speed")), [0, 50, 1.5])
+    path = np.column_stack((np.zeros(401), np.linspace(-50, -30, 401), np.full(401, 1.5)))
+
+    def replan(_):
+        planner.path = path
+        planner.replan = False
+
+    def box(y_min, y_max):
+        return np.array([
+            [0, 1, 0, -y_max], [0, -1, 0, y_min],
+            [1, 0, 0, -4], [-1, 0, 0, -4],
+            [0, 0, 1, -3], [0, 0, -1, 0],
+        ], dtype=float)
+
+    first, second = box(-51, -44), box(-45, -28)
+    monkeypatch.setattr(planner, "_replan", replan)
+    monkeypatch.setattr(planner, "_corridor", lambda a, _: first.copy() if a[1] < -49 else second.copy())
+    planner.grid = SimpleNamespace(free=lambda _: True, line_free=lambda *_: True)
+    state = np.array([0, -50, 1.5, 0, 0, 0, 0, 0, 0.0])
+    initial, reference, schedule = planner.context(state)
+    switch = next(i for i, region in enumerate(schedule) if np.array_equal(region, second))
+    assert switch >= 6
+    assert all(np.array_equal(region, first) for region in schedule[:switch])
+    assert all(np.array_equal(region, second) for region in schedule[switch:])
+
+    def feasible(regions):
+        _, _, matrix, lower, upper, _ = planner.mpc.problem(initial, reference, regions)
+        below, above = np.isfinite(lower), np.isfinite(upper)
+        result = linprog(
+            np.zeros(45), A_ub=np.vstack((matrix[above], -matrix[below])),
+            b_ub=np.r_[upper[above], -lower[below]],
+            bounds=[(None, None)] * 45, method="highs",
+        )
+        return result.success
+
+    assert not feasible([first] * 3 + [second] * 12)
+    assert feasible(schedule)
+    moving = state.copy()
+    moving[4] = 25
+    _, _, fast_schedule = planner.context(moving)
+    assert next(i for i, region in enumerate(fast_schedule) if np.array_equal(region, second)) < switch
+
+
 @pytest.mark.parametrize('resolution,radius', [(.05, .3), (.05, .31), (.1, .4), (.3, .6), (.1, 0)])
 def test_fast_inflation_preserves_every_occupied_cell(resolution, radius):
     rng = np.random.default_rng(42)

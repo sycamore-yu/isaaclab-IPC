@@ -380,6 +380,27 @@ class Planner:
                     first = max(near, int(first - 0.2 / spacing))
                     break
             mpc_goal = (first - near) // stride + initial + 1
+            if frontend and initial == 0 and mpc_goal < n - 1:
+                # The next SFC must not become mandatory before the drone can
+                # reach the end of the current corridor under acceleration bounds.
+                displacement = path[first] - position
+                distance = np.linalg.norm(displacement)
+                if distance > 0:
+                    direction = displacement / distance
+                    limits = self.cfg.params["mpc"]
+                    max_acc = np.array([
+                        limits[f"a{axis}_{'max' if direction[i] >= 0 else 'min'}"]
+                        for i, axis in enumerate("xyz")
+                    ])
+                    along_acc = max(0.0, float(direction @ max_acc))
+                    along_speed = float(direction @ state[3:6])
+                    for stage in range(mpc_goal + 1, n):
+                        t = (stage + 1) * self.mpc.dt
+                        if along_speed * t + 0.5 * along_acc * t * t >= distance:
+                            mpc_goal = stage - 1
+                            break
+                    else:
+                        mpc_goal = n - 1
             for i in range(initial, min(mpc_goal + 1, n)):
                 schedule[i] = planes
             end = min(first + (n - mpc_goal) * stride, len(path) - 1)

@@ -679,6 +679,18 @@ SUPER dense 即使使用同步仿真时间仍在高于地面的 PCD 障碍处碰
 
 新检查点通过 `rl/actor.py:MPCActor` 直接进入 TurboMPC。代码不再包含另一个独立的 PyTorch ADMM 生产实现。两条策略都要求 CUDA 原生扩展，使用 `scripts/marsim_ros2_env.sh` 设置本项目的默认构建路径。旧运行记录仍保留原始求解器版本与负结果，不重命名历史数据。
 
+### high_speed 首次 IPC 求解：SFC 时间分配
+
+2026-11-05 使用固定成本 IPC、原始 MARSIM LiDAR、Flightmare dynamic 和 100 Hz 仿真时间重新获取首个真实规划问题。原时序在预测第 4 步强制进入第二个 PathCover 走廊，而初始机体几乎静止。保留全部 jerk、速度、加速度与 SFC 约束时，HiGHS 判断原 QP 不可行，OSQP 返回 `primal infeasible`（72 ms）。原生 TurboMPC 求解 14.41 s 后达到 16384 次 ADMM 迭代上限；前端耗时 328.82 ms。
+
+现在以当前位置和沿路径方向的实际速度、加速度硬界估算可达到上一走廊终点的最早预测时刻，再决定第二走廊的生效步数。该规则只改变 SFC 时间分配，保留原始走廊平面、状态硬界及预测模型；达到该必要可达条件不等于保证任意后续 MPC 问题都可行。
+
+修正后的真实首个 QP 将走廊分配从前 3／后 12 步改成前 6／后 9 步。HiGHS 验证新的原问题可行；TurboMPC 在 2.05 s 内成功求解，ADMM 迭代 7600 次。6 s MARSIM 探针取得 0 次 QP 失败、5.84 m 飞行距离、5.99 m/s 最高速度、0.667 m 最小净空，控制／MPC 仿真频率为 100／10 Hz。原始实测输入和两次监控证据分别保存在 `results/ipc-two-pipelines-20261105/first-fixed-high-speed/` 和 `fixed-high-speed-timed-sfc-6s/`；首次问题的独立 OSQP/HiGHS 检查结果保存在 `first-fixed-qporacle.npz`。
+
+同一修正完成了 **120 s 仿真时间上限内的完整 high_speed 正式任务**：去程航点在 26.61 s 到达，返程在 42.06 s 到达，最终结果为 **success、2/2 航点、无碰撞**。总航程 200.955 m，最高实际速度 11.539 m/s，最小完整 PCD 净空 0.3687 m。累计 1 次 QP 求解失败、3 次计划重锚拒绝，均由原有控制和恢复逻辑处理。控制频率 100 Hz 仿真时间、MPC 频率 10 Hz 仿真时间；421 帧 LiDAR 时间戳匹配渲染位姿、4207 次物理状态采样的时间间隔均为 0.01 s。
+
+性能仍是下一阶段工作：完整任务墙钟耗时 460.53 s，实时因子 0.0913；QP 求解延迟 P50/P95 为 0.712/2.078 s，最长一次 41.868 s，发生于仿真时间 22.69 s（内部 ADMM 达到 16384 次迭代上限）。因此，**仿真时间闭环成功与墙钟实时性能是两项不同结论**。正式原始记录在 `results/ipc-two-pipelines-20261105/fixed-high-speed-timed-sfc-full/`。本次运行的 109 个源码及 4 个可执行文件哈希均与被测代码一致。
+
 ### 重构后的运行检查
 
 学习成本 AC-MPC 使用迁移后的检查点，在 high_speed 动态模式运行 6 s 仿真时间：601 次里程计采样（100 Hz）、301 次有效控制回调（100 Hz）、31 次 MPC 更新（10 Hz），QP 失败 0 次。结果：`results/ipc-two-pipelines-20261104/probe-acmpc-eager/`。6 s 是接口探针的截止时间，不属于完整任务超时评测。
