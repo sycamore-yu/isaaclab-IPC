@@ -251,6 +251,7 @@ def main(args=None):
     from nav_msgs.msg import Odometry
     from rclpy.node import Node
     from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
+    from rclpy.time import Time
     from sensor_msgs.msg import PointCloud2
     from sensor_msgs_py.point_cloud2 import read_points_numpy
     from std_msgs.msg import String, UInt64
@@ -364,8 +365,6 @@ def main(args=None):
 
         def on_sim_tick(self, tick):
             expected_ns = tick * 10_000_000
-            if self.get_clock().now().nanoseconds != expected_ns:
-                raise RuntimeError(f"ROS simulation clock differs from control tick {tick}")
             if tick % 10 == 0 and self.state is not None and self.have_cloud and self.have_goal:
                 if self.worker.busy:
                     raise RuntimeError("Previous lockstep MPC solve still active")
@@ -382,7 +381,7 @@ def main(args=None):
                     sleep(0.002)
                 self.completed_sync = completed
             prior = self.controls
-            self.control()
+            self.control(stamp_ns=expected_ns)
             self.sim_done_pub.publish(UInt64(data=(tick << 1) | int(self.controls > prior)))
 
         @staticmethod
@@ -428,7 +427,7 @@ def main(args=None):
             self.have_goal = True
             self.get_logger().info(f"Mission goal: {goal.tolist()}")
 
-        def control(self):
+        def control(self, stamp_ns=None):
             started = perf_counter()
             completed = self.completed_sync if self.options["simulated_time"] else self.worker.poll()
             self.completed_sync = None
@@ -438,7 +437,7 @@ def main(args=None):
                 return
             interval = None if self.last_tick is None else 1000 * (started - self.last_tick)
             self.last_tick = started
-            stamp = self.get_clock().now()
+            stamp = Time(nanoseconds=stamp_ns) if stamp_ns is not None else self.get_clock().now()
             execution_state = self.state
             if self.options["execution"] == "ideal":
                 # Advance the previous command first. The gate must check the
