@@ -36,16 +36,50 @@ def rate_targets(
     torque = inertia * 45.0 * (desired - omega)
     collective = wp.clamp(command[i, 0] * mass, 0.0, 4.0 * max_thrust)
     baseline = collective * 0.25
-    scale = 1.0
+    requested = wp.vec4(0.0)
+    feasible = True
     for j in range(4):
         delta = inverse[j, 1] * torque[0] + inverse[j, 2] * torque[1] + inverse[j, 3] * torque[2]
-        if delta > 0.0:
-            scale = wp.min(scale, (max_thrust - baseline) / delta)
-        elif delta < 0.0:
-            scale = wp.min(scale, baseline / (-delta))
-    for j in range(4):
-        delta = inverse[j, 1] * torque[0] + inverse[j, 2] * torque[1] + inverse[j, 3] * torque[2]
-        target[i, j] = wp.clamp(baseline + wp.clamp(scale, 0.0, 1.0) * delta, 0.0, max_thrust)
+        requested[j] = baseline + delta
+        if requested[j] < 0.0 or requested[j] > max_thrust:
+            feasible = False
+    if feasible:
+        # Preserve the existing feasible allocation, including float32 rounding.
+        for j in range(4):
+            target[i, j] = requested[j]
+    else:
+        # f_j = baseline + s*rp_j + n_j*yaw.  Each rotor gives a lower
+        # and upper affine yaw bound.  Their pairwise intersections give
+        # the largest feasible common roll/pitch scale 0 <= s <= 1.
+        rp = wp.vec4(0.0)
+        lower = wp.vec4(0.0)
+        upper = wp.vec4(0.0)
+        slope = wp.vec4(0.0)
+        for j in range(4):
+            rp[j] = inverse[j, 1] * torque[0] + inverse[j, 2] * torque[1]
+            n = inverse[j, 3]
+            slope[j] = -rp[j] / n
+            if n > 0.0:
+                lower[j] = -baseline / n
+                upper[j] = (max_thrust - baseline) / n
+            else:
+                lower[j] = (max_thrust - baseline) / n
+                upper[j] = -baseline / n
+        scale = 1.0
+        for j in range(4):
+            for k in range(4):
+                coefficient = slope[j] - slope[k]
+                if coefficient > 0.0:
+                    scale = wp.min(scale, (upper[k] - lower[j]) / coefficient)
+        scale = wp.clamp(scale, 0.0, 1.0)
+        yaw_lower = lower[0] + scale * slope[0]
+        yaw_upper = upper[0] + scale * slope[0]
+        for j in range(1, 4):
+            yaw_lower = wp.max(yaw_lower, lower[j] + scale * slope[j])
+            yaw_upper = wp.min(yaw_upper, upper[j] + scale * slope[j])
+        yaw = wp.min(wp.max(torque[2], yaw_lower), yaw_upper)
+        for j in range(4):
+            target[i, j] = wp.clamp(baseline + scale * rp[j] + inverse[j, 3] * yaw, 0.0, max_thrust)
 
 
 @wp.kernel

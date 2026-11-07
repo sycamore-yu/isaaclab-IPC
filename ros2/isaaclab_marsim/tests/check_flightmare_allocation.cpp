@@ -7,8 +7,11 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <vector>
+
+#include <Eigen/LU>
 
 #include "flightlib/objects/quadrotor.hpp"
 
@@ -16,6 +19,57 @@ using namespace flightlib;
 
 void require(bool condition, const char* message) {
   if (!condition) throw std::runtime_error(message);
+}
+
+struct AllocationOracle {
+  double scale = -std::numeric_limits<double>::infinity();
+  double yaw_lower = 0;
+  double yaw_upper = 0;
+};
+
+AllocationOracle vertexOracle(const Matrix<4, 4>& allocation,
+                              const Vector<4>& requested, double low, double high) {
+  // Independent LP vertices in [f0,f1,f2,f3,s]. Three equalities preserve
+  // collective and impose proportional RP. Two active variable bounds fix
+  // each vertex. This does not use the allocator's affine yaw intersections.
+  const auto B = allocation.cast<double>().eval();
+  const auto wrench = requested.cast<double>().eval();
+  Eigen::Matrix<double, 5, 5> system = Eigen::Matrix<double, 5, 5>::Zero();
+  system.topLeftCorner<3, 4>() = B.topRows<3>();
+  system(1, 4) = -wrench[1];
+  system(2, 4) = -wrench[2];
+  Eigen::Matrix<double, 5, 1> rhs = Eigen::Matrix<double, 5, 1>::Zero();
+  rhs[0] = wrench[0];
+  AllocationOracle answer;
+  for (int first = 0; first < 5; ++first) {
+    for (int second = first + 1; second < 5; ++second) {
+      system.row(3).setZero(); system(3, first) = 1;
+      system.row(4).setZero(); system(4, second) = 1;
+      const Eigen::FullPivLU<Eigen::Matrix<double, 5, 5>> factor(system);
+      if (!factor.isInvertible()) continue;
+      for (int first_upper = 0; first_upper < 2; ++first_upper) {
+        for (int second_upper = 0; second_upper < 2; ++second_upper) {
+          rhs[3] = first == 4 ? first_upper : (first_upper ? high : low);
+          rhs[4] = second == 4 ? second_upper : (second_upper ? high : low);
+          const auto point = factor.solve(rhs).eval();
+          if ((point.head<4>().array() < low - 1e-8).any() ||
+              (point.head<4>().array() > high + 1e-8).any() ||
+              point[4] < -1e-8 || point[4] > 1 + 1e-8 ||
+              (system * point - rhs).cwiseAbs().maxCoeff() > 1e-8) continue;
+          const double scale = std::clamp(point[4], 0.0, 1.0);
+          const double yaw = B.row(3).dot(point.head<4>());
+          if (scale > answer.scale + 1e-9) {
+            answer = {scale, yaw, yaw};
+          } else if (std::abs(scale - answer.scale) <= 1e-9) {
+            answer.yaw_lower = std::min(answer.yaw_lower, yaw);
+            answer.yaw_upper = std::max(answer.yaw_upper, yaw);
+          }
+        }
+      }
+    }
+  }
+  require(std::isfinite(answer.scale), "Independent allocation LP has no vertex");
+  return answer;
 }
 
 int main() {
@@ -45,7 +99,8 @@ int main() {
     const Scalar low = dynamics.collective_thrust_min() / 4;
     const Scalar high = dynamics.collective_thrust_max() / 4;
     Scalar max_collective_error = 0, max_feasible_error = 0;
-    Scalar max_torque_projection_error = 0, max_zero_torque_error = 0;
+    Scalar max_rp_projection_error = 0, max_zero_torque_error = 0;
+    double max_rp_optimality_error = 0, max_yaw_optimality_error = 0;
     int cases = 0, feasible_cases = 0, saturated_cases = 0, boundary_cases = 0;
     const std::vector<Scalar> rates{-10, -3, -0.1, 0, 0.1, 3, 10};
     for (int level = 0; level <= 10; ++level) {
@@ -67,24 +122,25 @@ int main() {
 
         if ((original.array() >= low).all() && (original.array() <= high).all()) {
           max_feasible_error = std::max(max_feasible_error, (actual - original).cwiseAbs().maxCoeff());
+          require((actual.array() == original.array()).all(), "Feasible native allocation changed bits");
           ++feasible_cases;
         } else {
-          // Maximal uniform torque scaling reaches a rotor bound.
+          // A lexicographically optimal saturated allocation reaches a rotor bound.
           const Scalar distance = std::min(actual.minCoeff() - low, high - actual.maxCoeff());
           require(distance <= force_tolerance, "Saturated allocation left unused torque authority");
           ++saturated_cases;
         }
+        const AllocationOracle oracle = vertexOracle(allocation, requested, low, high);
+        const auto rp = torque.head<2>().eval();
+        const auto achieved_rp = achieved.segment<2>(1).eval();
+        const Scalar scale = rp.squaredNorm() == 0 ? 1 : achieved_rp.dot(rp) / rp.squaredNorm();
+        max_rp_projection_error = std::max(max_rp_projection_error, (achieved_rp - scale * rp).norm());
+        max_rp_optimality_error = std::max(max_rp_optimality_error, std::abs(double(scale) - oracle.scale));
+        const double expected_yaw = std::clamp(double(torque.z()), oracle.yaw_lower, oracle.yaw_upper);
+        max_yaw_optimality_error = std::max(max_yaw_optimality_error, std::abs(double(achieved[3]) - expected_yaw));
         if (torque.squaredNorm() == 0) {
           max_zero_torque_error = std::max(max_zero_torque_error,
               (actual - Vector<4>::Constant(requested[0] / 4)).cwiseAbs().maxCoeff());
-        } else {
-          const Vector<3> achieved_torque = achieved.tail<3>();
-          // Distance to the segment [0, requested torque] uses a physical
-          // absolute tolerance, including near-zero float32 torques.
-          const Scalar scale = std::clamp(achieved_torque.dot(torque) / torque.squaredNorm(),
-                                          Scalar(0), Scalar(1));
-          max_torque_projection_error = std::max(max_torque_projection_error,
-              (achieved_torque - scale * torque).norm());
         }
         if (level == 0 || level == 10) {
           require(achieved.tail<3>().norm() <= torque_tolerance,
@@ -96,7 +152,9 @@ int main() {
     }
     require(feasible_cases > 0 && saturated_cases > 0, "Missing feasible/saturated coverage");
     require(max_feasible_error < 1e-6, "A feasible native allocation was changed");
-    require(max_torque_projection_error <= torque_tolerance, "Saturation changed torque direction or magnitude");
+    require(max_rp_projection_error <= torque_tolerance, "Saturation changed roll/pitch direction");
+    require(max_rp_optimality_error <= 2e-5, "Roll/pitch authority is not LP-optimal");
+    require(max_yaw_optimality_error <= torque_tolerance, "Yaw does not use the closest feasible residual torque");
     require(max_zero_torque_error <= force_tolerance, "Zero torque did not allocate equal forces");
 
     // Dense V15, command held during (20.99,21.09]. Initial omega is explicitly
@@ -108,9 +166,6 @@ int main() {
     const Vector<3> measured_final_omega(-2.8802878856658936, -1.2888009548187256, -1.4847525358200073);
     const Scalar frozen_total = mass * frozen.collective_thrust;
     const Vector<4> frozen_initial = quad.runFlightCtl(0.0025, initial_omega, frozen);
-    const Vector<4> expected(0, 2.1647642535302998, 2.472198434676831, 0.07958706593563036);
-    require((frozen_initial - expected).cwiseAbs().maxCoeff() <= force_tolerance,
-            "Frozen collective-preserving allocation differs from independent double algebra");
     require(std::abs(frozen_initial.sum() - frozen_total) <= force_tolerance,
             "Frozen initial allocation raised collective thrust");
     const Vector<4> frozen_final = quad.runFlightCtl(0.0025, measured_final_omega, frozen);
@@ -118,6 +173,15 @@ int main() {
     const Vector<4> final_request(frozen_total, final_torque.x(), final_torque.y(), final_torque.z());
     require((frozen_final - inverse * final_request).cwiseAbs().maxCoeff() <= force_tolerance,
             "Frozen feasible final allocation was changed");
+
+    // Dense V19: direct endpoint omega, with the preceding held CTBR command.
+    // Static targets, not a replay of the unrecorded rotor-state history.
+    const Command dense(0, Scalar(5.861665964126587 / 0.75), Vector<3>(3, 3, 1.4688522815704346));
+    const Vector<3> dense_omega(-0.1414310336112976, 0.07296504825353622, 0.22537021338939667);
+    const Vector<4> dense_target = quad.runFlightCtl(0.0025, dense_omega, dense);
+    const Vector<4> dense_expected(0.2692468774237464, 0, 0.07429408670284054, 5.518125);
+    require((dense_target - dense_expected).cwiseAbs().maxCoeff() <= force_tolerance,
+            "Dense V19 allocation differs from independent double LP result");
 
     // Confirm that the existing first-order motor lag is still active.
     const Vector<4> old_forces(0.5, 1.0, 1.5, 2.0);
@@ -171,7 +235,9 @@ int main() {
               << ",\"torque_tolerance_Nm\":" << torque_tolerance
               << ",\"max_collective_force_error_N\":" << max_collective_error
               << ",\"max_feasible_force_error_N\":" << max_feasible_error
-              << ",\"max_torque_projection_error_Nm\":" << max_torque_projection_error
+              << ",\"max_rp_projection_error_Nm\":" << max_rp_projection_error
+              << ",\"max_rp_optimality_error\":" << max_rp_optimality_error
+              << ",\"max_yaw_optimality_error_Nm\":" << max_yaw_optimality_error
               << ",\"max_zero_torque_force_error_N\":" << max_zero_torque_error
               << ",\"frozen_requested_collective_N\":" << frozen_total
               << ",\"frozen_allocated_rotor_forces_N\":[" << frozen_initial[0] << ',' << frozen_initial[1]

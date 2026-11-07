@@ -85,10 +85,18 @@ online execution-trajectory acceptance from the new route. Solver residuals,
 hard SFC constraints and independent collision evaluation remain measurable.
 Failure reports must not be turned into successful navigation statistics.
 
-Flightmare retains feasible requested collective force during rotor saturation
-and uniformly scales the torque vector. Feasible native allocations remain
-unchanged. Motor lag and dynamic integration remain active; Newton's additional
-motor lag compensation still differs from Flightmare's exponential response.
+Newton and Flightmare retain feasible requested collective force during rotor
+saturation. First maximize the common roll/pitch torque scale, then select the
+closest feasible yaw torque. Solve the four-rotor affine bounds directly; do
+not invoke another online optimizer. Yaw may reverse when maximal roll/pitch
+requires it. Feasible native allocations remain unchanged. This replaces uniform
+torque scaling, which allowed a weak yaw axis to suppress roll/pitch authority.
+Motor lag and dynamic integration remain active; Newton's additional motor lag
+compensation still differs from Flightmare's exponential response. All matched
+A0/A1/A2 runs must identify the same executor contract. The priority principle
+also appears in the [PX4 mixer documentation](https://px4.github.io/Firmware-Doxygen/d4/db1/_multirotor_mixer_8hpp_source.html);
+this implementation keeps collective exact and does not copy airmode thrust
+adjustment.
 
 Convert inflated occupancy into search cells on the integer voxel lattice.
 Only positive-volume overlap occupies a coarse cell. Recognize commensurate

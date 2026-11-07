@@ -14,7 +14,6 @@ import pytest
 import torch
 from rsl_rl.utils.logger import Logger
 
-from isaaclab_ipc.tasks.mpc_env import IPCMPCEnv
 from isaaclab_ipc.tasks.rewards import NavigationRewardCfg
 
 _spec = importlib.util.spec_from_file_location("acmpc_cli_audit", Path(__file__).parents[1] / "scripts/acmpc.py")
@@ -134,8 +133,12 @@ def test_actual_phase_counts_and_new_planners_are_observed_without_rebinding(set
 @pytest.mark.parametrize("phase", ["update", "reload"])
 @pytest.mark.parametrize("name", TrainingAudit.mutations)
 def test_replay_rejects_each_mutation_before_original_and_keeps_failure_report(setup, phase, name):
+    from isaaclab_ipc.pathcover_native import NativePathCoverFrontend
+
     s = setup
     world = s.env.unwrapped
+    if name == "native_frontend_plan":
+        world.navigation = object()
     calls = {
         "record_mpc_result": lambda: world.record_mpc_result({}),
         "env_step": lambda: s.env.step(None),
@@ -143,8 +146,11 @@ def test_replay_rejects_each_mutation_before_original_and_keeps_failure_report(s
         "planner_context": lambda: world.planner.context(3),
         "planner_update_cloud": lambda: world.planner.update_cloud([], [0, 0, 0]),
         "planner_consume_recovery": lambda: world.planner.consume_recovery(0, False),
+        # The phase guard rejects before the original method can use self.
+        "native_frontend_plan": lambda: NativePathCoverFrontend.plan(None, None, None, None),
     }
     original_context = Planner.context
+    original_native_plan = NativePathCoverFrontend.plan
     with pytest.raises(RuntimeError, match=f"forbids {name} during {phase}"), s.audit, s.audit.phase(phase):
         calls[name]()
     assert world.records == [] and world.resets == 0 and s.env.steps == 0
@@ -153,6 +159,7 @@ def test_replay_rejects_each_mutation_before_original_and_keeps_failure_report(s
     assert not report["passed"] and len(report["violations"]) == 1
     assert report["counts"][phase][name] == 1
     assert Planner.context is original_context
+    assert NativePathCoverFrontend.plan is original_native_plan
     assert not s.actor._forward_pre_hooks
 
 
@@ -484,6 +491,8 @@ def test_existing_replay_artifact_rejects_entry_without_overwrite_or_hooks(tmp_p
 
 
 def test_installed_rsl_logger_keeps_actual_reward_history_for_each_step():
+    from isaaclab_ipc.tasks.mpc_env import IPCMPCEnv
+
     positions = torch.tensor([[0.1, 0.0, 0.0]])
     previous_distance = torch.ones(1)
     world = SimpleNamespace(

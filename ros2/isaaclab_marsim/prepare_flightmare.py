@@ -47,9 +47,9 @@ def prepare(source: Path, target: Path) -> Path:
     # Upstream normalizes the old quaternion immediately before overwriting it.
     replace("src/objects/quadrotor.cpp", "state_.qx /= state_.qx.norm();",
             "next_state.qx /= next_state.qx.norm();")
-    # Match Newton's collective-first contract: retain feasible allocations,
-    # otherwise scale the complete torque vector within the rotor-force box.
-    # Saturation must not raise collective thrust to recover attitude authority.
+    # Match Newton: preserve collective, maximize a common roll/pitch scale,
+    # then use the remaining yaw interval.  Feasible native allocations stay
+    # unchanged. Saturation never raises collective to recover attitude authority.
     replace("src/objects/quadrotor.cpp",
             "  const Vector<4> motor_thrusts_des = B_allocation_inv_ * thrust_and_torque;\n\n"
             "  return dynamics_.clampThrust(motor_thrusts_des);",
@@ -58,18 +58,34 @@ def prepare(source: Path, target: Path) -> Path:
             "  const Scalar hi = dynamics_.collective_thrust_max() / 4;\n"
             "  if ((motor_thrusts_des.array() >= lo).all() &&\n"
             "      (motor_thrusts_des.array() <= hi).all()) return motor_thrusts_des;\n\n"
-            "  // The zero-sum torque component changes attitude, not collective.\n"
+            "  // f = collective + scale*roll_pitch + yaw_direction*yaw_torque.\n"
             "  const Scalar collective = std::clamp(force / 4, lo, hi);\n"
-            "  const Vector<4> delta = B_allocation_inv_ *\n"
-            "    Vector<4>(0, body_torque_des.x(), body_torque_des.y(), body_torque_des.z());\n"
+            "  const Vector<4> roll_pitch = B_allocation_inv_ *\n"
+            "    Vector<4>(0, body_torque_des.x(), body_torque_des.y(), 0);\n"
+            "  const Vector<4> yaw_direction = B_allocation_inv_.col(3);\n"
+            "  Vector<4> lower, upper, slope;\n"
+            "  for (int i = 0; i < 4; ++i) {\n"
+            "    const Scalar n = yaw_direction[i];\n"
+            "    slope[i] = -roll_pitch[i] / n;\n"
+            "    lower[i] = (n > 0 ? lo - collective : hi - collective) / n;\n"
+            "    upper[i] = (n > 0 ? hi - collective : lo - collective) / n;\n"
+            "  }\n"
+            "  // At scale=0 the rotor box always admits yaw=0. Pairwise lower\n"
+            "  // <= upper inequalities therefore give only upper scale bounds.\n"
             "  Scalar scale = 1;\n"
             "  for (int i = 0; i < 4; ++i) {\n"
-            "    if (delta[i] > 0)\n"
-            "      scale = std::min(scale, (hi - collective) / delta[i]);\n"
-            "    else if (delta[i] < 0)\n"
-            "      scale = std::min(scale, (lo - collective) / delta[i]);\n"
+            "    for (int j = 0; j < 4; ++j) {\n"
+            "      const Scalar coefficient = slope[i] - slope[j];\n"
+            "      if (coefficient > 0)\n"
+            "        scale = std::min(scale, (upper[j] - lower[i]) / coefficient);\n"
+            "    }\n"
             "  }\n"
-            "  const Vector<4> thrust = Vector<4>::Constant(collective) + scale * delta;\n"
+            "  scale = std::clamp(scale, Scalar(0), Scalar(1));\n"
+            "  const Scalar yaw_lower = (lower + scale * slope).maxCoeff();\n"
+            "  const Scalar yaw_upper = (upper + scale * slope).minCoeff();\n"
+            "  const Scalar yaw = std::min(std::max(body_torque_des.z(), yaw_lower), yaw_upper);\n"
+            "  const Vector<4> thrust = Vector<4>::Constant(collective) +\n"
+            "    scale * roll_pitch + yaw_direction * yaw;\n"
             "  return dynamics_.clampThrust(thrust);")
     replace("include/flightlib/dynamics/quadrotor_dynamics.hpp", "  bool setMass(const Scalar mass);",
             "  bool setInertiaDiagonal(const Vector<3>& diagonal) {\n"
@@ -102,7 +118,7 @@ def prepare(source: Path, target: Path) -> Path:
         "source": str(source), "revision": REVISION, "license": "MIT",
         "patch": "isaaclab_marsim.patch",
         "patch_sha256": hashlib.sha256(patch.encode()).hexdigest(),
-        "allocation": "collective_preserving_uniform_torque_scale_v1",
+        "allocation": "collective_preserving_rp_then_yaw_v2",
     }, indent=2) + "\n")
     return target
 
