@@ -70,7 +70,7 @@ public:
   vec_Vecf<Dim> getAllSet() const;
   /// Get the potential cloud
   vec_Vec3f getCloud(double h_max = 1);
-  /// Get the searching region
+  /// Get the searching region; global planning returns every installed map cell.
   vec_Vecf<Dim> getSearchRegion();
   /// Get the internal map util
   std::shared_ptr<JPS::MapUtil<Dim>> getMapUtil();
@@ -98,6 +98,8 @@ public:
 
   /// Compute the optimal path
   bool computePath(const Vecf<Dim>& start, const Vecf<Dim>& goal, const vec_Vecf<Dim>& path);
+  /// Search the complete installed map with the same legal graph and costs, without a prior path.
+  bool computeGlobalPath(const Vecf<Dim>& start, const Vecf<Dim>& goal);
 protected:
   /// Create the mask for potential distance field
   vec_E<std::pair<Veci<Dim>, int8_t>> createMask(int pow, double resolution);

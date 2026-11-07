@@ -1134,6 +1134,7 @@ namespace trajectory_server
 #include "gcopter/geo_utils.hpp"
 #include "gcopter/minco.hpp"
 #include "gcopter/flatness.hpp"
+#include <chrono>
 #include "gcopter/lbfgs.hpp"
 #include "gcopter/trajectory.hpp"
 
@@ -1193,10 +1194,16 @@ namespace trajectory_server
             }
         };
 
+        struct TimeInitialization {
+            int status = 0, evaluations = 0;
+            double scale = 1.0, elapsedMs = 0.0;
+        };
+
     private:
         typename Traits::Minco minco;
         flatness::FlatnessMap flatmap;
         ConstraintMetrics constraintMetrics;
+        TimeInitialization timeInitialization;
         double positionSmoothEps = 0.01;
 
         double rho;
@@ -1266,6 +1273,64 @@ namespace trajectory_server
         Eigen::VectorXd partialGradByTimes;
 
     private:
+        struct TimeScaleContext {
+            GcopterSolver *solver;
+            const Eigen::VectorXd *baseTimes;
+            int evaluations = 0;
+        };
+
+        static inline double energyTimeScale(void *context,
+                                             const Eigen::VectorXd &logScale,
+                                             Eigen::VectorXd &gradient)
+        {
+            auto &data = *static_cast<TimeScaleContext *>(context);
+            auto &obj = *data.solver;
+            obj.times = *data.baseTimes * std::exp(logScale(0));
+            obj.minco.setParameters(obj.points, obj.times);
+            double energy;
+            obj.minco.getEnergy(energy);
+            obj.minco.getEnergyPartialGradByCoeffs(obj.partialGradByCoeffs);
+            obj.minco.getEnergyPartialGradByTimes(obj.partialGradByTimes);
+            obj.minco.propogateGrad(obj.partialGradByCoeffs, obj.partialGradByTimes,
+                                   obj.gradByPoints, obj.gradByTimes);
+            const double timeCost = obj.rho * obj.times.sum();
+            const double cost = energy + timeCost;
+            gradient(0) = (obj.gradByTimes.dot(obj.times) + timeCost) / cost;
+            ++data.evaluations;
+            return std::log(cost);
+        }
+
+        inline int initializeTimeScale()
+        {
+            // Preserve waypoints and duration ratios. The scalar objective uses
+            // log(MINCO energy + existing time weight), without flatness or
+            // constraint penalties. This preserves the positive objective's
+            // minima and gives the scalar gradient a relative stopping scale.
+            // It precedes one full-variable solve.
+            const Eigen::VectorXd baseTimes = times;
+            TimeScaleContext context{this, &baseTimes};
+            Eigen::VectorXd logScale = Eigen::VectorXd::Zero(1);
+            lbfgs::lbfgs_parameter_t parameters;
+            parameters.mem_size = 8;
+            parameters.past = 0;
+            parameters.g_epsilon = 1e-5;
+            parameters.max_iterations = 64;
+            parameters.min_step = 1e-32;
+            const auto begin = std::chrono::steady_clock::now();
+            double cost;
+            timeInitialization.status = lbfgs::lbfgs_optimize(logScale, cost, &GcopterSolver::energyTimeScale,
+                nullptr, nullptr, &context, parameters);
+            timeInitialization.elapsedMs = std::chrono::duration<double, std::milli>(
+                std::chrono::steady_clock::now() - begin).count();
+            timeInitialization.evaluations = context.evaluations;
+            timeInitialization.scale = std::exp(logScale(0));
+            if (!std::isfinite(cost) || !std::isfinite(timeInitialization.scale))
+                timeInitialization.status = lbfgs::LBFGSERR_INVALID_FUNCVAL;
+            if (timeInitialization.status >= 0)
+                times = baseTimes * timeInitialization.scale;
+            return timeInitialization.status;
+        }
+
         static inline void forwardT(const Eigen::VectorXd &tau,
                                      Eigen::VectorXd &T)
         {
@@ -2211,6 +2276,7 @@ namespace trajectory_server
         inline const Eigen::VectorXi &getPiecePolytopeIndices() const { return hPolyIdx; }
         inline const Eigen::VectorXd &getTrialDurations() const { return times; }
         inline const ConstraintMetrics &getConstraintMetrics() const { return constraintMetrics; }
+        inline const TimeInitialization &getTimeInitialization() const { return timeInitialization; }
 
         // Position residuals have units of metres. Keep their smoothing width
         // separate from the upstream dynamic residual smoothing.
@@ -2240,6 +2306,12 @@ namespace trajectory_server
             Eigen::Map<Eigen::VectorXd> xi(x.data() + temporalDim, spatialDim);
 
             setInitial(shortPath, allocSpeed, pieceIdx, points, times);
+            const int initializationStatus = initializeTimeScale();
+            if (initializationStatus < 0) {
+                last_status_ = initializationStatus;
+                traj.clear();
+                return INFINITY;
+            }
             backwardT(times, tau);
             backwardP(points, vPolyIdx, vPolytopes, xi);
 

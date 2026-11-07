@@ -56,13 +56,14 @@ def benchmark_frontend_config(case, config, reference_speed=6.0):
     lower, upper = center - size / 2, center + size / 2
     lower[2] = max(0.0, mapping["virtual_ground_height"])
     upper[2] = mapping["virtual_ceil_height"]
+    physical_speed = min(case["planner"]["traj_opt"]["boundary"]["max_vel"],
+                         *config.velocity_upper, *(-value for value in config.velocity_lower))
     return PathCoverConfig(
         bounds_lower=tuple(lower), bounds_upper=tuple(upper),
         resolution=max(0.1, mapping["resolution"]),
         search_resolution=0.25 if mapping["resolution"] < 0.25 else None,
         robot_radius=case["planner"]["super_planner"]["robot_r"],
-        max_velocity=min(reference_speed, case["planner"]["traj_opt"]["boundary"]["max_vel"],
-                         min(config.velocity_upper)),
+        max_velocity=physical_speed, nominal_velocity=min(reference_speed, physical_speed),
         mass=config.mass, thrust_min=config.mass * config.specific_thrust_limits[0],
         thrust_max=config.mass * config.specific_thrust_limits[1],
         body_rate_max=min(config.body_rate_limits[:2]), body_yaw_rate_max=config.body_rate_limits[2],

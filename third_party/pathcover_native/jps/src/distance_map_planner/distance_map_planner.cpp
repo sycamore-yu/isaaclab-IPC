@@ -241,12 +241,13 @@ template <int Dim>
 vec_Vecf<Dim> DMPlanner<Dim>::getSearchRegion() {
   auto dim = map_util_->getDim();
   vec_Vecf<Dim> pts;
+  const bool global = search_region_.empty();
 
   if(Dim == 2) {
     for(int nx = 0; nx < dim(0); nx ++) {
       for(int ny = 0; ny < dim(1); ny ++) {
         int idx = nx + dim(0) * ny;
-        if(search_region_[idx])
+        if(global || search_region_[idx])
           pts.push_back(map_util_->intToFloat(Veci<Dim>(nx, ny)));
       }
     }
@@ -256,7 +257,7 @@ vec_Vecf<Dim> DMPlanner<Dim>::getSearchRegion() {
       for(int ny = 0; ny < dim(1); ny ++) {
         for(int nz = 0; nz < dim(2); nz ++) {
           int idx = nx + dim(0) * ny + dim(0) * dim(1) * nz;
-          if(search_region_[idx]) {
+          if(global || search_region_[idx]) {
             Veci<Dim> n;
             n << nx, ny, nz;
             pts.push_back(map_util_->intToFloat(n));
@@ -554,6 +555,12 @@ bool DMPlanner<Dim>::computePath(const Vecf<Dim>& start, const Vecf<Dim>& goal, 
   return plan(start, goal, eps_, cweight_);
 }
 
+template <int Dim>
+bool DMPlanner<Dim>::computeGlobalPath(const Vecf<Dim>& start, const Vecf<Dim>& goal) {
+  search_region_.clear();
+  prior_path_.clear();
+  return plan(start, goal, eps_, cweight_);
+}
 
 template class DMPlanner<2>;
 

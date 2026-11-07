@@ -201,10 +201,23 @@ def test_frontend_and_ctbr_share_physical_parameters():
     assert frontend.thrust_min == model.mass * model.specific_thrust_limits[0]
     assert frontend.body_yaw_rate_max == model.body_rate_limits[2]
     assert frontend.max_velocity == 4.0 and frontend.body_rate_max == 2.0
+    assert frontend.nominal_velocity == 4.0
+    default = pathcover_config_for_ctbr(model, {})
+    assert default.max_velocity == 10.0 and default.nominal_velocity == 6.0
     with pytest.raises(ValueError, match="mass"):
         pathcover_config_for_ctbr(model, {"mass": 0.75})
     with pytest.raises(ValueError, match="body_yaw_rate_max"):
         pathcover_config_for_ctbr(model, {"body_yaw_rate_max": 2.0})
+
+
+@pytest.mark.parametrize("benchmark, physical_speed", [("high_speed", 10.0), ("dense", 8.0)])
+def test_marsim_keeps_cruise_target_distinct_from_physical_speed(benchmark, physical_speed):
+    from isaaclab_ipc.benchmark_config import load_case
+    from isaaclab_ipc.ros_ctbr_policy import benchmark_frontend_config
+
+    frontend = benchmark_frontend_config(load_case(benchmark), CTBRConfig(), reference_speed=6.0)
+    assert frontend.max_velocity == physical_speed
+    assert frontend.nominal_velocity == 6.0
 
 
 def test_single_environment_snapshots_have_canonical_strides():

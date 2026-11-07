@@ -26,7 +26,7 @@ def serialized_problem(problem, config):
     values.extend([
         config.time_weight, config.safety_margin, config.pieces_per_polytope, config.integral_resolution,
         config.relative_tolerance, config.max_iterations,
-        config.max_velocity, config.body_rate_max, config.tilt_max, config.thrust_min,
+        config.native_options()["nominal_velocity"], config.body_rate_max, config.tilt_max, config.thrust_min,
         config.native_options()["thrust_max"], *config.penalty_weights,
         config.mass, config.gravity, 0.0, 0.0, 0.0, 0.001, config.position_penalty_smoothing_m,
     ])

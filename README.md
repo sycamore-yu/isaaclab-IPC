@@ -8,7 +8,9 @@
 | A1 | 完整原生 PathCover | 固定二次成本 | 同一 TurboMPC → 4D CTBR |
 | A2 | 与 A1 相同 | 逐节点学习成本 | 同一 TurboMPC → 4D CTBR |
 
-PathCover 原生前端依次执行 NanoVoxMap、JPS/DMP、RISP 和 GCOPTER/MINCO。它输出连续 PVA/yaw、轨迹段时间及有序 SFC。Actor 读取冻结的观测，用逐节点成本构造非线性 MPC；PyTorch 原生 TurboMPC 复用 CUDA/cuDSS 求解与反向传播。
+PathCover 原生前端依次执行 NanoVoxMap、全图 DMP、RISP 和 GCOPTER/MINCO。它输出连续 PVA/yaw、轨迹段时间及有序 SFC。Actor 读取冻结的观测，用逐节点成本构造非线性 MPC；PyTorch 原生 TurboMPC 复用 CUDA/cuDSS 求解与反向传播。
+
+原生 DMP 直接搜索完整可用网格。正式 Dense 失败快照表明，旧 JPS 引导区域内没有合法连接，完整网格中存在合法路径。上游 JPS 源码与完整链路对照继续保留。`search_radius` 仅用于该上游对照，生产 DMP 不裁剪引导区域。
 
 - **训练**：Isaac Lab 3 / Newton (MJWarp)，真实电机力、接触和 LiDAR。使用标准 RSL-RL PPO；Actor 学习成本，Critic 估计长期价值。
 - **正式闭环评测**：MARSIM + Flightmare，控制频率 100 Hz 仿真时间，MPC 以 10 Hz 仿真时间重规划。也保留可选墙钟模式，用于计算延迟测试。
@@ -81,8 +83,10 @@ export DISPLAY=:11
 
 原生 PathCover 默认名义参考速度为 6 m/s，与 Newton 训练一致。
 使用 `--reference-speed` 可显式调整，最终值仍受场景和 CTBR 速度界限制。
-优化器保留真实初始 PVA。若初速已超出名义值，速度验收界限为
-`max(名义速度, 初速) + 0.001 × 名义速度`；日志保留相对名义值的实际超额。
+`nominal_velocity` 控制速度成本，`max_velocity` 定义独立的物理参考上限。
+默认物理参考上限为 High-speed 10 m/s、Dense 8 m/s、Newton 10 m/s。
+这些值取自场景与 CTBR 速度界；优化器保留真实初始 PVA。
+日志分别记录名义速度超额和物理约束违反。
 控制周期与原始任务点保持独立配置。
 
 ## 验证

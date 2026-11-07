@@ -16,7 +16,6 @@
 #include "corridor/VoxelGrid.hpp"
 #include "nanovoxmap/nanovoxmap.hpp"
 #include "occupancy_inflation/point_cloud_inflater.h"
-#include "jps_planner/jps_planner.h"
 #include "distance_map_planner/distance_map_planner.h"
 #include "gcopter_solver.hpp"
 #include "pathcover_grid.h"
@@ -30,6 +29,7 @@ using Points = Eigen::Matrix<double, Eigen::Dynamic, 3, Eigen::RowMajor>;
 using Clock = std::chrono::steady_clock;
 using HPoly = Eigen::Matrix<double, Eigen::Dynamic, 4>;
 using Coefficients = Eigen::Matrix<double, 3, 6>;
+using TimeInitialization = trajectory_server::GcopterSolver<3>::TimeInitialization;
 // Explicit numerical feasibility allowance for the original, unit-normal SFC.
 // This does not change the 1e-6 m position-penalty smoothing or CTBR hard bounds.
 constexpr double kSfcFeasibilityToleranceM = 1e-4;
@@ -42,15 +42,24 @@ static double milliseconds(Clock::time_point start) {
     return std::chrono::duration<double, std::milli>(Clock::now() - start).count();
 }
 
-static double speedAcceptanceLimit(double nominal_limit, double initial_speed) {
-    return std::max(nominal_limit, initial_speed) + 1e-3 * nominal_limit;
+static double speedAcceptanceLimit(double physical_limit) {
+    return 1.001 * physical_limit;
+}
+
+static py::dict timeInitializationDict(const TimeInitialization &value) {
+    py::dict result;
+    result["status"] = value.status;
+    result["evaluations"] = value.evaluations;
+    result["scale"] = value.scale;
+    result["elapsed_ms"] = value.elapsedMs;
+    return result;
 }
 
 struct Options {
     Vec3 lower, upper;
-    double resolution, search_resolution, radius, radius_z, max_velocity, mass, gravity;
+    double resolution, search_resolution, radius, radius_z, max_velocity, nominal_velocity, mass, gravity;
     double thrust_min, thrust_max, body_rate_max, tilt_max;
-    double potential_radius, search_radius, dmp_heuristic_weight, time_weight, safety_margin;
+    double potential_radius, dmp_heuristic_weight, time_weight, safety_margin;
     double relative_tolerance, alpha, position_penalty_smoothing;
     int horizon, pieces_per_polytope, integral_resolution, max_iterations, num_threads;
     std::size_t cuda_min_grid_voxels;
@@ -65,6 +74,7 @@ struct Options {
         radius = values["robot_radius"].cast<double>();
         radius_z = values["robot_radius_z"].cast<double>();
         max_velocity = values["max_velocity"].cast<double>();
+        nominal_velocity = values["nominal_velocity"].cast<double>();
         mass = values["mass"].cast<double>();
         gravity = values["gravity"].cast<double>();
         thrust_min = values["thrust_min"].cast<double>();
@@ -72,7 +82,6 @@ struct Options {
         body_rate_max = values["body_rate_max"].cast<double>();
         tilt_max = values["tilt_max"].cast<double>();
         potential_radius = values["potential_radius"].cast<double>();
-        search_radius = values["search_radius"].cast<double>();
         dmp_heuristic_weight = values["dmp_heuristic_weight"].cast<double>();
         time_weight = values["time_weight"].cast<double>();
         safety_margin = values["safety_margin"].cast<double>();
@@ -107,9 +116,10 @@ struct PlanResult {
     Eigen::Matrix<double, 6, 1> constraint_metrics = Eigen::Matrix<double, 6, 1>::Zero();
     double cost = 0.0, search_ms = 0.0, corridor_ms = 0.0, trajectory_ms = 0.0;
     double jps_ms = 0.0, distance_map_ms = 0.0, dmp_ms = 0.0, dmp_cost = 0.0;
-    double initial_speed = 0.0, effective_speed_limit = 0.0;
+    double initial_speed = 0.0, speed_acceptance_limit = 0.0;
     int optimizer_status = 0;
     bool gpu_distance_map = false;
+    TimeInitialization time_initialization;
 };
 
 struct CloudReader {
@@ -133,6 +143,7 @@ struct OptimizationFailure {
     Eigen::VectorXd durations;
     Eigen::VectorXi corridor_indices;
     double cost = NAN;
+    TimeInitialization time_initialization;
 };
 
 class NativeFrontend {
@@ -140,7 +151,6 @@ class NativeFrontend {
     std::unique_ptr<NanoVoxMap::OccupancyMapd> map_;
     occupancy_inflation::PointCloudInflater inflater_;
     std::shared_ptr<JPS::VoxelMapUtil> grid_;
-    std::unique_ptr<JPSPlanner<3>> jps_;
     std::unique_ptr<DMPlanner<3>> dmp_;
 #ifdef OCCUPANCY_INFLATION_WITH_CUDA
     std::unique_ptr<pathcover_cuda::DistanceMap> distance_cuda_;
@@ -167,7 +177,9 @@ public:
         if (options_.resolution <= 0 || options_.search_resolution < options_.resolution
             || (options_.upper.array() <= options_.lower.array()).any()
             || options_.horizon < 1 || options_.pieces_per_polytope < 1
-            || options_.mass <= 0 || options_.max_velocity <= 0
+            || options_.mass <= 0 || !std::isfinite(options_.max_velocity) || options_.max_velocity <= 0
+            || !std::isfinite(options_.nominal_velocity) || options_.nominal_velocity <= 0
+            || options_.nominal_velocity > options_.max_velocity
             || options_.radius < 0 || options_.radius_z < 0
             || options_.thrust_max <= options_.thrust_min
             || !std::isfinite(options_.dmp_heuristic_weight) || options_.dmp_heuristic_weight < 0
@@ -228,11 +240,8 @@ public:
         }
         grid_ = std::make_shared<JPS::VoxelMapUtil>();
         grid_->setMap(grid_origin_, dimensions_, empty, options_.search_resolution);
-        jps_ = std::make_unique<JPSPlanner<3>>(false);
-        jps_->setMapUtil(grid_);
         dmp_ = std::make_unique<DMPlanner<3>>(false);
         dmp_->setPotentialRadius(Vec3::Constant(options_.potential_radius));
-        dmp_->setSearchRadius(Vec3::Constant(options_.search_radius));
         // Weight 0 is Dijkstra, 1 is admissible A*, and >1 explicitly trades
         // shortest-path optimality for fewer expansions on the same legal graph.
         dmp_->setEps(options_.dmp_heuristic_weight);
@@ -347,6 +356,7 @@ public:
         value["constraint_metrics_order"] = py::make_tuple(
             "sfc_max_m", "speed_max_m_s", "thrust_min_n", "thrust_max_n", "tilt_max_rad", "rate_max_rad_s");
         value["constraint_finite"] = failed_problem_->constraint_finite;
+        value["time_initialization"] = timeInitializationDict(failed_problem_->time_initialization);
         py::dict bounds;
         bounds["sfc_max_m"] = 0.0;
         bounds["speed_max_m_s"] = options_.max_velocity;
@@ -367,10 +377,11 @@ public:
         const double peak_speed = failed_problem_->constraint_metrics(1);
         py::dict speed;
         speed["initial_speed_m_s"] = initial_speed;
-        speed["nominal_limit_m_s"] = options_.max_velocity;
-        speed["effective_limit_m_s"] = speedAcceptanceLimit(options_.max_velocity, initial_speed);
+        speed["nominal_limit_m_s"] = options_.nominal_velocity;
+        speed["physical_limit_m_s"] = options_.max_velocity;
+        speed["acceptance_limit_m_s"] = speedAcceptanceLimit(options_.max_velocity);
         speed["peak_speed_m_s"] = peak_speed;
-        speed["nominal_excess_m_s"] = std::max(peak_speed - options_.max_velocity, 0.0);
+        speed["nominal_excess_m_s"] = std::max(peak_speed - options_.nominal_velocity, 0.0);
         value["speed_feasibility"] = std::move(speed);
         if (!failed_problem_->coefficients.empty()) {
             py::dict candidate;
@@ -414,19 +425,12 @@ public:
         }
         PlanResult result;
         result.initial_speed = velocity.norm();
-        result.effective_speed_limit = speedAcceptanceLimit(options_.max_velocity, result.initial_speed);
+        result.speed_acceptance_limit = speedAcceptanceLimit(options_.max_velocity);
         const auto search_begin = Clock::now();
         std::vector<Vec3> path;
         if ((goal - position).norm() < 1e-8) {
             path.push_back(position);
         } else {
-            const auto jps_begin = Clock::now();
-            if (map_dirty_) jps_->updateMap();
-            if (!jps_->plan(position, goal, 1.0, true)) {
-                throw PathCoverPlanningError("PathCover JPS did not find a path");
-            }
-            const auto jps_path = jps_->getRawPath();
-            result.jps_ms = milliseconds(jps_begin);
             const auto distance_map_begin = Clock::now();
             if (map_dirty_) {
 #ifdef OCCUPANCY_INFLATION_WITH_CUDA
@@ -442,8 +446,8 @@ public:
             map_dirty_ = false;
             result.distance_map_ms = milliseconds(distance_map_begin);
             const auto dmp_begin = Clock::now();
-            if (!dmp_->computePath(position, goal, jps_path)) {
-                throw PathCoverPlanningError("PathCover DMP did not find a refined path");
+            if (!dmp_->computeGlobalPath(position, goal)) {
+                throw PathCoverPlanningError("PathCover global DMP did not find a path");
             }
             result.dmp_ms = milliseconds(dmp_begin);
             result.dmp_cost = dmp_->getPathCost();
@@ -505,7 +509,7 @@ public:
             initial.col(2) = acceleration;
             terminal.col(0) = result.local_goal;
             Eigen::VectorXd bounds(5), physics(6);
-            bounds << options_.max_velocity, options_.body_rate_max, options_.tilt_max,
+            bounds << options_.nominal_velocity, options_.body_rate_max, options_.tilt_max,
                 options_.thrust_min, options_.thrust_max;
             physics << options_.mass, options_.gravity, 0.0, 0.0, 0.0, 1e-3;
             if (!solver.setup(options_.time_weight, initial, terminal, result.corridors,
@@ -519,12 +523,14 @@ public:
             Trajectory<5> trajectory;
             result.cost = solver.optimize(trajectory, options_.relative_tolerance, options_.max_iterations);
             result.optimizer_status = solver.getStatus();
+            result.time_initialization = solver.getTimeInitialization();
             const auto &quality = solver.getConstraintMetrics();
             result.constraint_metrics = quality.values();
             if (!std::isfinite(result.cost) || trajectory.getPieceNum() == 0) {
                 failed_problem_ = OptimizationFailure{
                     initial, terminal, result.corridors, result.optimizer_status, "optimize", solver.getTrialDurations(),
                     result.constraint_metrics, quality.finite};
+                failed_problem_->time_initialization = result.time_initialization;
                 throw PathCoverPlanningError(std::string("PathCover GCOPTER optimization failed: ")
                     + lbfgs::lbfgs_strerror(result.optimizer_status));
             }
@@ -533,12 +539,13 @@ public:
             // from its final objective evaluation, without resampling a trajectory.
             const auto &m = result.constraint_metrics;
             if (!quality.finite || !m.allFinite() || m(0) > kSfcFeasibilityToleranceM
-                || m(1) > result.effective_speed_limit
+                || m(1) > result.speed_acceptance_limit
                 || m(2) < options_.thrust_min - 1e-3 || m(3) > options_.thrust_max + 1e-3
                 || m(4) > options_.tilt_max + 1e-3 || m(5) > options_.body_rate_max + 1e-3) {
                 failed_problem_ = OptimizationFailure{
                     initial, terminal, result.corridors, result.optimizer_status, "feasibility", solver.getTrialDurations(),
                     result.constraint_metrics, quality.finite};
+                failed_problem_->time_initialization = result.time_initialization;
                 // Copy the existing rejected polynomial only on failure. This
                 // enables exact offline replay without another optimization.
                 failed_problem_->durations = trajectory.getDurations();
@@ -586,7 +593,10 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def_readonly("corridor_indices", &PlanResult::corridor_indices)
         .def_readonly("constraint_metrics", &PlanResult::constraint_metrics)
         .def_readonly("initial_speed", &PlanResult::initial_speed)
-        .def_readonly("effective_speed_limit", &PlanResult::effective_speed_limit)
+        .def_readonly("speed_acceptance_limit", &PlanResult::speed_acceptance_limit)
+        .def_property_readonly("time_initialization", [](const PlanResult &value) {
+            return timeInitializationDict(value.time_initialization);
+        })
         .def_readonly("cost", &PlanResult::cost)
         .def_readonly("optimizer_status", &PlanResult::optimizer_status)
         .def_readonly("gpu_distance_map", &PlanResult::gpu_distance_map)

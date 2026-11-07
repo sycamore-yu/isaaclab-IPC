@@ -8,7 +8,8 @@ Boost headers and Qhull. It does not link ROS, PCL or Gazebo.
 
 - `nanovoxmap/`: sparse log-odds mapping and its upstream CUDA insertion/ESDF kernels.
 - `occupancy_inflation/`: bit-grid obstacle dilation and its upstream CUDA backend.
-- `jps/`: upstream JPS3D and distance-map path refinement.
+- `jps/`: upstream JPS3D and distance-map search. Native V13 uses global DMP;
+  JPS and guide-region planning remain available to the independent upstream comparison.
 - `corridor/`: upstream RISP and sequential PathCover geometry.
 - `trajectory/`: PathCover's GCOPTER wrapper plus the vendored MINCO/flatness/L-BFGS code.
 
@@ -59,9 +60,8 @@ license; embedded geometry utilities retain their original notices.
    parent rather than being reopened under the weighted heuristic. Four frozen
    graphs measured cost increases of 0.085% to 8.94% against the prior weight-1.1
    reopening search. It retains the same nonnegative distance-potential
-   edge costs and search region. Set `dmp_heuristic_weight=0` for Dijkstra or 1
-   for admissible A*. The binding caches
-   JPS occupancy and DMP potential maps until occupancy changes.
+   edge costs. Set `dmp_heuristic_weight=0` for Dijkstra or 1
+   for admissible A*. The binding caches the DMP potential map until occupancy changes.
    The DMP heap uses strict cost ordering instead of a nontransitive epsilon
    comparator. Relaxations ignore differences below 1e-12 cost units and update
    only open nodes. Successor buffers are reused per query.
@@ -70,7 +70,7 @@ license; embedded geometry utilities retain their original notices.
    voxel AABBs that otherwise collapse RISP progress at a grid corner. It changes
    the feasible graph relative to upstream; path cost is not claimed unchanged.
    A constexpr direction mask reuses 26 occupancy probes per expanded 3D node;
-   target search-region restrictions remain unchanged. The heap comparator takes
+   The heap comparator takes
    shared pointers by const reference rather than copying them on comparisons.
    The closed-list search removed a measured 150,000-reopening tail. Two slow
    diagnostic maps had DMP p95 16.44 ms over 20 paired runs; Dense p95 increased
@@ -91,8 +91,9 @@ license; embedded geometry utilities retain their original notices.
    The coarse grid
    changes the discretized search problem, so its path/cost are not claimed
    equivalent to a finer search grid. The default preserves the mapping grid.
-9. GCOPTER starts from path-length / max(0.5 * maximum speed, measured initial
-   speed), replacing upstream's 3 * maximum speed allocation. The default
+9. GCOPTER's initial time ratios use path-length / max(0.5 * nominal speed, measured initial
+   speed), replacing upstream's 3 * maximum speed allocation. A subsequent single
+   scalar energy/time initialization is described below. The default
    penalty quadrature uses 64 subdivisions per piece instead of 16. Both changes
    address measured nonconvex local-solution sensitivity: a fixed half-speed
    start failed high-speed frozen cases, while 16 subdivisions stagnated or
@@ -117,7 +118,7 @@ license; embedded geometry utilities retain their original notices.
 12. The final objective evaluation aggregates its existing quadrature-node
     extrema for SFC, speed, thrust, tilt and zero-heading flatness body rate.
     Native planning rejects a positive optimizer status when those values are
-    nonfinite or violate SFC by more than 1e-4 m, the state-conditioned speed
+    nonfinite or violate SFC by more than 1e-4 m, the configured physical speed
     acceptance bound, or another dynamic bound by more than 1e-3
     in its stated SI unit. These are explicit soft-constraint allowed errors,
     not floating-point roundoff or strict physical-limit guarantees. For example,
@@ -186,19 +187,55 @@ license; embedded geometry utilities retain their original notices.
     returns convergence at the same accepted point; failed iterates are not
     relabeled as success. The previous 14 successful frozen problems retained
     identical coefficients and objectives.
-20. The nominal velocity bound remains the optimizer's configured
-    `max_velocity`. Its measured initial velocity is fixed, so an already
-    overspeed initial state cannot satisfy that nominal bound at time zero.
-    The acceptance limit is explicitly
-    `max(max_velocity, norm(initial_velocity)) + 0.001 * max_velocity`.
-    Successful-plan metadata and failure snapshots retain nominal limit,
-    initial speed, effective limit, actual quadrature peak and nominal excess.
-    A High-speed case had initial speed 6.006516 m/s and peak 6.007566 m/s
-    against nominal 6 m/s; its effective allowance is 6.012516 m/s.
-    These samples are not reported as satisfying nominal 6 m/s throughout.
-    Measurements, objective, weights and CTBR hard bounds are unchanged.
-    The rule reuses the existing optimizer extrema without another trajectory
-    traversal or online physical integration.
+20. `nominal_velocity` supplies the existing optimizer speed penalty and initial
+    allocation; `None` resolves to `max_velocity`. `max_velocity` independently
+    specifies the physical reference speed bound. The acceptance limit is
+    `1.001 * max_velocity`, with no dependence on measured initial speed.
+    The navigation factories use nominal 6 m/s and the existing scene/CTBR
+    physical limits (High-speed 10, Dense 8, Newton 10 m/s). There is no added
+    physical-speed objective term. Successful-plan metadata and failure snapshots
+    retain nominal, physical and acceptance limits, initial speed, actual peak
+    and nominal excess. V11/V12 instead used a state-conditioned allowance;
+    those archived results retain their original meaning. A nominal exceedance
+    is never labeled as compliance with the cruise target. The rule reuses the
+    existing optimizer extrema without another trajectory traversal.
+21. Before the full 3D optimization, one positive scalar rescales all initial
+    durations while preserving waypoint positions and time ratios. Its smooth
+    objective is the logarithm of MINCO control energy plus the existing time
+    cost. This monotone transformation preserves the positive objective's minima
+    and normalizes its gradient for a relative stopping criterion. It uses
+    MINCO's energy and time gradients and does not evaluate flatness penalties.
+    The log-scale L-BFGS solve has at most 64 iterations and is followed by one
+    ordinary full-variable solve. Negative initialization status fails explicitly;
+    there are no alternate starts or retry planner. In the initial raw-energy
+    screen, the recorded Dense failure changed from an invalid 13,323,050
+    objective to a feasible 423.226 objective, with 0.140 ms scalar work and 117
+    full iterations. The longer constant-speed
+    initialization needed 733 iterations but achieved a lower 204.496 objective;
+    the different local-solution quality is retained in the report. Five further
+    frozen cases passed full-polynomial SFC and sampled dynamic checks. An A2
+    Forest case still took about 90 ms in the full optimizer alone. Initialization
+    scale, status, evaluation count and time are exposed in diagnostics.
+    The unnormalized scalar objective exhausted line-search precision in a
+    synthetic wall case and one derived slow-frame diagnostic: final relative
+    gradients were 9.67e-8 and 5.33e-8 while the absolute gradients exceeded
+    1e-5. Normalization changes the stopping scale; negative status is never
+    relabeled as convergence. The earlier raw-energy reports remain archived.
+    The final log objective passed six frozen real problems and the wall
+    regression; central finite differences agreed within 5.89e-10 relative error.
+    A derived historical-PVA/final-map diagnostic still had a 0.2492 mm full-curve
+    SFC violation. It is retained as a negative result, not an original online
+    frame or a claim that finite soft penalties guarantee containment.
+22. Native V13 runs the same legal DMP graph across the complete bounded map,
+    without a preceding JPS guide or guide-region construction. A real Dense
+    failure exhausted all 1,260 nodes of a disconnected guide region under both
+    weights 1 and 1.5; the full graph had a valid path. The graph's occupied
+    voxels, legal diagonal rules and distance-potential costs are unchanged,
+    while the allowed search region changes intentionally. Four further frozen
+    maps had valid full-graph paths and SFCs, with lower path costs and lower
+    search time in that screen. This is the uniform search path, not a fallback.
+    Metadata reports `search_backend=global_dmp`, `jps_ran=false`, and zero JPS
+    runtime. Original JPS sources and the unmodified-chain oracle remain available.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online

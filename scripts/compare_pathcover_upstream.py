@@ -97,7 +97,7 @@ def serialized_input(cloud, initial, goal, cfg):
         cfg.potential_radius, cfg.search_radius, cfg.random_seed,
         *initial.ravel(order="F"), *goal, len(cloud), *np.asarray(cloud).ravel(),
         cfg.time_weight, cfg.safety_margin, cfg.pieces_per_polytope, cfg.integral_resolution,
-        cfg.relative_tolerance, cfg.max_iterations, cfg.max_velocity, cfg.body_rate_max,
+        cfg.relative_tolerance, cfg.max_iterations, cfg.native_options()["nominal_velocity"], cfg.body_rate_max,
         cfg.tilt_max, cfg.thrust_min, options["thrust_max"], *cfg.penalty_weights,
         cfg.mass, cfg.gravity, 0.0, 0.0, 0.0, 0.001,
     ]

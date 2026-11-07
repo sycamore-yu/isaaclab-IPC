@@ -12,8 +12,13 @@ code and evidence remain available; this branch develops the new AC-MPC route.
 
 - Isaac Lab / Newton supplies physical state, LiDAR and PPO training. MARSIM /
   Flightmare dynamic execution supplies the formal navigation evaluation.
-- Native PathCover owns mapping, JPS/DMP, RISP corridors and GCOPTER/MINCO
+- Native PathCover owns mapping, global DMP, RISP corridors and GCOPTER/MINCO
   trajectory timing. ROS and Gazebo are not frontend runtime dependencies.
+  Production DMP searches the full available grid with the existing potential
+  and legal-neighbor checks. The V12 Dense failure has no legal path inside its
+  JPS guide region, although a legal full-grid path exists. Upstream JPS remains
+  available for the independent original-chain comparison; `search_radius`
+  belongs only to that comparison.
 - The state is `[p_world(3), q_wxyz(4), v_world(3)]`. The control is collective
   force in N and body rates in rad/s. Execution divides force by vehicle mass.
 - `N` counts cost nodes, including the measured initial state, as in AC-MPC.
@@ -29,11 +34,13 @@ code and evidence remain available; this branch develops the new AC-MPC route.
 - Apply robot clearance once in the frontend. The MPC uses every returned SFC
   face as a hard constraint. GCOPTER's soft penalties alone are not a proof of
   constraint satisfaction; record sampled violations during validation.
-- Preserve measured initial PVA even when it exceeds the nominal reference
-  speed. Keep the nominal bound in GCOPTER's objective; its speed feasibility
-  allowance is `max(nominal_speed, initial_speed) + 0.001 * nominal_speed`.
-  Report nominal exceedance separately. This state-conditioned allowance does
-  not change the CTBR hard velocity bounds or guarantee immediate deceleration.
+- Preserve measured initial PVA. `nominal_velocity` controls GCOPTER's existing
+  speed cost; the independent `max_velocity` is the physical reference bound.
+  The navigation factories derive that bound from the scene and the most
+  restrictive CTBR velocity component. Report nominal exceedance separately
+  from physical violations. The physical reference bound stays fixed when
+  the measured initial speed changes. CTBR hard velocity constraints remain
+  unchanged.
 - Rollout observations freeze state, reference, SFC and warm-start controls.
   PPO replay does not mutate the frontend or use a hidden last-solve cache.
 - The CTBR adapter supplies an optional three-point `initial_motion_seed` to

@@ -1,4 +1,4 @@
-"""ROS-free NanoVoxMap → JPS/DMP → PathCover/RISP → GCOPTER/MINCO.
+"""ROS-free NanoVoxMap → global DMP → PathCover/RISP → GCOPTER/MINCO.
 
 The extension is loaded only when a front end is constructed. Each instance owns
 its observed map; plans are immutable snapshots suitable for PPO storage.
@@ -25,7 +25,10 @@ class PathCoverConfig:
     search_resolution: float | None = None
     robot_radius: float = 0.25
     robot_radius_z: float | None = None
+    # Physical reference speed limit. The optimizer's cruise-speed penalty can
+    # use a lower nominal value without changing this physical acceptance bound.
     max_velocity: float = 6.0
+    nominal_velocity: float | None = None
     mass: float = 0.75
     gravity: float = 9.81
     thrust_min: float = 0.0
@@ -44,6 +47,7 @@ class PathCoverConfig:
     # retains the upstream 0.01 in each corresponding constraint's units.
     position_penalty_smoothing_m: float = 1e-6
     potential_radius: float = 1.0
+    # Used by the upstream JPS-guide comparison; native global DMP has no guide region.
     search_radius: float = 2.0
     # Weighted A*: >1 trades shortest-path optimality for fewer expansions.
     dmp_heuristic_weight: float = 1.5
@@ -57,8 +61,16 @@ class PathCoverConfig:
     yaw_sample_dt: float = 0.02
     yaw_low_speed: float = 0.1
 
+    def __post_init__(self):
+        nominal = self.max_velocity if self.nominal_velocity is None else self.nominal_velocity
+        if (not math.isfinite(self.max_velocity) or not math.isfinite(nominal)
+                or not 0 < nominal <= self.max_velocity):
+            raise ValueError("PathCover speeds require 0 < nominal_velocity <= max_velocity")
+
     def native_options(self):
         values = asdict(self)
+        if self.nominal_velocity is None:
+            values["nominal_velocity"] = self.max_velocity
         if self.search_resolution is None:
             values["search_resolution"] = self.resolution
         if self.robot_radius_z is None:
@@ -288,6 +300,8 @@ class NativePathCoverFrontend:
             for i, (index, duration) in enumerate(zip(result.corridor_indices, trajectory.durations, strict=True))
         )
         last_map = self._native.last_update
+        nominal_velocity = self.config.max_velocity if self.config.nominal_velocity is None else self.config.nominal_velocity
+        initialization = result.time_initialization
         metrics = {
             "mapping_ms": update.mapping_ms if update is not None else 0.0,
             "inflation_ms": update.inflation_ms if update is not None else 0.0,
@@ -295,15 +309,21 @@ class NativePathCoverFrontend:
             "search_ms": result.search_ms, "corridor_ms": result.corridor_ms,
             "jps_ms": result.jps_ms, "distance_map_ms": result.distance_map_ms,
             "dmp_ms": result.dmp_ms, "dmp_cost": result.dmp_cost,
+            "search_backend": "global_dmp", "jps_ran": False,
             "trajectory_ms": result.trajectory_ms, "yaw_ms": yaw_ms, "total_ms": (perf_counter() - begin) * 1000,
+            "time_initialization_ms": initialization["elapsed_ms"],
+            "time_initialization_status": initialization["status"],
+            "time_initialization_evaluations": initialization["evaluations"],
+            "time_initialization_scale": initialization["scale"],
             "optimizer_status": result.optimizer_status, "objective": result.cost,
             "occupied_voxels": last_map.occupied_voxels, "inflated_voxels": last_map.inflated_voxels,
             "gpu_mapping": last_map.gpu_mapping, "gpu_inflation": last_map.gpu_inflation,
             "gpu_distance_map": result.gpu_distance_map,
             "speed_initial_m_s": result.initial_speed,
-            "speed_nominal_limit_m_s": self.config.max_velocity,
-            "speed_effective_limit_m_s": result.effective_speed_limit,
-            "speed_nominal_excess_m_s": max(float(result.constraint_metrics[1]) - self.config.max_velocity, 0.0),
+            "speed_nominal_limit_m_s": nominal_velocity,
+            "speed_physical_limit_m_s": self.config.max_velocity,
+            "speed_acceptance_limit_m_s": result.speed_acceptance_limit,
+            "speed_nominal_excess_m_s": max(float(result.constraint_metrics[1]) - nominal_velocity, 0.0),
         }
         for name, value in zip(("sfc_max_m", "speed_max_m_s", "thrust_min_n", "thrust_max_n",
                                 "tilt_max_rad", "zero_yaw_body_rate_max_rad_s"), result.constraint_metrics, strict=True):

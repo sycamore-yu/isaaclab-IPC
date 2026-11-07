@@ -85,13 +85,13 @@ def pathcover_config_for_ctbr(model, overrides):
         "max_velocity": min(*model.velocity_upper, *(-value for value in model.velocity_lower)),
     }
     for name, cap in upper_limits.items():
-        default = min(cap, 6.0) if name == "max_velocity" else cap
         value = options.get(name)
         if value is None:
-            value = default
+            value = cap
         if value > cap:
             raise ValueError(f"PathCover {name} exceeds the CTBR limit {cap}")
         options[name] = value
+    options.setdefault("nominal_velocity", min(options["max_velocity"], 6.0))
     floor = model.mass * model.specific_thrust_limits[0]
     options.setdefault("thrust_min", floor)
     if options["thrust_min"] < floor:

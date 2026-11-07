@@ -37,6 +37,14 @@ def native_module():
     return pytest.importorskip("isaaclab_ipc._pathcover_native")
 
 
+def test_nominal_speed_resolves_to_physical_limit_and_validates_order():
+    assert configuration().native_options()["nominal_velocity"] == 2.0
+    assert configuration(max_velocity=4.0, nominal_velocity=2.0).native_options()["nominal_velocity"] == 2.0
+    for nominal, physical in ((3.0, 2.0), (0.0, 2.0), (np.nan, 2.0), (2.0, np.inf)):
+        with pytest.raises(ValueError, match="nominal_velocity"):
+            configuration(nominal_velocity=nominal, max_velocity=physical)
+
+
 def test_polynomial_sampling_preserves_pva_and_holds_after_expiry():
     coefficients = np.zeros((1, 3, 6))
     coefficients[0, 0, 3:] = (0.5, 2.0, 1.0)  # x(t)=1+2t+0.5t²
@@ -85,15 +93,21 @@ def test_complete_frontend_obstacle_route_and_piece_corridor_contract():
     assert [segment.corridor_index for segment in plan.segments] == list(range(len(plan.corridors)))
     assert plan.start_time == 7.0
     assert plan.valid_until == pytest.approx(7.0 + plan.segments[-1].end)
+    assert plan.metrics["search_backend"] == "global_dmp"
+    assert plan.metrics["jps_ran"] is False
+    assert plan.metrics["jps_ms"] == 0.0
+    assert plan.metrics["time_initialization_status"] >= 0
+    assert plan.metrics["time_initialization_evaluations"] > 0
+    assert plan.metrics["time_initialization_scale"] > 0.0
     np.testing.assert_allclose(plan.sample(0.0).pva, np.concatenate((state().position, np.zeros(6))), atol=1e-7)
     np.testing.assert_allclose(plan.sample(plan.trajectory.duration).position, plan.local_goal, atol=1e-6)
     np.testing.assert_allclose(plan.sample(plan.trajectory.duration + 1).velocity, 0.0)
     metrics = validate_pathcover_plan(plan, cfg)
     assert metrics["finite"]
     # GCOPTER imposes soft penalties. These tolerances are measured, not a hard guarantee.
-    assert metrics["sfc_max_violation_m"] < 0.02
-    assert metrics["max_speed_m_s"] < cfg.max_velocity + 0.1
-    assert metrics["max_thrust_n"] < cfg.native_options()["thrust_max"] + 0.2
+    assert metrics["sfc_max_violation_m"] <= 1e-4
+    assert metrics["max_speed_m_s"] <= cfg.max_velocity * 1.001
+    assert metrics["max_thrust_n"] <= cfg.native_options()["thrust_max"] + 1e-3
 
 
 def test_cpu_cuda_mapping_and_native_solution_agree():
@@ -205,7 +219,7 @@ def test_virtual_workspace_clearance_and_iteration_limit_failure():
     assert problem["config"]["max_iterations"] == 1
 
 
-def test_positive_optimizer_status_does_not_accept_speed_above_effective_limit():
+def test_positive_optimizer_status_does_not_accept_speed_above_physical_limit():
     native_module()
     frontend = NativePathCoverFrontend(configuration(penalty_weights=(1e4, 0.0, 1e4, 1e4, 1e4)))
     with pytest.raises(PathCoverPlanningError, match="constraints violated at optimizer quadrature nodes"):
@@ -221,7 +235,8 @@ def test_positive_optimizer_status_does_not_accept_speed_above_effective_limit()
     speed = problem["speed_feasibility"]
     assert speed["initial_speed_m_s"] == 0.0
     assert speed["nominal_limit_m_s"] == 2.0
-    assert speed["effective_limit_m_s"] == 2.002
+    assert speed["physical_limit_m_s"] == 2.0
+    assert speed["acceptance_limit_m_s"] == 2.002
     assert speed["peak_speed_m_s"] == problem["constraint_metrics"][1]
     assert speed["nominal_excess_m_s"] == speed["peak_speed_m_s"] - 2.0
     candidate = problem["candidate"]
@@ -235,18 +250,29 @@ def test_positive_optimizer_status_does_not_accept_speed_above_effective_limit()
     assert np.linalg.norm(samples.velocity, axis=1).max() == pytest.approx(speed["peak_speed_m_s"], abs=1e-10)
 
 
-def test_fixed_initial_overspeed_preserves_nominal_bound_and_real_excess():
+def test_cruise_penalty_and_physical_speed_acceptance_are_independent():
     native_module()
-    frontend = NativePathCoverFrontend(configuration())
+    frontend = NativePathCoverFrontend(configuration(max_velocity=4.0, nominal_velocity=2.0))
     moving = replace(state(), velocity=np.array([3.0, 0.0, 0.0]))
     plan = frontend.plan(None, moving, np.array([5.0, 0.0, 1.5]))
     np.testing.assert_allclose(plan.sample(0.0).velocity, moving.velocity, atol=1e-9)
     assert plan.metrics["speed_nominal_limit_m_s"] == 2.0
     assert plan.metrics["speed_initial_m_s"] == 3.0
-    assert plan.metrics["speed_effective_limit_m_s"] == 3.002
+    assert plan.metrics["speed_physical_limit_m_s"] == 4.0
+    assert plan.metrics["speed_acceptance_limit_m_s"] == 4.004
     peak = plan.metrics["optimizer_speed_max_m_s"]
-    assert 3.0 - 1e-9 <= peak <= 3.002
+    assert 3.0 - 1e-9 <= peak <= 4.004
     assert plan.metrics["speed_nominal_excess_m_s"] == peak - 2.0
+    strict = NativePathCoverFrontend(configuration(nominal_velocity=2.0))
+    with pytest.raises(PathCoverPlanningError, match="constraints violated"):
+        strict.plan(None, moving, np.array([5.0, 0.0, 1.5]))
+    problem = strict.failed_problem()
+    assert problem["speed_feasibility"]["acceptance_limit_m_s"] == 2.002
+    assert problem["speed_feasibility"]["initial_speed_m_s"] == 3.0
+    # The acceptance bound does not change the cruise penalty, measured PVA,
+    # or optimized polynomial; the physically stricter result is rejected.
+    np.testing.assert_array_equal(np.stack(problem["candidate"]["coefficients"]), plan.trajectory.coefficients)
+    np.testing.assert_array_equal(problem["candidate"]["durations"], plan.trajectory.durations)
 
 
 def test_soft_speed_residual_and_original_corridor_metrics_are_preserved():
