@@ -34,6 +34,13 @@ code and evidence remain available; this branch develops the new AC-MPC route.
 - Apply robot clearance once in the frontend. The MPC uses every returned SFC
   face as a hard constraint. GCOPTER's soft penalties alone are not a proof of
   constraint satisfaction; record sampled violations during validation.
+- Use the existing 0.01 m reference position margin in GCOPTER's penalty copy.
+  It shifts the unit-normal position residual only, with the existing caps from
+  polytope/intersection inscribed radii. Original SFCs, waypoint parameterization,
+  map inflation and vehicle radius stay identical. A frozen V13 Forest candidate
+  had 2.998 mm of full-curve violation; this one change yielded 1.684 mm of
+  clearance inside the original SFC. This remains a soft objective, and original
+  constraint residuals retain their existing acceptance tolerances.
 - Preserve measured initial PVA. `nominal_velocity` controls GCOPTER's existing
   speed cost; the independent `max_velocity` is the physical reference bound.
   The navigation factories derive that bound from the scene and the most

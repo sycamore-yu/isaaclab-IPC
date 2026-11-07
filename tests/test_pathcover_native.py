@@ -227,6 +227,7 @@ def test_positive_optimizer_status_does_not_accept_speed_above_physical_limit():
     problem = frontend.failed_problem()
     assert problem["stage"] == "feasibility"
     assert problem["optimizer_status"] >= 0
+    assert problem["config"]["safety_margin"] == 0.01
     assert problem["constraint_metrics"][1] > 2.002
     assert problem["constraint_bounds"]["speed_max_m_s"] == 2.0
     assert problem["soft_constraint_allowed_error"]["speed_relative"] == 1e-3
@@ -277,7 +278,8 @@ def test_cruise_penalty_and_physical_speed_acceptance_are_independent():
 
 def test_soft_speed_residual_and_original_corridor_metrics_are_preserved():
     native_module()
-    cfg = configuration(safety_margin=0.01)
+    cfg = configuration()
+    assert cfg.safety_margin == 0.01
     plan = NativePathCoverFrontend(cfg).plan(None, state(), np.array([5.0, 0.0, 1.5]))
     # A finite soft penalty retains a true speed residual, rather than rounding
     # it away or claiming a strict continuous-time speed guarantee.

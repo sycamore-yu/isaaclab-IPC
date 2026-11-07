@@ -41,7 +41,8 @@ class PathCoverConfig:
     max_iterations: int = 1000
     relative_tolerance: float = 1e-4
     time_weight: float = 100.0
-    safety_margin: float = 0.0
+    # Metre-valued inward offset of the reference position-penalty copy only.
+    safety_margin: float = 0.01
     penalty_weights: tuple[float, ...] = (1e4, 1e3, 1e4, 1e4, 1e4)
     # Width in metres of the smoothed L1 position penalty. Dynamic smoothing
     # retains the upstream 0.01 in each corresponding constraint's units.

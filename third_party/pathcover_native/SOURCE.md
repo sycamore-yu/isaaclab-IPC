@@ -38,7 +38,8 @@ license; embedded geometry utilities retain their original notices.
    boundary projection is disabled because it otherwise changes the CTBR
    controller's actual initial state.
 5. The native binding assembles the algorithm chain without ROS. Map inflation
-   supplies body clearance once; extra GCOPTER standoff defaults to zero.
+   supplies body clearance once. V14 gives GCOPTER's reference position penalty
+   a separate 0.01 m inward offset, as detailed in item 23 below.
    Physical workspace bounds, including virtual ground/ceiling, are shrunk by
    the body radii once and rounded inward to complete free search cells. This
    handles boundaries that do not appear in the observed cloud. Mapping and
@@ -236,6 +237,18 @@ license; embedded geometry utilities retain their original notices.
     search time in that screen. This is the uniform search path, not a fallback.
     Metadata reports `search_backend=global_dmp`, `jps_ran=false`, and zero JPS
     runtime. Original JPS sources and the unmodified-chain oracle remain available.
+23. V14 changes the existing `safety_margin` default from 0 to 0.01 m. Only the
+    position-penalty copy receives the inward offset; the original SFC, waypoint
+    parameterization, occupied map, robot radius and acceptance tolerance remain
+    unchanged. The existing per-polytope/adjacent-overlap radius caps preserve
+    interior in the penalty copy. This is reference standoff in a soft objective,
+    not another application of physical body clearance or a hard guarantee.
+    A recorded V13 Forest failure had a 2.998366 mm full-polynomial original-SFC
+    violation. Changing only this parameter produced 1.684191 mm of original-SFC
+    clearance with all sampled dynamic bounds met. The initialization scale was
+    unchanged; the objective rose from 671.858 to 688.116. Single-run optimization
+    timing does not establish online p95. The original candidate and its exact
+    baseline reconstruction remain archived.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online

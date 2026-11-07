@@ -33,6 +33,8 @@ uv run python scripts/build_pathcover_native.py
 
 A1 和 A2 使用相同的动力学、输入界、速度界与 SFC 硬约束。安全距离只在前端处理一次。历史 IPC 的 jerk 模型、源文件和验证数据继续保留，其入口仍为 `scripts/evaluate_native.py` 和 MARSIM `--policy ipc`。
 
+GCOPTER 的位置成本使用 0.01 m 参考余量。该余量只作用于惩罚中的半空间副本，并按走廊及交集的内切半径裁减。MPC 使用原始 SFC；地图、机体半径和硬约束面保持相同。原始约束的实际违反量仍单独记录。
+
 ## 统一入口
 
 ### Isaac Lab / Newton
