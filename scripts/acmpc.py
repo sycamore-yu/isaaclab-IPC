@@ -629,6 +629,7 @@ def main():
         metrics["frontend_mean_ms"] = float(np.mean(env.unwrapped.frontend_times)) if env.unwrapped.frontend_times else 0.0
         navigation = getattr(env.unwrapped, "navigation", None)
         if navigation is not None:
+            metrics["frontend_reference_quality"] = navigation.reference_quality
             batches = navigation.frontend_batch_times_ms
             metrics["frontend_batch_time_ms"] = {
                 "count": len(batches),
@@ -655,7 +656,14 @@ def main():
                     actor.close()
             finally:
                 if env is not None:
-                    env.close()
+                    try:
+                        navigation = getattr(env.unwrapped, "navigation", None)
+                        if navigation is not None:
+                            (args.output / "reference-quality.json").write_text(
+                                json.dumps(navigation.reference_quality, indent=2, allow_nan=False)
+                            )
+                    finally:
+                        env.close()
 
 
 if __name__ == "__main__":

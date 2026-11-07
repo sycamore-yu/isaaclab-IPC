@@ -34,20 +34,27 @@ code and evidence remain available; this branch develops the new AC-MPC route.
 - Apply robot clearance once in the frontend. The MPC uses every returned SFC
   face as a hard constraint. GCOPTER's soft penalties alone are not a proof of
   constraint satisfaction; record sampled violations during validation.
-- Use the existing 0.01 m reference position margin in GCOPTER's penalty copy.
+- Request the official YAML's 0.15 m reference position margin in GCOPTER's penalty copy.
   It shifts the unit-normal position residual only, with the existing caps from
   polytope/intersection inscribed radii. Original SFCs, waypoint parameterization,
-  map inflation and vehicle radius stay identical. A frozen V13 Forest candidate
-  had 2.998 mm of full-curve violation; this one change yielded 1.684 mm of
-  clearance inside the original SFC. This remains a soft objective, and original
-  constraint residuals retain their existing acceptance tolerances.
+  map inflation and vehicle radius stay identical. Record both requested and
+  applied margins. This remains a soft objective, not guaranteed clearance.
+- Match the official frontend's reference acceptance semantics: optimization must
+  produce a finite cost and a nonempty numerical trajectory. Interface conditions
+  such as positive durations and a defined attitude/yaw remain necessary.
+  Finite soft-constraint residuals are quality diagnostics, not an online veto.
+  `optimizer_quadrature_feasible` retains the original sampled thresholds and
+  zero-heading rate metric. It is not a full-curve feasibility certificate.
+  Offline P1 quality checks keep their original tolerances; removing the veto
+  does not make previously violating references pass those checks.
 - Preserve measured initial PVA. `nominal_velocity` controls GCOPTER's existing
   speed cost; the independent `max_velocity` is the physical reference bound.
-  The navigation factories derive that bound from the scene and the most
-  restrictive CTBR velocity component. Report nominal exceedance separately
-  from physical violations. The physical reference bound stays fixed when
-  the measured initial speed changes. CTBR hard velocity constraints remain
-  unchanged.
+  The navigation factories derive that diagnostic bound from the scene and the
+  most restrictive CTBR velocity component. Report nominal exceedance separately
+  from physical violations. The physical reference bound stays fixed when the
+  measured initial speed changes. Historical `speed_acceptance_limit_m_s` names
+  now denote this quality threshold, not online rejection. CTBR hard velocity
+  constraints remain unchanged.
 - Rollout observations freeze state, reference, SFC and warm-start controls.
   PPO replay does not mutate the frontend or use a hidden last-solve cache.
 - The CTBR adapter supplies an optional three-point `initial_motion_seed` to
@@ -85,6 +92,10 @@ sampling, explicit geometry and dynamics violation measurements.
 
 P2: identical reference/SFC contracts in Newton and MARSIM; fixed-cost task
 execution before learned-policy claims.
+Evaluate the actual solver status, hard-constraint residuals and physical
+execution. Writing hard constraints into the MPC is not a guarantee that an
+unconverged returned control satisfies them. The frontend's tilt and other soft
+dynamic limits are not all duplicated as hard CTBR constraints.
 
 P3: compare A0 (no frontend), A1 (PathCover/fixed costs), and A2
 (PathCover/learned costs) with identical dynamics, sensing and task criteria.

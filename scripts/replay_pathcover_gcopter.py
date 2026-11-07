@@ -12,6 +12,7 @@ from validate_pathcover_native import ORACLE_SOURCE, PIN
 from isaaclab_ipc.pathcover_native import (
     PathCoverConfig,
     PathCoverPlan,
+    PathCoverPlanningError,
     PathCoverSegment,
     PathCoverTrajectory,
     validate_pathcover_plan,
@@ -64,7 +65,7 @@ def replay(binary, text, problem, config, ported):
                                         body_yaw_rate_max=config.body_yaw_rate_max,
                                         yaw_sample_dt=config.yaw_sample_dt, yaw_low_speed=config.yaw_low_speed,
                                         gravity=config.gravity)
-    except ValueError as error:
+    except (ValueError, PathCoverPlanningError) as error:
         result.update(trajectory_valid=False, diagnostic=str(error), objective=objective,
                       durations_s=data[:, 0].tolist(), coefficients=data[:, 1:].reshape(pieces, 3, 6).tolist())
         return result

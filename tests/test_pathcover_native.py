@@ -219,39 +219,49 @@ def test_virtual_workspace_clearance_and_iteration_limit_failure():
     assert problem["config"]["max_iterations"] == 1
 
 
-def test_positive_optimizer_status_does_not_accept_speed_above_physical_limit():
+def test_finite_soft_speed_violation_returns_reference_and_false_diagnostic():
     native_module()
     frontend = NativePathCoverFrontend(configuration(penalty_weights=(1e4, 0.0, 1e4, 1e4, 1e4)))
-    with pytest.raises(PathCoverPlanningError, match="constraints violated at optimizer quadrature nodes"):
+    plan = frontend.plan(None, state(), np.array([5.0, 0.0, 1.5]))
+    assert frontend.failed_problem() is None
+    assert plan.metrics["optimizer_status"] >= 0
+    assert not plan.metrics["optimizer_quadrature_feasible"]
+    peak = plan.metrics["optimizer_speed_max_m_s"]
+    assert peak > 2.002
+    assert plan.metrics["speed_initial_m_s"] == 0.0
+    assert plan.metrics["speed_nominal_limit_m_s"] == 2.0
+    assert plan.metrics["speed_physical_limit_m_s"] == 2.0
+    assert plan.metrics["speed_acceptance_limit_m_s"] == 2.002
+    assert plan.metrics["speed_nominal_excess_m_s"] == peak - 2.0
+    assert np.isfinite(plan.metrics["objective"]) and plan.metrics["objective"] > 0.0
+    assert plan.metrics["reference_margin_requested_m"] == 0.15
+    assert len(plan.metrics["reference_margin_applied_per_corridor_m"]) == len(plan.corridors)
+    assert all(0 < value <= 0.15 for value in plan.metrics["reference_margin_applied_per_corridor_m"])
+    np.testing.assert_allclose(plan.sample(0.0).pva, np.concatenate((state().position, np.zeros(6))), atol=1e-9)
+    np.testing.assert_allclose(plan.sample(plan.trajectory.duration).pva, (5, 0, 1.5, 0, 0, 0, 0, 0, 0), atol=1e-9)
+    samples = plan.sample(np.linspace(0.0, plan.trajectory.duration, frontend.config.integral_resolution + 1))
+    assert np.linalg.norm(samples.velocity, axis=1).max() == pytest.approx(peak, abs=1e-10)
+
+
+def test_nonfinite_optimizer_objective_is_still_a_planning_error():
+    native_module()
+    # Finite input values can still overflow the energy/time objective.
+    frontend = NativePathCoverFrontend(configuration(time_weight=1e308))
+    with pytest.raises(PathCoverPlanningError, match="GCOPTER optimization failed"):
         frontend.plan(None, state(), np.array([5.0, 0.0, 1.5]))
     problem = frontend.failed_problem()
-    assert problem["stage"] == "feasibility"
-    assert problem["optimizer_status"] >= 0
-    assert problem["config"]["safety_margin"] == 0.01
-    assert problem["constraint_metrics"][1] > 2.002
-    assert problem["constraint_bounds"]["speed_max_m_s"] == 2.0
-    assert problem["soft_constraint_allowed_error"]["speed_relative"] == 1e-3
-    assert problem["soft_constraint_allowed_error"]["speed_m_s"] == 0.002
-    assert problem["soft_constraint_allowed_error"]["sfc_m"] == 1e-4
-    speed = problem["speed_feasibility"]
-    assert speed["initial_speed_m_s"] == 0.0
-    assert speed["nominal_limit_m_s"] == 2.0
-    assert speed["physical_limit_m_s"] == 2.0
-    assert speed["acceptance_limit_m_s"] == 2.002
-    assert speed["peak_speed_m_s"] == problem["constraint_metrics"][1]
-    assert speed["nominal_excess_m_s"] == speed["peak_speed_m_s"] - 2.0
-    candidate = problem["candidate"]
-    assert np.isfinite(candidate["objective"]) and candidate["objective"] > 0.0
-    trajectory = PathCoverTrajectory(np.stack(candidate["coefficients"]), np.asarray(candidate["durations"]))
-    np.testing.assert_array_equal(candidate["durations"], problem["trial_durations"])
-    np.testing.assert_array_equal(candidate["corridor_indices"], [0])
-    np.testing.assert_allclose(trajectory.sample(0.0).pva, problem["initial_pva"].T.ravel(), atol=1e-9)
-    np.testing.assert_allclose(trajectory.sample(trajectory.duration).pva, problem["terminal_pva"].T.ravel(), atol=1e-9)
-    samples = trajectory.sample(np.linspace(0.0, trajectory.duration, frontend.config.integral_resolution + 1))
-    assert np.linalg.norm(samples.velocity, axis=1).max() == pytest.approx(speed["peak_speed_m_s"], abs=1e-10)
+    assert problem["stage"] == "optimize"
+    assert problem["optimizer_status"] < 0
 
 
-def test_cruise_penalty_and_physical_speed_acceptance_are_independent():
+def test_finite_polynomial_with_undefined_heading_is_a_planning_error():
+    coefficients = np.zeros((1, 3, 6))
+    coefficients[0, 2, 3] = -9.81 / 2  # Finite free-fall polynomial, zero total thrust.
+    with pytest.raises(PathCoverPlanningError, match="finite upright thrust direction"):
+        PathCoverTrajectory(coefficients, np.array([0.1]))
+
+
+def test_cruise_penalty_and_physical_speed_diagnostic_are_independent():
     native_module()
     frontend = NativePathCoverFrontend(configuration(max_velocity=4.0, nominal_velocity=2.0))
     moving = replace(state(), velocity=np.array([3.0, 0.0, 0.0]))
@@ -265,21 +275,21 @@ def test_cruise_penalty_and_physical_speed_acceptance_are_independent():
     assert 3.0 - 1e-9 <= peak <= 4.004
     assert plan.metrics["speed_nominal_excess_m_s"] == peak - 2.0
     strict = NativePathCoverFrontend(configuration(nominal_velocity=2.0))
-    with pytest.raises(PathCoverPlanningError, match="constraints violated"):
-        strict.plan(None, moving, np.array([5.0, 0.0, 1.5]))
-    problem = strict.failed_problem()
-    assert problem["speed_feasibility"]["acceptance_limit_m_s"] == 2.002
-    assert problem["speed_feasibility"]["initial_speed_m_s"] == 3.0
-    # The acceptance bound does not change the cruise penalty, measured PVA,
-    # or optimized polynomial; the physically stricter result is rejected.
-    np.testing.assert_array_equal(np.stack(problem["candidate"]["coefficients"]), plan.trajectory.coefficients)
-    np.testing.assert_array_equal(problem["candidate"]["durations"], plan.trajectory.durations)
+    strict_plan = strict.plan(None, moving, np.array([5.0, 0.0, 1.5]))
+    assert strict_plan.metrics["speed_acceptance_limit_m_s"] == 2.002
+    assert strict_plan.metrics["speed_initial_m_s"] == 3.0
+    assert plan.metrics["optimizer_quadrature_feasible"]
+    assert not strict_plan.metrics["optimizer_quadrature_feasible"]
+    # The diagnostic bound changes neither the cruise penalty, measured PVA,
+    # nor the optimized polynomial. Both finite references are returned.
+    np.testing.assert_array_equal(strict_plan.trajectory.coefficients, plan.trajectory.coefficients)
+    np.testing.assert_array_equal(strict_plan.trajectory.durations, plan.trajectory.durations)
 
 
 def test_soft_speed_residual_and_original_corridor_metrics_are_preserved():
     native_module()
     cfg = configuration()
-    assert cfg.safety_margin == 0.01
+    assert cfg.safety_margin == 0.15
     plan = NativePathCoverFrontend(cfg).plan(None, state(), np.array([5.0, 0.0, 1.5]))
     # A finite soft penalty retains a true speed residual, rather than rounding
     # it away or claiming a strict continuous-time speed guarantee.

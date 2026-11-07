@@ -38,8 +38,8 @@ license; embedded geometry utilities retain their original notices.
    boundary projection is disabled because it otherwise changes the CTBR
    controller's actual initial state.
 5. The native binding assembles the algorithm chain without ROS. Map inflation
-   supplies body clearance once. V14 gives GCOPTER's reference position penalty
-   a separate 0.01 m inward offset, as detailed in item 23 below.
+   supplies body clearance once. V15 gives GCOPTER's reference position penalty
+   the official drone YAML's 0.15 m inward offset, as detailed in item 24 below.
    Physical workspace bounds, including virtual ground/ceiling, are shrunk by
    the body radii once and rounded inward to complete free search cells. This
    handles boundaries that do not appear in the observed cloud. Mapping and
@@ -118,23 +118,24 @@ license; embedded geometry utilities retain their original notices.
     log-odds state, not only the occupied threshold result.
 12. The final objective evaluation aggregates its existing quadrature-node
     extrema for SFC, speed, thrust, tilt and zero-heading flatness body rate.
-    Native planning rejects a positive optimizer status when those values are
-    nonfinite or violate SFC by more than 1e-4 m, the configured physical speed
-    acceptance bound, or another dynamic bound by more than 1e-3
+    Through V14, native planning rejected a positive optimizer status when those
+    values were nonfinite or violated SFC by more than 1e-4 m, the configured
+    physical speed bound, or another dynamic bound by more than 1e-3
     in its stated SI unit. These are explicit soft-constraint allowed errors,
     not floating-point roundoff or strict physical-limit guarantees. For example,
     valid simple 2 m/s cases retain measured speeds of 2.001714 and 2.001320 m/s;
     an absolute 1e-3 m/s gate rejected them. The CTBR hard bounds are unchanged.
-    Failure snapshots retain the actual extrema, bounds, allowed errors and
-    initial PVA. A rejected finite candidate also retains its existing polynomial
+    V15 retains these thresholds as diagnostics, as detailed in item 24. Failure
+    snapshots retain actual extrema, bounds, allowed errors and initial PVA.
+    Previously rejected finite candidates retain their existing polynomial
     coefficients, durations, piece-to-SFC indices and objective for exact offline
     replay. That copy occurs only on rejection. This does not reintegrate controls or resample a
     second execution trajectory, and is not a continuous-time certificate.
     The former 1e-6 m SFC gate rejected a High-speed trajectory with an exact
     polynomial maximum of 7.557e-6 m (quadrature maximum 7.173e-6 m), with all
     dynamic bounds met. The 0.1 mm numerical feasibility allowance is explicit;
-    it does not alter the 1e-6 m position smoothing or accept the earlier
-    2.992 mm and 51.794 mm failures.
+    it does not alter the 1e-6 m position smoothing or label the earlier
+    2.992 mm and 51.794 mm references as numerically feasible.
 13. `body_yaw_rate_max` bounds the body z angular velocity. The Python heading
     constructor uses the analytic affine relation between that velocity and
     the world heading derivative, with two start/midpoint/end interval
@@ -249,6 +250,26 @@ license; embedded geometry utilities retain their original notices.
     unchanged; the objective rose from 671.858 to 688.116. Single-run optimization
     timing does not establish online p95. The original candidate and its exact
     baseline reconstruction remain archived.
+24. V15 restores the official drone YAML's `SafetyMargin=0.15 m`, retaining
+    `weight_pos=1e4`, and removes the port's additional rejection of finite
+    references solely for soft-constraint residuals. The official trajectory
+    server accepts a finite optimized cost with a nonempty trajectory; this
+    acceptance rule is distinct from proof of full-curve feasibility. Negative
+    optimizer status, nonfinite costs/evaluations and empty candidates still fail.
+    Polynomial and yaw construction retain their finite/defined checks.
+    `optimizer_quadrature_feasible` records the previous numerical thresholds
+    using the existing extrema, including the zero-heading rate. It neither
+    certifies continuous containment nor the final heading's complete rate bound.
+    The legacy `speed_acceptance_limit_m_s` field remains a quality-diagnostic
+    threshold for historical reports. `reference_margin_requested_m` and
+    `reference_margin_applied_per_corridor_m` expose the existing margin results;
+    no new LP or trajectory traversal is introduced. MPC retains its own hard
+    prediction-node constraints. Offline validation and its tolerances remain
+    unchanged: the recorded 0.15 m comparison had original-SFC clearance but a
+    sampled body-q peak of 3.001876 rad/s, above the 3.001 rad/s offline allowance.
+    It remains a failed full-trajectory check. No previous-plan fallback or
+    recovery state machine is added. The official YAML's margin is 0.15 m;
+    the ROS node's separate missing-parameter default is 0.3 m.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online

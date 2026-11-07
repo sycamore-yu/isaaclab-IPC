@@ -91,6 +91,16 @@ class PathCoverNavigation:
         self.frontend_times_ms = []
         self.frontend_batch_times_ms = []
         self.last_reference_metrics = [None] * num_envs
+        self._reference_limits = self.frontends[0].config.native_options()
+        self.reference_quality = {
+            "scope": "Returned and sampled frontend plans, including initial/reset plans; cumulative across resets. "
+                     "Optimizer quadrature and MPC reference-node diagnostics, not continuous or physical violations.",
+            "returned_plans": 0,
+            "optimizer_quadrature_infeasible_plans": 0,
+            "optimizer_extrema": {},
+            "maximum_positive_residual": {},
+            "maximum_mpc_reference_sfc_violation_m": 0.0,
+        }
         if self.device.type == "cuda":
             # Compile both initial/reset and receding-control forms before the
             # first timed plan, using canonical strides identical to observe().
@@ -119,6 +129,33 @@ class PathCoverNavigation:
         next_velocity = state[:, 7:10] + self.config.dt * self._dynamics.acceleration(torch.cat((state, controls), -1))
         next_position = state[:, :3] + self.config.dt * state[:, 7:10]
         return torch.stack((state[:, :3], next_position, next_position + self.config.dt * next_velocity), 1)
+
+    def _record_reference_quality(self, metrics):
+        """Accumulate CPU diagnostics once per returned plan, outside PPO replay."""
+        quality, limits = self.reference_quality, self._reference_limits
+        quality["returned_plans"] += 1
+        quality["optimizer_quadrature_infeasible_plans"] += int(not metrics["optimizer_quadrature_feasible"])
+        extrema = quality["optimizer_extrema"]
+        for name in ("sfc_max_m", "speed_max_m_s", "thrust_min_n", "thrust_max_n",
+                     "tilt_max_rad", "zero_yaw_body_rate_max_rad_s"):
+            value = float(metrics[f"optimizer_{name}"])
+            reduce = min if name == "thrust_min_n" else max
+            extrema[name] = reduce(extrema.get(name, value), value)
+        residuals = {
+            "sfc_m": metrics["optimizer_sfc_max_m"],
+            "speed_physical_m_s": metrics["optimizer_speed_max_m_s"] - limits["max_velocity"],
+            "speed_nominal_m_s": metrics["speed_nominal_excess_m_s"],
+            "thrust_lower_n": limits["thrust_min"] - metrics["optimizer_thrust_min_n"],
+            "thrust_upper_n": metrics["optimizer_thrust_max_n"] - limits["thrust_max"],
+            "tilt_rad": metrics["optimizer_tilt_max_rad"] - limits["tilt_max"],
+            "zero_yaw_body_rate_rad_s": metrics["optimizer_zero_yaw_body_rate_max_rad_s"] - limits["body_rate_max"],
+        }
+        for name, value in residuals.items():
+            previous = quality["maximum_positive_residual"].get(name, 0.0)
+            quality["maximum_positive_residual"][name] = max(previous, float(value))
+        quality["maximum_mpc_reference_sfc_violation_m"] = max(
+            quality["maximum_mpc_reference_sfc_violation_m"], float(metrics["reference_sfc_violation_m"]),
+        )
 
     def reset(self, env_ids=None):
         ids = range(len(self.frontends)) if env_ids is None else env_ids
@@ -202,6 +239,9 @@ class PathCoverNavigation:
             results = [future.result() for future in futures]
         self.frontend_times_ms.extend(result[2] for result in results)
         self.frontend_batch_times_ms.append(1000 * (perf_counter() - batch_started))
+        for plan, _, _, metrics in results:
+            if plan is not None:
+                self._record_reference_quality(metrics)
         errors = {index: result[1] for index, result in zip(ids, results, strict=True) if result[0] is None}
         if errors and not allow_failures:
             raise next(iter(errors.values()))

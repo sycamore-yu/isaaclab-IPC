@@ -25,8 +25,8 @@ class PathCoverConfig:
     search_resolution: float | None = None
     robot_radius: float = 0.25
     robot_radius_z: float | None = None
-    # Physical reference speed limit. The optimizer's cruise-speed penalty can
-    # use a lower nominal value without changing this physical acceptance bound.
+    # Physical reference speed diagnostic. The cruise-speed penalty can use a
+    # lower nominal value; finite soft violations remain visible in plan metrics.
     max_velocity: float = 6.0
     nominal_velocity: float | None = None
     mass: float = 0.75
@@ -42,7 +42,7 @@ class PathCoverConfig:
     relative_tolerance: float = 1e-4
     time_weight: float = 100.0
     # Metre-valued inward offset of the reference position-penalty copy only.
-    safety_margin: float = 0.01
+    safety_margin: float = 0.15
     penalty_weights: tuple[float, ...] = (1e4, 1e3, 1e4, 1e4, 1e4)
     # Width in metres of the smoothed L1 position penalty. Dynamic smoothing
     # retains the upstream 0.01 in each corresponding constraint's units.
@@ -126,7 +126,7 @@ def _bounded_body_yaw_profile(trajectory):
     force = acceleration + np.array([0.0, 0.0, trajectory.gravity])
     magnitude = np.linalg.norm(force, axis=-1)
     if not np.isfinite(magnitude).all() or np.any(magnitude <= 0.0) or np.any(force[:, 2] <= 0.0):
-        raise ValueError("PathCover heading requires a finite upright thrust direction")
+        raise PathCoverPlanningError("PathCover heading requires a finite upright thrust direction")
     z = force / magnitude[:, None]
     zdot = (jerk - z * np.sum(z * jerk, axis=-1)[:, None]) / magnitude[:, None]
     # z.(zdot x h) = sin(yaw)*t1 + cos(yaw)*t2 = p*s.
@@ -157,7 +157,7 @@ def _bounded_body_yaw_profile(trajectory):
             last_low, last_high = bounds(2 * i + 2, angle + step * rate)
             low, high = max(first_low, middle_low, last_low), min(first_high, middle_high, last_high)
             if low > high:
-                raise ValueError("PathCover heading step has no common body-r interval")
+                raise PathCoverPlanningError("PathCover heading step has no common body-r interval")
             rate = min(max(nominal, low), high)
         yaw[i + 1] = angle + step * rate
     return times, yaw
@@ -317,6 +317,10 @@ class NativePathCoverFrontend:
             "time_initialization_evaluations": initialization["evaluations"],
             "time_initialization_scale": initialization["scale"],
             "optimizer_status": result.optimizer_status, "objective": result.cost,
+            "optimizer_quadrature_feasible": result.optimizer_quadrature_feasible,
+            "constraint_metrics_semantics": "optimizer quadrature diagnostics; not continuous-time feasibility",
+            "reference_margin_requested_m": self.config.safety_margin,
+            "reference_margin_applied_per_corridor_m": np.asarray(result.applied_reference_margins).tolist(),
             "occupied_voxels": last_map.occupied_voxels, "inflated_voxels": last_map.inflated_voxels,
             "gpu_mapping": last_map.gpu_mapping, "gpu_inflation": last_map.gpu_inflation,
             "gpu_distance_map": result.gpu_distance_map,

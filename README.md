@@ -33,7 +33,9 @@ uv run python scripts/build_pathcover_native.py
 
 A1 和 A2 使用相同的动力学、输入界、速度界与 SFC 硬约束。安全距离只在前端处理一次。历史 IPC 的 jerk 模型、源文件和验证数据继续保留，其入口仍为 `scripts/evaluate_native.py` 和 MARSIM `--policy ipc`。
 
-GCOPTER 的位置成本使用 0.01 m 参考余量。该余量只作用于惩罚中的半空间副本，并按走廊及交集的内切半径裁减。MPC 使用原始 SFC；地图、机体半径和硬约束面保持相同。原始约束的实际违反量仍单独记录。
+GCOPTER 的位置成本请求官方配置中的 0.15 m 参考余量。该余量只作用于惩罚中的半空间副本，并按走廊及交集的内切半径裁减。MPC 使用原始 SFC；地图、机体半径和硬约束面保持相同。日志记录请求余量和实际余量。
+
+前端返回数值有限的优化参考，并记录软约束残差。`optimizer_quadrature_feasible` 只表示原求积节点质量判据，不证明完整曲线可行。完整参考质量、MPC 求解状态和实际执行约束分别验收。MPC 对预测节点施加输入界、速度界和 SFC 硬约束；未收敛调用仍记为求解失败。
 
 ## 统一入口
 
@@ -85,7 +87,7 @@ export DISPLAY=:11
 
 原生 PathCover 默认名义参考速度为 6 m/s，与 Newton 训练一致。
 使用 `--reference-speed` 可显式调整，最终值仍受场景和 CTBR 速度界限制。
-`nominal_velocity` 控制速度成本，`max_velocity` 定义独立的物理参考上限。
+`nominal_velocity` 控制速度成本，`max_velocity` 用于独立的物理参考质量检查。
 默认物理参考上限为 High-speed 10 m/s、Dense 8 m/s、Newton 10 m/s。
 这些值取自场景与 CTBR 速度界；优化器保留真实初始 PVA。
 日志分别记录名义速度超额和物理约束违反。

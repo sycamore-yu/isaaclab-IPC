@@ -30,7 +30,7 @@ using Clock = std::chrono::steady_clock;
 using HPoly = Eigen::Matrix<double, Eigen::Dynamic, 4>;
 using Coefficients = Eigen::Matrix<double, 3, 6>;
 using TimeInitialization = trajectory_server::GcopterSolver<3>::TimeInitialization;
-// Explicit numerical feasibility allowance for the original, unit-normal SFC.
+// Numerical diagnostic allowance for the original, unit-normal SFC.
 // This does not change the 1e-6 m position-penalty smoothing or CTBR hard bounds.
 constexpr double kSfcFeasibilityToleranceM = 1e-4;
 class PathCoverPlanningError : public std::runtime_error {
@@ -112,6 +112,7 @@ struct PlanResult {
     std::vector<HPoly> corridors;
     std::vector<Coefficients> coefficients;
     Eigen::VectorXd durations;
+    Eigen::VectorXd applied_reference_margins;
     Eigen::VectorXi corridor_indices;
     Eigen::Matrix<double, 6, 1> constraint_metrics = Eigen::Matrix<double, 6, 1>::Zero();
     double cost = 0.0, search_ms = 0.0, corridor_ms = 0.0, trajectory_ms = 0.0;
@@ -119,6 +120,7 @@ struct PlanResult {
     double initial_speed = 0.0, speed_acceptance_limit = 0.0;
     int optimizer_status = 0;
     bool gpu_distance_map = false;
+    bool optimizer_quadrature_feasible = false;
     TimeInitialization time_initialization;
 };
 
@@ -497,6 +499,7 @@ public:
             result.coefficients.push_back(hold);
             result.durations = Eigen::VectorXd::Constant(1, 0.1);
             result.corridor_indices = Eigen::VectorXi::Zero(1);
+            result.applied_reference_margins = Eigen::VectorXd::Zero(result.corridors.size());
             result.constraint_metrics <<
                 (result.corridors.front().leftCols<3>() * position + result.corridors.front().col(3)).maxCoeff(),
                 0.0, options_.mass * options_.gravity, options_.mass * options_.gravity, 0.0, 0.0;
@@ -520,6 +523,7 @@ public:
                 throw PathCoverPlanningError("PathCover GCOPTER corridor decomposition failed");
             }
             solver.setPositionPenaltySmoothing(options_.position_penalty_smoothing);
+            result.applied_reference_margins = solver.getAppliedMargins();
             Trajectory<5> trajectory;
             result.cost = solver.optimize(trajectory, options_.relative_tolerance, options_.max_iterations);
             result.optimizer_status = solver.getStatus();
@@ -534,16 +538,12 @@ public:
                 throw PathCoverPlanningError(std::string("PathCover GCOPTER optimization failed: ")
                     + lbfgs::lbfgs_strerror(result.optimizer_status));
             }
-            // GCOPTER's objective uses soft constraints. A positive stopping
-            // status alone is not evidence of feasibility. These extrema come
-            // from its final objective evaluation, without resampling a trajectory.
+            // These diagnostics reuse the final objective evaluation. Finite
+            // soft-constraint residuals do not reject an optimized reference.
             const auto &m = result.constraint_metrics;
-            if (!quality.finite || !m.allFinite() || m(0) > kSfcFeasibilityToleranceM
-                || m(1) > result.speed_acceptance_limit
-                || m(2) < options_.thrust_min - 1e-3 || m(3) > options_.thrust_max + 1e-3
-                || m(4) > options_.tilt_max + 1e-3 || m(5) > options_.body_rate_max + 1e-3) {
+            if (!quality.finite || !m.allFinite()) {
                 failed_problem_ = OptimizationFailure{
-                    initial, terminal, result.corridors, result.optimizer_status, "feasibility", solver.getTrialDurations(),
+                    initial, terminal, result.corridors, result.optimizer_status, "nonfinite", solver.getTrialDurations(),
                     result.constraint_metrics, quality.finite};
                 failed_problem_->time_initialization = result.time_initialization;
                 // Copy the existing rejected polynomial only on failure. This
@@ -554,7 +554,7 @@ public:
                 for (int i = 0; i < trajectory.getPieceNum(); ++i) {
                     failed_problem_->coefficients.push_back(trajectory[i].getCoeffMat());
                 }
-                throw PathCoverPlanningError("PathCover GCOPTER constraints violated at optimizer quadrature nodes");
+                throw PathCoverPlanningError("PathCover GCOPTER constraint evaluation is nonfinite");
             }
             result.durations = trajectory.getDurations();
             result.corridor_indices = solver.getPiecePolytopeIndices();
@@ -562,6 +562,11 @@ public:
                 result.coefficients.push_back(trajectory[i].getCoeffMat());
             }
         }
+        const auto &m = result.constraint_metrics;
+        result.optimizer_quadrature_feasible = m(0) <= kSfcFeasibilityToleranceM
+            && m(1) <= result.speed_acceptance_limit
+            && m(2) >= options_.thrust_min - 1e-3 && m(3) <= options_.thrust_max + 1e-3
+            && m(4) <= options_.tilt_max + 1e-3 && m(5) <= options_.body_rate_max + 1e-3;
         result.trajectory_ms = milliseconds(trajectory_begin);
         return result;
     }
@@ -590,8 +595,10 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def_readonly("corridors", &PlanResult::corridors)
         .def_readonly("coefficients", &PlanResult::coefficients)
         .def_readonly("durations", &PlanResult::durations)
+        .def_readonly("applied_reference_margins", &PlanResult::applied_reference_margins)
         .def_readonly("corridor_indices", &PlanResult::corridor_indices)
         .def_readonly("constraint_metrics", &PlanResult::constraint_metrics)
+        .def_readonly("optimizer_quadrature_feasible", &PlanResult::optimizer_quadrature_feasible)
         .def_readonly("initial_speed", &PlanResult::initial_speed)
         .def_readonly("speed_acceptance_limit", &PlanResult::speed_acceptance_limit)
         .def_property_readonly("time_initialization", [](const PlanResult &value) {

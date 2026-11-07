@@ -61,7 +61,8 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
     failures = {}
 
     class Frontend:
-        def __init__(self, _):
+        def __init__(self, config):
+            self.config = config or pathcover_native.PathCoverConfig()
             self.index = len(instances)
             self.calls = self.resets = 0
             instances.append(self)
@@ -85,7 +86,17 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
                 return SimpleNamespace(pva=pva, yaw=np.full(len(times), .1 * self.index))
 
             return SimpleNamespace(
-                start_time=state.time, valid_until=state.time + 1., metrics={"env_id": self.index},
+                start_time=state.time, valid_until=state.time + 1., metrics={
+                    "env_id": self.index,
+                    "optimizer_quadrature_feasible": self.index != 2,
+                    "optimizer_sfc_max_m": .003 if self.index == 2 else -.1,
+                    "optimizer_speed_max_m_s": 7. if self.index == 2 else 4.,
+                    "optimizer_thrust_min_n": -.1 if self.index == 2 else 2.,
+                    "optimizer_thrust_max_n": 23. if self.index == 2 else 8.,
+                    "optimizer_tilt_max_rad": 1.3 if self.index == 2 else .2,
+                    "optimizer_zero_yaw_body_rate_max_rad_s": 3.01 if self.index == 2 else 1.,
+                    "speed_nominal_excess_m_s": 1. if self.index == 2 else 0.,
+                },
                 trajectory=SimpleNamespace(sample=sample),
                 corridors=(np.array([[1., 0., 0., -100.], [-1., 0., 0., -100.]]),),
                 segments=(SimpleNamespace(corridor_index=0, start=0., end=1., duration=1.),),
@@ -106,6 +117,8 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
         torch.testing.assert_close(original["ctbr_state"][:, 0], torch.tensor([2., 0.], dtype=torch.float64))
         assert [instance.calls for instance in instances] == [1, 0, 1]
         assert navigation.last_plans[1] is None
+        assert navigation.reference_quality["returned_plans"] == 2
+        assert navigation.reference_quality["optimizer_quadrature_infeasible_plans"] == 1
 
         failures[1] = pathcover_native.PathCoverPlanningError("No free path")
         result, errors = navigation.observe(*args, env_ids=[2, 1, 0], allow_failures=True)
@@ -118,12 +131,25 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
         navigation.reset([1])
         assert [instance.resets for instance in instances] == [0, 1, 0]
         assert navigation.last_plans[2] is not None
+        quality = navigation.reference_quality
+        assert quality["returned_plans"] == 4
+        assert quality["optimizer_quadrature_infeasible_plans"] == 2
+        assert quality["optimizer_extrema"]["sfc_max_m"] == .003
+        assert quality["optimizer_extrema"]["thrust_min_n"] == -.1
+        assert quality["maximum_positive_residual"] == pytest.approx({
+            "sfc_m": .003, "speed_physical_m_s": 1., "speed_nominal_m_s": 1.,
+            "thrust_lower_n": .1, "thrust_upper_n": 23. - 3. * .75 * 9.81,
+            "tilt_rad": .1, "zero_yaw_body_rate_rad_s": .01,
+        })
+        assert quality["maximum_mpc_reference_sfc_violation_m"] == 0.
 
         with pytest.raises(pathcover_native.PathCoverPlanningError, match="No free path"):
             navigation.observe(*args, env_ids=[1])
         failures[1] = RuntimeError("Unexpected extension failure")
         with pytest.raises(RuntimeError, match="Unexpected extension failure"):
             navigation.observe(*args, env_ids=[1], allow_failures=True)
+        assert quality["returned_plans"] == 4
+        assert quality["optimizer_quadrature_infeasible_plans"] == 2
     finally:
         navigation.close()
 

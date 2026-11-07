@@ -11,6 +11,7 @@ import numpy as np
 from isaaclab_ipc.pathcover_native import (
     NativePathCoverFrontend,
     PathCoverConfig,
+    PathCoverPlanningError,
     PathCoverSegment,
     PathCoverState,
     PathCoverTrajectory,
@@ -131,7 +132,7 @@ def official_gcopter(upstream, plan, state, config):
     try:
         trajectory = PathCoverTrajectory(coefficients, data[:, 0], state.yaw, config.body_yaw_rate_max,
                                         config.yaw_sample_dt, config.yaw_low_speed, config.gravity)
-    except ValueError as error:
+    except (ValueError, PathCoverPlanningError) as error:
         return {"revision": revision, "success": True, "trajectory_valid": False,
                 "official_objective": objective, "diagnostic": str(error),
                 "scope": "official optimization returned a polynomial outside the heading construction domain"}
