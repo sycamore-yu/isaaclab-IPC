@@ -150,3 +150,113 @@ def test_cpp_geometry_and_nonfinite_trial_regressions(tmp_path):
         "-lqhullcpp", "-lqhull_r", "-o", str(executable),
     ], check=True, capture_output=True, text=True)
     subprocess.run([str(executable)], check=True, capture_output=True, text=True)
+
+
+GRID_SOURCE = r"""
+#include "pathcover_grid.h"
+#include <iostream>
+#include <stdexcept>
+
+using V = Eigen::Vector3i;
+using occupancy_inflation::VoxelBitGrid;
+using occupancy_inflation::snapWindow;
+
+VoxelBitGrid grid(const std::vector<V>& indices) {
+    VoxelBitGrid result;
+    if (indices.empty()) return result;
+    V lower = indices[0], upper = indices[0];
+    for (const auto& index : indices) {
+        lower = lower.cwiseMin(index); upper = upper.cwiseMax(index);
+    }
+    const auto window = snapWindow(lower, upper);
+    if (!result.reset(window, window.wordCount())) throw std::runtime_error("grid size");
+    for (const auto& index : indices) {
+        const V local = index - window.base;
+        result.setLocal(local.x(), local.y(), local.z());
+    }
+    return result;
+}
+
+int main() {
+    // Dense V16: float XYZ shifts both touching upper faces by 4.77e-8 m.
+    // The logical [-16,-408,14] cell must not occupy coarse [24,57,6].
+    const V origin(-30,-220,0), dimensions(60,440,14);
+    auto fine = grid({V(-16,-408,14)});
+    std::vector<signed char> cells(dimensions.prod(), 0);
+    std::vector<int> occupied;
+    pathcover_grid::coarsenOccupiedVolumes(fine, pathcover_grid::resolutionRatio(0.1, 0.25),
+        origin, dimensions, cells, occupied);
+    const int ghost = 24 + 60 * (57 + 440 * 6);
+    if (cells[ghost] != 0 || occupied.size() != 2) return 1;
+    for (int y : {56,57}) if (cells[23 + 60*(y + 440*5)] != 100) return 2;
+
+    // Moving one actual fine voxel into the box has positive-volume overlap.
+    fine = grid({V(-15,-407,15)});
+    std::fill(cells.begin(),cells.end(),0); occupied.clear();
+    pathcover_grid::coarsenOccupiedVolumes(fine, pathcover_grid::resolutionRatio(0.1, 0.25),
+        origin, dimensions, cells, occupied);
+    if (cells[ghost] != 100) return 3;
+
+    // Independent integer length units cover negative indices, equal grids,
+    // noninteger 2.5 coarsening, strict touching boundaries, clipped cells and
+    // preserved virtual workspace occupancy. This is not a float-centre oracle.
+    int cases = 0;
+    const V start(-4,-3,-2), size(9,8,7);
+    for (const auto lengths : {std::pair<int,int>{1,5}, {2,5}, {5,5}, {6,6}, {2,6}, {1,6}}) {
+        for (int trial = 0; trial < 97; ++trial) {
+            std::vector<V> points{
+                V((trial*7)%43-21,(trial*11)%41-20,(trial*13)%39-19)};
+            if (trial % 3 == 0) points.push_back(points[0] + V(1,0,0));
+            if (trial % 5 == 0) points.push_back(points[0] + V(0,1,1));
+            auto bits = grid(points);
+            std::vector<signed char> actual(size.prod(),0), expected(size.prod(),0);
+            actual[0] = expected[0] = 100; // Virtual boundary; never cloud-owned.
+            std::vector<int> indices;
+            pathcover_grid::coarsenOccupiedVolumes(bits,
+                pathcover_grid::resolutionRatio(lengths.first / 20.0, lengths.second / 20.0),
+                start, size, actual, indices);
+            for (int z=0;z<size.z();++z) for (int y=0;y<size.y();++y)
+                for (int x=0;x<size.x();++x) {
+                    const V lo = (start+V(x,y,z))*lengths.second;
+                    const V hi = lo + V::Constant(lengths.second);
+                    for (const auto& p : points) {
+                        const V a = p*lengths.first, b=a+V::Constant(lengths.first);
+                        if ((a.array()<hi.array()).all() && (b.array()>lo.array()).all())
+                            expected[x+size.x()*(y+size.y()*z)] = 100;
+                    }
+                }
+            if (actual != expected) return 4;
+            std::sort(indices.begin(),indices.end());
+            std::vector<int> want;
+            for (int i=1;i<size.prod();++i) if(expected[i]) want.push_back(i);
+            if (indices != want) return 5;
+            ++cases;
+        }
+    }
+    // 6*0.1 and 2*0.3 are different doubles, but these configured grids share
+    // the same logical boundary. The ratio is recovered once, then stays integer.
+    if (pathcover_grid::resolutionRatio(0.1, 0.3) != pathcover_grid::ResolutionRatio(1,3)) return 6;
+    bool rejected = false;
+    try { pathcover_grid::resolutionRatio(1.0, std::sqrt(2.0)); }
+    catch (const std::invalid_argument&) { rejected = true; }
+    if (!rejected) return 7;
+    std::cout << "logical integer-grid cases passed: " << cases + 2 << "\n";
+}
+"""
+
+
+def test_cpp_logical_voxel_projection(tmp_path):
+    compiler = shutil.which("g++")
+    if compiler is None:
+        pytest.skip("native compiler is unavailable")
+    root = Path(__file__).resolve().parents[1]
+    vendor = root / "third_party/pathcover_native/occupancy_inflation"
+    source = tmp_path / "pathcover_grid.cpp"
+    executable = tmp_path / "pathcover_grid"
+    source.write_text(GRID_SOURCE)
+    subprocess.run([
+        compiler, "-O2", "-std=c++17", "-I/usr/include/eigen3",
+        f"-I{root / 'native'}", f"-I{vendor / 'include'}",
+        str(source), str(vendor / "src/voxel_bit_grid.cpp"), "-o", str(executable),
+    ], check=True, capture_output=True, text=True)
+    subprocess.run([str(executable)], check=True, capture_output=True, text=True)

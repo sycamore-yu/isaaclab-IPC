@@ -166,6 +166,23 @@ def test_body_radius_smaller_than_voxel_still_expands_occupied_volume():
     assert np.any(np.linalg.norm(cloud - (source + np.array([0.3, 0.0, 0.0])), axis=1) < 1e-6)
 
 
+def test_cross_resolution_shared_faces_do_not_create_occupied_neighbours():
+    native = native_module()
+    cfg = configuration(resolution=0.1, search_resolution=0.3, robot_radius=0.0)
+    frontends = [NativePathCoverFrontend(cfg)]
+    if native.cuda_built:
+        frontends.append(NativePathCoverFrontend(replace(cfg, use_cuda=True, cuda_min_grid_voxels=0)))
+    for frontend in frontends:
+        for sign in (-1.0, 1.0):
+            frontend.reset()
+            frontend.update_cloud(np.array([[sign * 0.55, 0.15, 1.15]]), state().position)
+            centres, half_extent = frontend.obstacle_boxes()
+            # Logical fine x faces at +/-0.6 and z=1.2 coincide with coarse
+            # faces, including the 6*.1 versus 2*.3 floating-point discrepancy.
+            np.testing.assert_allclose(centres, [[sign * 0.45, 0.15, 1.05]], atol=1e-14)
+            assert half_extent == 0.15
+
+
 @pytest.mark.parametrize(("radius", "radius_z"), [(0.0, 0.0), (0.25, 0.0), (0.0, 0.25), (0.25, 0.25)])
 def test_inflation_excludes_tangent_cells_and_preserves_zero_radius_axes(radius, radius_z):
     native = native_module()

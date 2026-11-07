@@ -283,6 +283,22 @@ license; embedded geometry utilities retain their original notices.
     40.564 to 31.739 ms (21.75% less); this excludes setup and is not an online
     planning-p95 claim. Integration remains 64, reference margin remains 0.15 m,
     and all costs, diagnostics and optimizer stopping conditions are unchanged.
+26. V17 projects the inflater's read-only logical voxel bit-grid directly into
+    the search grid. Shared fine/coarse boundaries are constructed from global
+    integer lattice indices; strict interval overlap is precomputed per axis.
+    Commensurate resolution ratios are recovered once within four ULPs of the
+    configuration division, with denominator at most 1,000,000; unsupported
+    ratios report an invalid parameter. Projection then uses integer floor/ceil,
+    including .1-to-.3 shared boundaries, without a world-coordinate epsilon.
+    A touching face, edge or corner does not occupy the neighbouring coarse cell.
+    The previous packed-float XYZ round trip moved a real Dense fine cell's two
+    touching faces outward by 4.77e-8 m and falsely occupied an entire 0.25 m
+    search cell. The same frozen map had 4,355 such extra coarse cells compared
+    with an independent integer 2/5-resolution oracle. No radius, inflation
+    kernel, physical workspace or collision-check threshold changes. Virtual
+    boundary occupancy remains separate and persistent. Diagnostic
+    `inflated_cloud()` retains the original float serialization on request;
+    normal map updates no longer serialize or allocate/cast a full XYZ table.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online

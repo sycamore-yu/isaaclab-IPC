@@ -204,6 +204,13 @@ class PointCloudInflater {
     return params_.publish_surface_only ? surface_count_ : occupied_count_;
   }
 
+  /** @brief Logical voxels that serialize() exports, before float conversion.
+   * The view remains valid until the next mutating operation on this inflater.
+   */
+  const VoxelBitGrid &outputGrid() const {
+    return params_.publish_surface_only ? surface_ : inflated_;
+  }
+
   /** @brief Voxels in the inflated map, shell or not. */
   std::size_t inflatedCount() const { return occupied_count_; }
   /** @brief Voxels in the seed map, i.e. points serializeSeeds() will write. */

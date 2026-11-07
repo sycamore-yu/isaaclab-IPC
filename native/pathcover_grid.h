@@ -2,32 +2,85 @@
 
 #include <Eigen/Core>
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdint>
 #include <limits>
+#include <stdexcept>
+#include <utility>
 #include <vector>
+
+#include "occupancy_inflation/voxel_bit_grid.h"
 
 namespace pathcover_grid {
 
-// Preserve the original fine-voxel AABB overlap, including its floating-point
-// boundary convention. The caller resets previous occupancy before this call
-// and sorts occupied_indices afterwards. Virtual boundary cells stay occupied.
+// Recover a commensurate fine/search resolution ratio once at configuration.
+// Division of decimal settings such as 0.1/0.3 can differ from 1/3 by one ULP.
+// This recognizes the ratio within the arithmetic error, not a spatial epsilon.
+// Unsupported ratios fail instead of silently quantizing arbitrary real scales.
+using ResolutionRatio = std::pair<int64_t, int64_t>;
+inline ResolutionRatio resolutionRatio(double fine, double search) {
+    const double target = fine / search;
+    const double ulp = std::nextafter(target, std::numeric_limits<double>::infinity()) - target;
+    constexpr int64_t limit = 1000000;
+    int64_t previous_numerator = 0, numerator = 1;
+    int64_t previous_denominator = 1, denominator = 0;
+    double remainder = target;
+    for (int step = 0; step < 32; ++step) {
+        const double integral = std::floor(remainder);
+        if (!std::isfinite(integral) || integral > limit) break;
+        const int64_t a = static_cast<int64_t>(integral);
+        const int64_t next_numerator = a * numerator + previous_numerator;
+        const int64_t next_denominator = a * denominator + previous_denominator;
+        if (next_denominator > limit || next_numerator > limit) break;
+        if (next_numerator > 0 && next_denominator > 0
+            && std::abs(static_cast<double>(next_numerator) / next_denominator - target) <= 4.0 * ulp) {
+            return {next_numerator, next_denominator};
+        }
+        previous_numerator = numerator; numerator = next_numerator;
+        previous_denominator = denominator; denominator = next_denominator;
+        const double fraction = remainder - integral;
+        if (fraction == 0.0) break;
+        remainder = 1.0 / fraction;
+    }
+    throw std::invalid_argument("PathCover voxel resolutions require a commensurate ratio with denominator <= 1000000");
+}
+
+// Project logical fine-cell volumes into a world-zero-anchored search grid.
+// A coarse cell is occupied only for positive-volume intersection. In particular,
+// a shared face/edge/corner does not occupy its neighbour. Read integer indices
+// directly: packed float centres can move a touching face across a boundary.
+// The caller resets cloud occupancy before this call and sorts indices afterwards.
+// Already occupied virtual workspace boundary cells are preserved and not listed.
 inline void coarsenOccupiedVolumes(
-    const std::vector<Eigen::Vector3d>& points,
-    const Eigen::Vector3d& origin,
-    double fine_resolution,
-    double search_resolution,
+    const occupancy_inflation::VoxelBitGrid& fine_grid,
+    const ResolutionRatio& resolution_ratio,
+    const Eigen::Vector3i& search_origin_index,
     const Eigen::Vector3i& dimensions,
     std::vector<signed char>& cells,
     std::vector<int>& occupied_indices) {
-    const double half = 0.5 * fine_resolution;
-    // For max(0, floor(v)), negative values all clamp to zero. For ceil(v),
-    // truncation needs one increment exactly when v exceeds the integer value.
-    auto lowerIndex = [](double value) {
-        return std::max(0, static_cast<int>(value));
+    if (fine_grid.empty()) return;
+    const auto& window = fine_grid.window();
+    auto floorDivide = [](int64_t value, int64_t divisor) {
+        return value / divisor - static_cast<int64_t>(value < 0 && value % divisor != 0);
     };
-    auto upperIndex = [](double value, int maximum) {
-        const int truncated = static_cast<int>(value);
-        return std::min(maximum, truncated + static_cast<int>(value > truncated) - 1);
-    };
+    struct Range { int lo; int hi; };
+    std::array<std::vector<Range>, 3> ranges;
+    for (int axis = 0; axis < 3; ++axis) {
+        // Integer floor(lower) and ceil(upper)-1 implement strict interval
+        // overlap, including negative indices and exactly shared boundaries.
+        ranges[axis].resize(window.dims[axis]);
+        for (int i = 0; i < window.dims[axis]; ++i) {
+            const int64_t global = static_cast<int64_t>(window.base[axis]) + i;
+            const int64_t lower = global * resolution_ratio.first;
+            const int64_t upper = (global + 1) * resolution_ratio.first;
+            const int64_t lo = floorDivide(lower, resolution_ratio.second) - search_origin_index[axis];
+            const int64_t hi = -floorDivide(-upper, resolution_ratio.second) - 1 - search_origin_index[axis];
+            ranges[axis][i] = {
+                static_cast<int>(std::clamp<int64_t>(lo, 0, dimensions[axis])),
+                static_cast<int>(std::clamp<int64_t>(hi, -1, dimensions[axis] - 1))};
+        }
+    }
     auto occupy = [&](const Eigen::Vector3i& lo, const Eigen::Vector3i& hi) {
         for (int z = lo.z(); z <= hi.z(); ++z) {
             for (int y = lo.y(); y <= hi.y(); ++y) {
@@ -42,40 +95,36 @@ inline void coarsenOccupiedVolumes(
             }
         }
     };
-    Eigen::Vector3i run_lo, run_hi, cached_lo, cached_hi;
+    Eigen::Vector3i run_lo, run_hi;
     bool have_run = false;
-    double previous_y = std::numeric_limits<double>::quiet_NaN();
-    double previous_z = std::numeric_limits<double>::quiet_NaN();
-    for (const auto& point : points) {
-        Eigen::Vector3i lo, hi;
-        const double local_x = point.x() - origin.x();
-        lo.x() = lowerIndex((local_x - half) / search_resolution + 1e-9);
-        hi.x() = upperIndex((local_x + half) / search_resolution - 1e-9, dimensions.x() - 1);
-        if (point.y() != previous_y) {
-            const double local_y = point.y() - origin.y();
-            cached_lo.y() = lowerIndex((local_y - half) / search_resolution + 1e-9);
-            cached_hi.y() = upperIndex((local_y + half) / search_resolution - 1e-9, dimensions.y() - 1);
-            previous_y = point.y();
-        }
-        if (point.z() != previous_z) {
-            const double local_z = point.z() - origin.z();
-            cached_lo.z() = lowerIndex((local_z - half) / search_resolution + 1e-9);
-            cached_hi.z() = upperIndex((local_z + half) / search_resolution - 1e-9, dimensions.z() - 1);
-            previous_z = point.z();
-        }
-        lo.y() = cached_lo.y(); lo.z() = cached_lo.z();
-        hi.y() = cached_hi.y(); hi.z() = cached_hi.z();
-        if ((lo.array() > hi.array()).any()) continue;
-        // Merge only overlapping/adjacent *coarse index* intervals with identical
-        // Y/Z coverage. This is an exact union, even for unordered input points.
-        if (have_run && lo.y() == run_lo.y() && lo.z() == run_lo.z()
-            && hi.y() == run_hi.y() && hi.z() == run_hi.z()
-            && lo.x() <= run_hi.x() + 1 && hi.x() >= run_lo.x() - 1) {
-            run_lo.x() = std::min(run_lo.x(), lo.x());
-            run_hi.x() = std::max(run_hi.x(), hi.x());
-        } else {
-            if (have_run) occupy(run_lo, run_hi);
-            run_lo = lo; run_hi = hi; have_run = true;
+    for (int z = 0; z < window.dims.z(); ++z) {
+        const auto rz = ranges[2][z];
+        if (rz.lo > rz.hi) continue;
+        for (int y = 0; y < window.dims.y(); ++y) {
+            const auto ry = ranges[1][y];
+            if (ry.lo > ry.hi) continue;
+            const auto* row = fine_grid.data() + window.rowOffset(y, z);
+            for (std::size_t word = 0; word < window.wordsPerRow(); ++word) {
+                uint64_t bits = row[word];
+                while (bits) {
+                    const int bit = __builtin_ctzll(bits);
+                    bits &= bits - 1;
+                    const auto rx = ranges[0][word * occupancy_inflation::kWordBits + bit];
+                    if (rx.lo > rx.hi) continue;
+                    const Eigen::Vector3i lo(rx.lo, ry.lo, rz.lo), hi(rx.hi, ry.hi, rz.hi);
+                    // Adjacent X intervals with the same Y/Z footprint have the
+                    // same union, including runs from several consecutive rows.
+                    if (have_run && lo.y() == run_lo.y() && lo.z() == run_lo.z()
+                        && hi.y() == run_hi.y() && hi.z() == run_hi.z()
+                        && lo.x() <= run_hi.x() + 1 && hi.x() >= run_lo.x() - 1) {
+                        run_lo.x() = std::min(run_lo.x(), lo.x());
+                        run_hi.x() = std::max(run_hi.x(), hi.x());
+                    } else {
+                        if (have_run) occupy(run_lo, run_hi);
+                        run_lo = lo; run_hi = hi; have_run = true;
+                    }
+                }
+            }
         }
     }
     if (have_run) occupy(run_lo, run_hi);

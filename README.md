@@ -12,6 +12,8 @@ PathCover 原生前端依次执行 NanoVoxMap、全图 DMP、RISP 和 GCOPTER/MI
 
 原生 DMP 直接搜索完整可用网格。正式 Dense 失败快照表明，旧 JPS 引导区域内没有合法连接，完整网格中存在合法路径。上游 JPS 源码与完整链路对照继续保留。`search_radius` 仅用于该上游对照，生产 DMP 不裁剪引导区域。
 
+搜索网格直接读取膨胀后的整数占据位图。细格与粗格仅触边时，不将相邻粗格标成障碍。两种分辨率需具有可恢复的有理比例，分子和分母上限为 1,000,000；常用的 0.1/0.25、0.1/0.3 及同分辨率均支持。诊断点云仍保留原 float 输出，正常规划不经该转换。
+
 - **训练**：Isaac Lab 3 / Newton (MJWarp)，真实电机力、接触和 LiDAR。使用标准 RSL-RL PPO；Actor 学习成本，Critic 估计长期价值。
 - **正式闭环评测**：MARSIM + Flightmare，控制频率 100 Hz 仿真时间，MPC 以 10 Hz 仿真时间重规划。也保留可选墙钟模式，用于计算延迟测试。
 - **外部对照**：原版 [SUPER](https://github.com/hku-mars/SUPER) 独立运行；其代码不属于上述两条路径。

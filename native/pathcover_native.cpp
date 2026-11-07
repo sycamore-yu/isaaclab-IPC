@@ -158,10 +158,10 @@ class NativeFrontend {
     std::unique_ptr<pathcover_cuda::DistanceMap> distance_cuda_;
     std::vector<std::array<int, 4>> distance_mask_;
 #endif
-    Eigen::Vector3i dimensions_;
+    Eigen::Vector3i dimensions_, grid_origin_index_;
+    pathcover_grid::ResolutionRatio grid_resolution_ratio_;
     Vec3 center_lower_, center_upper_, grid_origin_;
     std::vector<int> occupied_indices_;
-    std::vector<Vec3> inflated_points_;
     std::vector<Vec3> obstacle_centers_;
     MappingStats last_update_;
     bool map_dirty_ = true;
@@ -193,8 +193,10 @@ public:
         const Vec3 clearance(options_.radius, options_.radius, options_.radius_z);
         // Mapping, search and geometry share a lattice anchored at world zero.
         // Round the body's usable workspace inward to complete free grid cells.
-        grid_origin_ = (options_.lower.array() / options_.search_resolution).floor().matrix()
-            * options_.search_resolution;
+        grid_origin_index_ = (options_.lower.array() / options_.search_resolution)
+            .floor().cast<int>().matrix();
+        grid_origin_ = grid_origin_index_.cast<double>() * options_.search_resolution;
+        grid_resolution_ratio_ = pathcover_grid::resolutionRatio(options_.resolution, options_.search_resolution);
         center_lower_ = (((options_.lower + clearance).array() / options_.search_resolution)
             .ceil()).matrix() * options_.search_resolution;
         center_upper_ = (((options_.upper - clearance).array() / options_.search_resolution)
@@ -227,7 +229,7 @@ public:
         dimensions_ = VoxelGrid::initializeGrid<double, 3>(
             grid_origin_, options_.upper, options_.search_resolution, empty);
         // Virtual workspace boundaries are physical surfaces too. Mark them once;
-        // setOccupancy records only previously free cells, so cloud resets preserve these.
+        // Projection records only previously free cells, so cloud resets preserve these.
         for (int z = 0; z < dimensions_.z(); ++z) {
             for (int y = 0; y < dimensions_.y(); ++y) {
                 for (int x = 0; x < dimensions_.x(); ++x) {
@@ -261,7 +263,6 @@ public:
         make_map();
         inflater_.reset();
         VoxelGrid::resetOccupancy(grid_->map_, occupied_indices_);
-        inflated_points_.clear();
         obstacle_centers_.clear();
         map_dirty_ = true;
         last_update_ = MappingStats{};
@@ -288,23 +289,10 @@ public:
         last_update_.inflated_voxels = stats.inflated_voxels;
         const auto grid_begin = Clock::now();
         if (stats.changed) {
-            // Upstream serialization is packed float XYZ, without ROS or PCL.
-            Eigen::Matrix<float, Eigen::Dynamic, 3, Eigen::RowMajor> packed(inflater_.occupiedCount(), 3);
-            inflater_.serialize(reinterpret_cast<uint8_t *>(packed.data()), 3 * sizeof(float), false);
-            inflated_points_.resize(packed.rows());
-            for (Eigen::Index i = 0; i < packed.rows(); ++i) {
-                inflated_points_[i] = packed.row(i).cast<double>();
-            }
             VoxelGrid::resetOccupancy(grid_->map_, occupied_indices_);
-            if (options_.search_resolution == options_.resolution) {
-                VoxelGrid::setOccupancy<double, 3>(inflated_points_, grid_origin_,
-                    options_.resolution, grid_->map_, dimensions_, occupied_indices_);
-            } else {
-                // Preserve exact fine-voxel AABB coverage; merge repeated coarse runs.
-                pathcover_grid::coarsenOccupiedVolumes(
-                    inflated_points_, grid_origin_, options_.resolution,
-                    options_.search_resolution, dimensions_, grid_->map_, occupied_indices_);
-            }
+            pathcover_grid::coarsenOccupiedVolumes(
+                inflater_.outputGrid(), grid_resolution_ratio_, grid_origin_index_, dimensions_,
+                grid_->map_, occupied_indices_);
             std::sort(occupied_indices_.begin(), occupied_indices_.end());
             obstacle_centers_.clear();
             obstacle_centers_.reserve(occupied_indices_.size());
@@ -324,9 +312,11 @@ public:
     MappingStats last_update() const { return last_update_; }
 
     Points inflated_cloud() const {
-        Points output(inflated_points_.size(), 3);
-        for (std::size_t i = 0; i < inflated_points_.size(); ++i) output.row(i) = inflated_points_[i];
-        return output;
+        // Keep the historical packed-float diagnostic representation. Planning
+        // consumes the logical bit-grid and does not serialize this point cloud.
+        Eigen::Matrix<float, Eigen::Dynamic, 3, Eigen::RowMajor> packed(inflater_.occupiedCount(), 3);
+        inflater_.serialize(reinterpret_cast<uint8_t *>(packed.data()), 3 * sizeof(float), false);
+        return packed.cast<double>();
     }
 
     Points obstacle_centers() const {
