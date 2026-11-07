@@ -1134,6 +1134,7 @@ namespace trajectory_server
 #include "gcopter/geo_utils.hpp"
 #include "gcopter/minco.hpp"
 #include "gcopter/flatness.hpp"
+#include "gcopter/continuous_position_max.hpp"
 #include <chrono>
 #include <limits>
 #include <stdexcept>
@@ -1216,6 +1217,7 @@ namespace trajectory_server
         ConstraintMetrics constraintMetrics;
         TimeInitialization timeInitialization;
         double positionSmoothEps = 0.01;
+        bool continuousMaxPositionPenalty = false;
         InitialForce initialForce;
 
         double rho;
@@ -1735,7 +1737,8 @@ namespace trajectory_server
                                                     const PolyhedraH &originalHPolys,
                                                     double &cost,
                                                     Eigen::VectorXd &gradT,
-                                                    Eigen::MatrixX3d &gradC)
+                                                    Eigen::MatrixX3d &gradC,
+                                                    bool continuousMaxPosition = false)
         {
             metrics = ConstraintMetrics{};
             const double velSqrMax = magnitudeBounds(0) * magnitudeBounds(0);
@@ -1829,7 +1832,8 @@ namespace trajectory_server
                         const double projectedPosition = projectedPositions(k);
                         violaPos = projectedPosition + hPolys[L](k, 3);
                         metrics.sfc = std::max(metrics.sfc, projectedPosition + originalHPolys[L](k, 3));
-                        if (smoothedL1(violaPos, positionSmoothFactor, violaPosPena, violaPosPenaD))
+                        if (!continuousMaxPosition &&
+                            smoothedL1(violaPos, positionSmoothFactor, violaPosPena, violaPosPenaD))
                         {
                             outerNormal = hPolys[L].block<1, 3>(k, 0);
                             gradPos += weightPos * violaPosPenaD * outerNormal;
@@ -1924,6 +1928,34 @@ namespace trajectory_server
                                 node * integralFrac * pena;
                     cost += node * step * pena;
                 }
+                if constexpr (S == 3)
+                {
+                    if (continuousMaxPosition)
+                    {
+                        const auto maximum = pathcover_continuous_position::maximum(c, T(i), hPolys[L]);
+                        if (!maximum.finite)
+                        {
+                            metrics.finite = false;
+                            cost = std::numeric_limits<double>::quiet_NaN();
+                            gradT(i) = cost;
+                            gradC.template block<CoeffRows, 3>(i * CoeffRows, 0).setConstant(cost);
+                            return;
+                        }
+                        if (smoothedL1(maximum.value, positionSmoothFactor, violaPosPena, violaPosPenaD))
+                        {
+                            fillDerivativeBasis<false>(maximum.alpha * T(i), beta0, beta1, beta2, beta3, beta4);
+                            vel = c.transpose() * beta1;
+                            outerNormal = hPolys[L].block<1, 3>(maximum.face, 0);
+                            const double derivative = weightPos * violaPosPenaD;
+                            gradC.template block<CoeffRows, 3>(i * CoeffRows, 0) +=
+                                derivative * beta0 * outerNormal.transpose();
+                            // Envelope derivative: no derivative of the maximizing
+                            // alpha. Interior n.dot(v)=0; endpoints retain this term.
+                            gradT(i) += derivative * maximum.alpha * outerNormal.dot(vel);
+                            cost += weightPos * violaPosPena;
+                        }
+                    }
+                }
             }
 
             return;
@@ -1961,7 +1993,8 @@ namespace trajectory_server
                                         obj.smoothEps, obj.integralRes,
                                         obj.magnitudeBd, obj.penaltyWt, obj.flatmap, obj.constraintMetrics,
                                         obj.positionSmoothEps, obj.hPolytopes,
-                                        cost, obj.partialGradByTimes, obj.partialGradByCoeffs);
+                                        cost, obj.partialGradByTimes, obj.partialGradByCoeffs,
+                                        obj.continuousMaxPositionPenalty);
             }
             else
             {
@@ -1970,7 +2003,8 @@ namespace trajectory_server
                                         obj.smoothEps, obj.integralRes,
                                         obj.magnitudeBd, obj.penaltyWt, obj.flatmap, obj.constraintMetrics,
                                         obj.positionSmoothEps, obj.hPolytopes,
-                                        cost, obj.partialGradByTimes, obj.partialGradByCoeffs);
+                                        cost, obj.partialGradByTimes, obj.partialGradByCoeffs,
+                                        obj.continuousMaxPositionPenalty);
             }
 
             if constexpr (S == 3)
@@ -2533,6 +2567,18 @@ namespace trajectory_server
         // Position residuals have units of metres. Keep their smoothing width
         // separate from the upstream dynamic residual smoothing.
         inline void setPositionPenaltySmoothing(double metres) { positionSmoothEps = metres; }
+
+        // Explicit objective choice, independent of the initial-boundary mode.
+        // S4 keeps its original integral objective; S3 defaults to that path too.
+        inline void setContinuousMaxPositionPenalty(bool enabled)
+        {
+            if constexpr (S != 3)
+            {
+                if (enabled)
+                    throw std::invalid_argument("Continuous position maxima require 3D MINCO S3");
+            }
+            continuousMaxPositionPenalty = enabled;
+        }
 
         // Original polytope/overlap geometric caps, before endpoint reductions.
         inline const Eigen::VectorXd &getMarginCaps() const

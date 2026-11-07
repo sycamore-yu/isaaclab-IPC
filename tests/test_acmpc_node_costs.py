@@ -210,8 +210,10 @@ def test_frontend_and_ctbr_share_physical_parameters():
     assert default.tilt_max == math.pi / 2
     assert default.max_corridors == 4 and default.safety_margin == 0.0
     assert default.pieces_per_polytope == 1
+    assert default.position_penalty_aggregation == "continuous_max"
     standalone = PathCoverConfig()
     assert standalone.max_corridors == 6 and standalone.safety_margin == 0.15
+    assert standalone.position_penalty_aggregation == "integral"
     assert default.penalty_weights == (1e5, 100.0, 1e4, 1e4, 1e4)
     assert default.body_rate_max == 3.0 and default.reference_body_rate_margin == 0.01
     assert model.body_rate_limits == (3.0, 3.0, 1.5)
@@ -224,13 +226,14 @@ def test_frontend_and_ctbr_share_physical_parameters():
         "nominal_velocity": 6.0, "thrust_min": 0.0, "nominal_thrust_min": 0.0,
         "thrust_max": model.mass * model.specific_thrust_limits[1],
         "tilt_max": 0.8, "penalty_weights": (1e4, 1e3, 1e4, 1e4, 1e4),
-        "max_corridors": 6, "safety_margin": 0.15,
+        "max_corridors": 6, "safety_margin": 0.15, "position_penalty_aggregation": "integral",
     })
     assert stress.nominal_velocity == 6.0 and stress.thrust_min == 0.0
     assert stress.nominal_thrust_min == 0.0
     assert stress.thrust_max == model.mass * model.specific_thrust_limits[1]
     assert stress.tilt_max == 0.8
     assert stress.max_corridors == 6 and stress.safety_margin == 0.15
+    assert stress.position_penalty_aggregation == "integral"
     conservative = pathcover_config_for_ctbr(model, {
         "thrust_min": 2.0 / 0.716 * model.mass, "thrust_max": 10.0 / 0.716 * model.mass,
         "tilt_max": 0.7854,
@@ -264,6 +267,7 @@ def test_marsim_keeps_cruise_target_distinct_from_physical_speed(benchmark, phys
     assert frontend.tilt_max == math.pi / 2
     assert frontend.max_corridors == 4 and frontend.safety_margin == 0.0
     assert frontend.pieces_per_polytope == 1
+    assert frontend.position_penalty_aggregation == "continuous_max"
     assert frontend.penalty_weights == (1e5, 100.0, 1e4, 1e4, 1e4)
     assert frontend.body_rate_max == 3.0 and frontend.reference_body_rate_margin == 0.01
     assert model.body_rate_limits == (3.0, 3.0, 1.5)

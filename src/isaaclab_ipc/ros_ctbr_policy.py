@@ -64,7 +64,7 @@ def benchmark_frontend_config(case, config, reference_speed=3.0, *, nominal_thru
         resolution=max(0.1, mapping["resolution"]),
         search_resolution=0.25 if mapping["resolution"] < 0.25 else None,
         robot_radius=case["planner"]["super_planner"]["robot_r"],
-        max_corridors=4, safety_margin=0.0,
+        max_corridors=4, safety_margin=0.0, position_penalty_aggregation="continuous_max",
         max_velocity=physical_speed, nominal_velocity=min(reference_speed, physical_speed),
         mass=config.mass, gravity=config.gravity,
         thrust_min=config.mass * config.specific_thrust_limits[0],

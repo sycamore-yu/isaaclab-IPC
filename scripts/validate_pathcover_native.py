@@ -67,6 +67,12 @@ int main(int argc, char** argv) {
         std::cin >> axis.x() >> axis.y() >> axis.z() >> lower >> upper >> measured_guess;
         solver.enableInitialForce(axis, lower, upper, measured_guess);
     }
+    // Missing mode tails retain the exact historical integral objective.
+    int continuous_max = 0;
+    if (std::cin >> continuous_max) {
+        if (continuous_max != 0 && continuous_max != 1) return 4;
+        solver.setContinuousMaxPositionPenalty(continuous_max != 0);
+    }
 #endif
     Trajectory<5> trajectory;
     const double objective = solver.optimize(trajectory, tolerance, iterations);
@@ -119,6 +125,8 @@ def serialized_gcopter_input(plan, state, config):
 def official_gcopter(upstream, plan, state, config):
     if getattr(plan, "metrics", {}).get("initial_boundary", {}).get("mode", "fixed_pva") != "fixed_pva":
         raise ValueError("Unmodified official GCOPTER has no CTBR collective boundary")
+    if config.position_penalty_aggregation != "integral":
+        raise ValueError("Unmodified official GCOPTER has no continuous_max position cost")
     revision = subprocess.check_output(["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
     if revision != PIN:
         raise ValueError(f"Expected PathCover {PIN}, found {revision}")

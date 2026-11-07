@@ -33,11 +33,16 @@ def serialized_problem(problem, config):
         config.native_options()["thrust_max"], *config.penalty_weights,
         config.mass, config.gravity, 0.0, 0.0, 0.0, 0.001, config.position_penalty_smoothing_m,
     ])
-    if problem.get("initial_boundary", {}).get("mode", "fixed_pva") == "ctbr_collective":
+    collective = problem.get("initial_boundary", {}).get("mode", "fixed_pva") == "ctbr_collective"
+    if collective:
         axis = np.asarray(problem["initial_boundary"]["thrust_axis"], dtype=np.float64)
         measured_force = np.asarray(problem["initial_pva"])[:, 2] + [0.0, 0.0, config.gravity]
         guess = config.mass * float(measured_force @ axis)
         values.extend([1, *axis, config.thrust_min, config.thrust_max, guess])
+    if config.position_penalty_aggregation == "continuous_max":
+        if not collective:
+            values.append(0)
+        values.append(1)
     return " ".join(str(value) for value in values)
 
 
@@ -48,6 +53,7 @@ def config_from_snapshot(values):
     if "yaw_rate_max" in config_values:
         config_values["body_yaw_rate_max"] = config_values.pop("yaw_rate_max")
     config_values.setdefault("position_penalty_smoothing_m", 0.01)
+    config_values.setdefault("position_penalty_aggregation", "integral")
     config_values.setdefault("reference_body_rate_margin", 0.0)
     # A recorded physical lower bound was also the optimizer target before this
     # split. Do not apply the current CTBR factory default during offline replay.
@@ -73,10 +79,13 @@ def replay(binary, text, problem, config, ported):
     boundary_mode = problem.get("initial_boundary", {}).get("mode", "fixed_pva")
     if not ported and boundary_mode != "fixed_pva":
         raise ValueError("Unmodified official GCOPTER has no CTBR collective boundary; fixed-PVA comparison is a different problem")
+    if not ported and config.position_penalty_aggregation != "integral":
+        raise ValueError("Unmodified official GCOPTER has no continuous_max position cost")
     completed = subprocess.run([str(binary), str(config.random_seed)], input=text,
                                text=True, capture_output=True)
     result = {"success": completed.returncode == 0, "returncode": completed.returncode,
-              "initialization_seed": config.random_seed if ported else 5489}
+              "initialization_seed": config.random_seed if ported else 5489,
+              "position_penalty_aggregation": config.position_penalty_aggregation}
     if completed.returncode:
         result["diagnostic"] = "\n".join(value.strip() for value in (completed.stdout, completed.stderr) if value.strip())
         return result
@@ -139,6 +148,8 @@ def main():
         state = captured["current_state"]
         problem["initial_yaw"] = float(state["yaw"] if isinstance(state, dict) else state.yaw)
     config = config_from_snapshot(problem["config"])
+    if args.upstream and config.position_penalty_aggregation != "integral":
+        raise ValueError("Unmodified official GCOPTER has no continuous_max position cost")
     if args.max_iterations is not None:
         config = replace(config, max_iterations=args.max_iterations)
     root = Path(__file__).resolve().parents[1]

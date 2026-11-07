@@ -52,6 +52,25 @@ code and evidence remain available; this branch develops the new AC-MPC route.
   explicit Newton overrides remain supported. Nonzero margins retain the existing
   polytope/intersection caps and endpoint face-clearance caps. Record requested
   and applied margins separately. A soft position penalty never proves clearance.
+- CTBR factories select `position_penalty_aggregation=continuous_max`. For each
+  S3 polynomial piece, the position cost is the original smoothed L1 function
+  applied to the largest plane residual over its complete time interval, multiplied
+  by the existing position weight. There is no quadrature time weight on this term.
+  Find its floating-point maximum from both endpoints and the real stationary
+  roots of the normalized-time quintic plane projection. The derivative polynomial
+  has degree at most four, so the existing root solver uses its analytic branch.
+  Differentiate the selected face/time with the envelope formula; positive ties
+  remain nonsmooth and select the first face, then the earliest candidate time.
+  A conservative Bernstein upper bound can skip a face's roots only when it is
+  strictly below the current maximum. Such a face cannot supply a winning endpoint
+  either. Finite-input checks remain; other faces evaluate both endpoints and roots.
+  This root calculation belongs to the objective, not a second acceptance pass.
+  Dynamic penalties and the original quadrature diagnostics remain unchanged.
+  Floating-point roots are not interval certificates. `integral` remains the
+  standalone default, the behavior of historical snapshots without the field,
+  and the S2/S4 path. The aggregation mode is independent of the initial-force
+  boundary. Unmodified official oracles explicitly reject the new cost instead
+  of silently solving a different objective.
 - Match the official frontend's reference acceptance semantics: optimization must
   produce a finite cost and a nonempty numerical trajectory. Interface conditions
   such as positive durations and a defined attitude/yaw remain necessary.

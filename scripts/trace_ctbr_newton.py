@@ -60,11 +60,12 @@ def main():
             frozen["frontend_config"] = asdict(frontend.config)
             torch.save(frozen, args.output / "failed-frontend-call.pt")
             raise
+        frozen["frontend_plan"] = result
         if "initial_boundary" in result.metrics:
             frozen["initial_boundary"] = deepcopy(result.metrics["initial_boundary"])
-            torch.save(frozen, inputs / f"{plan_count:05d}.pt")
-            if plan_count == 1:
-                torch.save(frozen, args.output / "first-frontend-input.pt")
+        torch.save(frozen, inputs / f"{plan_count:05d}.pt")
+        if plan_count == 1:
+            torch.save(frozen, args.output / "first-frontend-input.pt")
         return result
 
     def reset(frontend):

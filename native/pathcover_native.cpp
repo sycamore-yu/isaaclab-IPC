@@ -72,6 +72,7 @@ struct Options {
     std::size_t cuda_min_grid_voxels;
     unsigned int random_seed;
     bool use_cuda, dmp_xy_heuristic;
+    std::string position_penalty_aggregation;
     Eigen::VectorXd penalty_weights;
     explicit Options(const py::dict &values) {
         lower = values["bounds_lower"].cast<Vec3>();
@@ -107,6 +108,11 @@ struct Options {
         safety_margin = values["safety_margin"].cast<double>();
         relative_tolerance = values["relative_tolerance"].cast<double>();
         position_penalty_smoothing = values["position_penalty_smoothing_m"].cast<double>();
+        position_penalty_aggregation = values.contains("position_penalty_aggregation")
+            ? values["position_penalty_aggregation"].cast<std::string>() : "integral";
+        if (position_penalty_aggregation != "integral" && position_penalty_aggregation != "continuous_max") {
+            throw std::invalid_argument("PathCover position_penalty_aggregation must be integral or continuous_max");
+        }
         alpha = values["risp_alpha"].cast<double>();
         horizon = values["max_corridors"].cast<int>();
         pieces_per_polytope = values["pieces_per_polytope"].cast<int>();
@@ -188,6 +194,7 @@ static py::dict initialBoundaryDict(const InitialBoundary &value) {
 }
 
 struct PlanResult {
+    std::string position_penalty_aggregation;
     Points path;
     Points selected_initial_motion_seed;
     bool initial_motion_seed_adjusted = false;
@@ -469,6 +476,7 @@ public:
     py::object failed_problem() const {
         if (!failed_problem_ && !pending_initial_boundary_) return py::none();
         py::dict value;
+        value["position_penalty_aggregation"] = options_.position_penalty_aggregation;
         if (pending_initial_boundary_)
             value["initial_boundary"] = initialBoundaryDict(*pending_initial_boundary_);
         if (!failed_problem_) return value;
@@ -570,6 +578,7 @@ public:
             throw PathCoverPlanningError("PathCover state or goal violates workspace body clearance");
         }
         PlanResult result;
+        result.position_penalty_aggregation = options_.position_penalty_aggregation;
         result.initial_boundary = *pending_initial_boundary_;
         result.initial_speed = velocity.norm();
         result.speed_acceptance_limit = speedAcceptanceLimit(options_.max_velocity);
@@ -739,6 +748,7 @@ public:
                 throw PathCoverPlanningError("PathCover GCOPTER corridor decomposition failed");
             }
             solver.setPositionPenaltySmoothing(options_.position_penalty_smoothing);
+            solver.setContinuousMaxPositionPenalty(options_.position_penalty_aggregation == "continuous_max");
             if (initial_thrust_axis) {
                 solver.enableInitialForce(*initial_thrust_axis, options_.thrust_min, options_.thrust_max,
                                           result.initial_boundary.force_guess_raw_n);
@@ -857,6 +867,7 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def_readonly("gpu_inflation", &MappingStats::gpu_inflation)
         .def_readonly("gpu_box_compression", &MappingStats::gpu_box_compression);
     py::class_<PlanResult>(m, "PlanResult")
+        .def_readonly("position_penalty_aggregation", &PlanResult::position_penalty_aggregation)
         .def_readonly("path", &PlanResult::path)
         .def_readonly("selected_initial_motion_seed", &PlanResult::selected_initial_motion_seed)
         .def_readonly("initial_motion_seed_adjusted", &PlanResult::initial_motion_seed_adjusted)

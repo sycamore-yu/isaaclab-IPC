@@ -45,3 +45,62 @@ def test_official_replay_rejects_collective_contract_before_running_solver(repla
     with pytest.raises(ValueError, match="no CTBR collective boundary"):
         replay_module.replay(Path("unused"), "", {"initial_boundary": {"mode": "ctbr_collective"}},
                              PathCoverConfig(), False)
+
+
+@pytest.mark.parametrize("collective", [False, True])
+def test_continuous_position_cost_has_explicit_replay_tail(replay_module, collective):
+    from dataclasses import replace
+
+    config = PathCoverConfig(thrust_min=0.0, nominal_thrust_min=2.1, thrust_max=22.0)
+    problem = {"initial_pva": np.zeros((3, 3)), "terminal_pva": np.zeros((3, 3)), "corridors": ()}
+    if collective:
+        problem["initial_boundary"] = {"mode": "ctbr_collective", "thrust_axis": [0.0, 0.0, 1.0]}
+    historical = np.fromstring(replay_module.serialized_problem(problem, config), sep=" ")
+    selected = replace(config, position_penalty_aggregation="continuous_max")
+    current = np.fromstring(replay_module.serialized_problem(problem, selected), sep=" ")
+    tail = [1] if collective else [0, 1]
+    np.testing.assert_array_equal(current[:-len(tail)], historical)
+    np.testing.assert_array_equal(current[-len(tail):], tail)
+    assert config.position_penalty_aggregation == "integral"
+
+
+def test_historical_position_cost_does_not_follow_ctbr_factory_default(replay_module):
+    recorded = PathCoverConfig(position_penalty_aggregation="continuous_max").native_options()
+    assert replay_module.config_from_snapshot(recorded).position_penalty_aggregation == "continuous_max"
+    del recorded["position_penalty_aggregation"]
+    assert replay_module.config_from_snapshot(recorded).position_penalty_aggregation == "integral"
+    assert "position_penalty_aggregation" not in recorded
+
+
+@pytest.mark.parametrize("mode", ["piece_max", "", None])
+def test_unknown_position_cost_is_not_silently_replaced(mode):
+    with pytest.raises(ValueError, match="position_penalty_aggregation"):
+        PathCoverConfig(position_penalty_aggregation=mode)
+
+
+def test_official_replay_rejects_continuous_cost_before_running_solver(replay_module, monkeypatch):
+    def unexpected_run(*args, **kwargs):
+        pytest.fail("A different integral-cost problem must not run as an official comparison")
+
+    monkeypatch.setattr(replay_module.subprocess, "run", unexpected_run)
+    config = PathCoverConfig(position_penalty_aggregation="continuous_max")
+    with pytest.raises(ValueError, match="no continuous_max position cost"):
+        replay_module.replay(Path("unused"), "", {}, config, False)
+
+
+@pytest.mark.parametrize("entry", ["whole_chain", "gcopter"])
+def test_other_official_oracles_reject_unavailable_cost(replay_module, monkeypatch, entry):
+    from types import SimpleNamespace
+
+    def unexpected_call(*args, **kwargs):
+        pytest.fail("The unsupported cost must be detected before building or running the oracle")
+
+    monkeypatch.setattr(replay_module.subprocess, "check_output", unexpected_call)
+    config = PathCoverConfig(position_penalty_aggregation="continuous_max")
+    with pytest.raises(ValueError, match="no continuous_max position cost"):
+        if entry == "whole_chain":
+            module = importlib.import_module("compare_pathcover_upstream")
+            module.serialized_input(np.empty((0, 3)), np.zeros((3, 3)), np.zeros(3), config)
+        else:
+            module = importlib.import_module("validate_pathcover_native")
+            module.official_gcopter(Path("unused"), SimpleNamespace(metrics={}), None, config)

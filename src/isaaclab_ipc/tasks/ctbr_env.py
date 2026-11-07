@@ -76,6 +76,7 @@ def pathcover_config_for_ctbr(model, overrides):
     options.setdefault("max_corridors", 4)
     # Obstacle clearance is already encoded by occupancy inflation and raw SFCs.
     options.setdefault("safety_margin", 0.0)
+    options.setdefault("position_penalty_aggregation", "continuous_max")
     for name in ("mass", "gravity"):
         value = getattr(model, name)
         if name in options and not math.isclose(options[name], value, rel_tol=0, abs_tol=1e-9):

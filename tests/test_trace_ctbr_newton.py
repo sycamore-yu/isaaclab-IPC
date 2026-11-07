@@ -38,7 +38,10 @@ def test_trace_freezes_new_initial_boundary_without_changing_plan_call(tmp_path,
                   initial_motion_tip_segment=np.arange(6.).reshape(2, 3), initial_thrust_axis=axis)
     boundary = dict(mode="ctbr_collective", measured_acceleration=state.acceleration.tolist(),
                     reference_acceleration=[1., 2., 3.], thrust_axis=axis.tolist(), force_n=4.)
-    result = SimpleNamespace(metrics={"initial_boundary": boundary})
+    result = SimpleNamespace(
+        metrics={"initial_boundary": boundary},
+        trajectory=SimpleNamespace(coefficients=np.arange(18.).reshape(1, 3, 6), durations=np.array([.75])),
+    )
     calls = []
 
     def original_plan(frontend, points, received_state, goal, **received):
@@ -61,11 +64,16 @@ def test_trace_freezes_new_initial_boundary_without_changing_plan_call(tmp_path,
             traced(frontend, np.ones((1, 3)), state, np.array([8., 0., 1.]), **kwargs)
         stored = torch.load(tmp_path / "failed-frontend-call.pt", weights_only=False)
         assert stored["gcopter_problem"]["initial_boundary"] == boundary
+        assert "frontend_plan" not in stored
     else:
         assert traced(frontend, np.ones((1, 3)), state, np.array([8., 0., 1.]), **kwargs) is result
         stored = torch.load(tmp_path / "frontend-inputs/00001.pt", weights_only=False)
         first = torch.load(tmp_path / "first-frontend-input.pt", weights_only=False)
         assert stored["initial_boundary"] == first["initial_boundary"] == boundary
+        for saved in (stored, first):
+            assert saved["frontend_plan"].metrics == result.metrics
+            np.testing.assert_array_equal(saved["frontend_plan"].trajectory.coefficients, result.trajectory.coefficients)
+            np.testing.assert_array_equal(saved["frontend_plan"].trajectory.durations, result.trajectory.durations)
     assert len(calls) == 1
     assert stored["current_state"]["yaw"] == state.yaw
     np.testing.assert_array_equal(stored["current_state"]["acceleration"], state.acceleration)

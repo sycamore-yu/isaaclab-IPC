@@ -57,6 +57,9 @@ class PathCoverConfig:
     # Width in metres of the smoothed L1 position penalty. Dynamic smoothing
     # retains the upstream 0.01 in each corresponding constraint's units.
     position_penalty_smoothing_m: float = 1e-6
+    # Standalone and historical captures retain the time-integrated position cost.
+    # CTBR factories select one continuous-time maximum penalty per polynomial.
+    position_penalty_aggregation: str = "integral"
     potential_radius: float = 1.0
     # Used by the upstream JPS-guide comparison; native global DMP has no guide region.
     search_radius: float = 2.0
@@ -75,6 +78,8 @@ class PathCoverConfig:
     yaw_low_speed: float = 0.1
 
     def __post_init__(self):
+        if self.position_penalty_aggregation not in ("integral", "continuous_max"):
+            raise ValueError("position_penalty_aggregation must be integral or continuous_max")
         if (not math.isfinite(self.body_rate_max)
                 or not math.isfinite(self.reference_body_rate_margin)
                 or not 0 <= self.reference_body_rate_margin < self.body_rate_max):
@@ -299,6 +304,7 @@ class NativePathCoverFrontend:
                 "initial_motion_seed": seed.copy(), "initial_motion_tip_segment": tip_segment.copy(),
                 "initial_thrust_axis": None if thrust_axis is None else thrust_axis.copy(),
                 "initial_boundary": dict(result.initial_boundary),
+                "position_penalty_aggregation": result.position_penalty_aggregation,
                 "corridors": tuple(result.corridors), "optimizer_status": result.optimizer_status,
                 "trial_durations": np.asarray(result.durations).copy(),
                 "constraint_metrics": constraint_metrics,
@@ -428,6 +434,7 @@ class NativePathCoverFrontend:
             "time_initialization_scale": initialization["scale"],
             "optimizer_status": result.optimizer_status, "objective": result.cost,
             "initial_boundary": initial_boundary,
+            "position_penalty_aggregation": result.position_penalty_aggregation,
             "optimizer_quadrature_feasible": result.optimizer_quadrature_feasible,
             "constraint_metrics_semantics": (
                 "optimizer quadrature diagnostics against physical bounds; nominal targets are separate; "

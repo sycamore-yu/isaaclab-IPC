@@ -679,6 +679,42 @@ license; embedded geometry utilities retain their original notices.
     These tradeoffs are retained in `pathcover-newton-v25-initialization-study.json`
     and are not an end-to-end latency or physical-navigation claim.
 
+51. V28 adds an explicit S3 position-objective mode, independent of the initial
+    boundary contract. Historical and standalone configurations default to
+    `position_penalty_aggregation=integral`; CTBR factories explicitly select
+    `continuous_max`. The latter adds one smoothed maximum plane residual per
+    piece, multiplied by the original position weight, without a duration or
+    quadrature factor. All dynamic penalties retain their original 64-interval
+    integration, weights, bounds, smoothing and optimizer stopping rules.
+    For each normalized quintic plane polynomial, existing analytical quartic
+    roots of its derivative and both endpoints determine a floating-point
+    maximum. The coefficient and explicit-time derivatives use the envelope
+    formula; tied maxima retain the first face and first candidate time. The
+    maximum can be negative and is not clipped to zero before applying the
+    existing hinge. Degenerate/constant polynomials and nonfinite inputs retain
+    explicit semantics. This is not an interval certificate for root accuracy.
+    A conservative Bernstein control upper bound skips all extremum candidates
+    of a face only when it is strictly below the current maximum. Its
+    absolute-coefficient rounding and
+    gradual-underflow allowance preserves near ties and nonfinite evaluation
+    behavior; unusable bounds use the original roots. S2/planar code is unchanged
+    and S4 defaults to its original integral objective. Unsupported S4 activation
+    is an input error. Native results and failure snapshots record the mode.
+    Existing quadrature quality fields still describe only their 65 nodes.
+    No new online feasibility gate, rollout, or recovery path is introduced.
+    The preceding sampled-maximum candidate missed a 165.007-micrometre peak
+    between nodes despite a node maximum of 0.364 micrometres. The continuous
+    candidate passed 51 frozen labels (50 unique inputs) for full original-SFC
+    and saved-yaw physical quality. Its Dense panel used 3,912 main evaluations
+    versus 2,621 for the integral baseline; this is not a speedup claim. On all
+    1,050 saved objective states of two cases, conservative pruning preserved
+    objective, gradient, quadrature metrics, curves and maximizing face/time
+    bitwise, including three nonfinite rejected trials. Root calls decreased
+    by 84.95% and 68.47%; local instrumented times are not end-to-end latency.
+    Production code excludes the study's counters, winner history and per-piece
+    clocks. Evidence: `formal-v27-analysis/continuous-max-position-panel.json`
+    and `newton-quality-v27/continuous-max-bernstein-pruning/parity.json`.
+
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online
 execution-trajectory reintegration or recovery state machine is added.
