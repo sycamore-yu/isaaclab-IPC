@@ -105,6 +105,31 @@ int main() {
     if (std::abs(trajectory[0].getDuration() - 1.4983553795894553) > 1e-7
         || std::abs(minco_cost - 185.8492727009114) > 1e-8) return 13;
 
+    // The V16 zero-work branch uses this exact chain-rule identity. Exercise
+    // nonzero position/velocity derivatives and nonzero drag, including a tiny
+    // position derivative that must not be treated as approximately zero.
+    flatness::FlatnessMap flatness;
+    flatness.reset(0.75, 9.81, 0.2, 0.3, 0.1, 0.001);
+    double thrust, yaw_gradient, yaw_rate_gradient;
+    Eigen::Vector4d quaternion;
+    Eigen::Vector3d angular_rate;
+    flatness.forward(Eigen::Vector3d(1.0, -0.5, 0.2),
+                     Eigen::Vector3d(0.2, -0.3, 0.4),
+                     Eigen::Vector3d(-0.1, 0.2, 0.3), 0.7, -0.2,
+                     thrust, quaternion, angular_rate);
+    const Eigen::Vector3d position_gradient(1e-300, 0.0, -2.0);
+    const Eigen::Vector3d velocity_gradient(-0.4, 0.5, 0.0);
+    Eigen::Vector3d position_total, velocity_total, acceleration_total, jerk_total;
+    flatness.backward(position_gradient, velocity_gradient, 0.0,
+                      Eigen::Vector4d::Zero(), Eigen::Vector3d::Zero(),
+                      position_total, velocity_total, acceleration_total, jerk_total,
+                      yaw_gradient, yaw_rate_gradient);
+    if (!(position_total.array() == position_gradient.array()).all()
+        || !(velocity_total.array() == velocity_gradient.array()).all()
+        || !(acceleration_total.array() == 0.0).all()
+        || !(jerk_total.array() == 0.0).all()
+        || yaw_gradient != 0.0 || yaw_rate_gradient != 0.0) return 14;
+
     std::cout << "bounded vertices and nonfinite-trial backtracking passed\n";
 }
 """

@@ -2,7 +2,11 @@
 
 新 AC-MPC 分支按 [ADR-0008](adr/0008-native-acmpc-pathcover.md) 使用 `--policy fixed-ctbr` 或 `--policy acmpc`，直接执行 4D CTBR。`--frontend none` 选择 A0；默认 `pathcover` 选择完整原生前端。以下历史记录中的 124D jerk 检查点和二重轨迹验收不属于新 CTBR 路径。
 
-**当前状态：SUPER 的 ideal high_speed、ideal dense 和 dynamic high_speed 已完成完整往返。动态基本动作及实际 LiDAR 验证通过。AC-MPC 和固定 IPC 已实测约 100 Hz CTBR 输出。dynamic dense 仍碰撞，最新 Python 策略任务均超时，不能认定全部导航验收完成。最新证据见第 11 节。**
+当前原生 CTBR 主线的阶段结果见 [原生 AC-MPC 验证](acmpc-native-validation.md)。V15 固定成本完成 High-speed 的 2 个航点，Dense 在 21.09 s 因初始运动种子越界停止。完整规划 p95 分别为 109.729 ms 和 173.049 ms，尚未达到 100 ms 目标。
+
+本分支修正 Flightmare 的饱和分配语义：保留可行请求的总推力，统一缩放完整力矩，使 4 个旋翼的目标力满足上下界。原可行分配直接保留。电机延迟与 RK4 动态执行继续运行。第 8–11 节中的分配优先级及结果属于历史版本，不替代本次使用相同执行器的 A0/A1/A2 比较。
+
+以下历史 SUPER 结果包括 ideal high_speed、ideal dense 和 dynamic high_speed 的完整往返。历史 dynamic dense 曾碰撞，Python 策略也曾超时；这些结果及原始证据仍保留在第 11 节。
 
 MARSIM 负责正式评测，提供 `ideal` 和 `dynamic` 两种执行模式。Isaac Lab/Newton 继续使用原训练入口。ROS 节点复用项目的 Planner、PathCover/RISP、MPCActor 和 QP，不启动 Isaac Lab 仿真进程。本文记录当前实现、复现方法和实际成功／失败结果。
 

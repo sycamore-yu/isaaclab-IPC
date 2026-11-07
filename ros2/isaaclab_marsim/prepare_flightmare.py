@@ -2,6 +2,7 @@
 
 import argparse
 import difflib
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -46,9 +47,9 @@ def prepare(source: Path, target: Path) -> Path:
     # Upstream normalizes the old quaternion immediately before overwriting it.
     replace("src/objects/quadrotor.cpp", "state_.qx /= state_.qx.norm();",
             "next_state.qx /= next_state.qx.norm();")
-    # Independent rotor clipping can spend all authority on yaw and cancel roll/pitch.
-    # Preserve feasible allocations exactly. At saturation, prioritize roll/pitch,
-    # then the closest feasible collective thrust, then yaw.
+    # Match Newton's collective-first contract: retain feasible allocations,
+    # otherwise scale the complete torque vector within the rotor-force box.
+    # Saturation must not raise collective thrust to recover attitude authority.
     replace("src/objects/quadrotor.cpp",
             "  const Vector<4> motor_thrusts_des = B_allocation_inv_ * thrust_and_torque;\n\n"
             "  return dynamics_.clampThrust(motor_thrusts_des);",
@@ -57,24 +58,18 @@ def prepare(source: Path, target: Path) -> Path:
             "  const Scalar hi = dynamics_.collective_thrust_max() / 4;\n"
             "  if ((motor_thrusts_des.array() >= lo).all() &&\n"
             "      (motor_thrusts_des.array() <= hi).all()) return motor_thrusts_des;\n\n"
-            "  // Keep attitude authority at both zero and maximum collective thrust.\n"
-            "  Vector<4> roll_pitch = B_allocation_inv_ *\n"
-            "    Vector<4>(0, body_torque_des.x(), body_torque_des.y(), 0);\n"
-            "  const Scalar spread = roll_pitch.maxCoeff() - roll_pitch.minCoeff();\n"
-            "  if (spread > hi - lo) roll_pitch *= (hi - lo) / spread;\n"
-            "  const Scalar collective = std::max(lo - roll_pitch.minCoeff(),\n"
-            "    std::min(force / 4, hi - roll_pitch.maxCoeff()));\n"
-            "  Vector<4> thrust = roll_pitch + Vector<4>::Constant(collective);\n"
-            "  const Vector<4> yaw = B_allocation_inv_ *\n"
-            "    Vector<4>(0, 0, 0, body_torque_des.z());\n"
-            "  Scalar yaw_scale = 1;\n"
+            "  // The zero-sum torque component changes attitude, not collective.\n"
+            "  const Scalar collective = std::clamp(force / 4, lo, hi);\n"
+            "  const Vector<4> delta = B_allocation_inv_ *\n"
+            "    Vector<4>(0, body_torque_des.x(), body_torque_des.y(), body_torque_des.z());\n"
+            "  Scalar scale = 1;\n"
             "  for (int i = 0; i < 4; ++i) {\n"
-            "    if (yaw[i] > 0)\n"
-            "      yaw_scale = std::min(yaw_scale, (hi - thrust[i]) / yaw[i]);\n"
-            "    else if (yaw[i] < 0)\n"
-            "      yaw_scale = std::min(yaw_scale, (lo - thrust[i]) / yaw[i]);\n"
+            "    if (delta[i] > 0)\n"
+            "      scale = std::min(scale, (hi - collective) / delta[i]);\n"
+            "    else if (delta[i] < 0)\n"
+            "      scale = std::min(scale, (lo - collective) / delta[i]);\n"
             "  }\n"
-            "  thrust += std::max(Scalar(0), yaw_scale) * yaw;\n"
+            "  const Vector<4> thrust = Vector<4>::Constant(collective) + scale * delta;\n"
             "  return dynamics_.clampThrust(thrust);")
     replace("include/flightlib/dynamics/quadrotor_dynamics.hpp", "  bool setMass(const Scalar mass);",
             "  bool setInertiaDiagonal(const Vector<3>& diagonal) {\n"
@@ -101,10 +96,13 @@ def prepare(source: Path, target: Path) -> Path:
             path.write_text(updated)
         patches.extend(difflib.unified_diff(originals[relative].splitlines(True), updated.splitlines(True),
                                            f"a/flightlib/{relative}", f"b/flightlib/{relative}"))
-    (target / "isaaclab_marsim.patch").write_text("".join(patches))
+    patch = "".join(patches)
+    (target / "isaaclab_marsim.patch").write_text(patch)
     (target / "isaaclab_marsim_source.json").write_text(json.dumps({
         "source": str(source), "revision": REVISION, "license": "MIT",
         "patch": "isaaclab_marsim.patch",
+        "patch_sha256": hashlib.sha256(patch.encode()).hexdigest(),
+        "allocation": "collective_preserving_uniform_torque_scale_v1",
     }, indent=2) + "\n")
     return target
 

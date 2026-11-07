@@ -270,6 +270,19 @@ license; embedded geometry utilities retain their original notices.
     It remains a failed full-trajectory check. No previous-plan fallback or
     recovery state machine is added. The official YAML's margin is 0.15 m;
     the ROS node's separate missing-parameter default is 0.3 m.
+25. V16 skips only exact zero-gradient work in the 3D penalty loop. With finite
+    forward quantities and zero thrust/attitude/body-rate gradients, flatness
+    backward reduces to passing the position/velocity gradients and zeroing the
+    acceleration/jerk gradients. If those gradients and the penalty value are
+    also exactly zero, their coefficient/time/cost increments are omitted.
+    Forward flatness, penalties and every quadrature quality metric are retained;
+    nonfinite forward results use the original backward path. The comparisons
+    use exact zero, not a small-gradient threshold. The V14 Forest frozen problem
+    reproduced all 224 objective/gradient evaluations and its final polynomial
+    bitwise. In 20 alternating warm CPU pairs, optimizer medians changed from
+    40.564 to 31.739 ms (21.75% less); this excludes setup and is not an online
+    planning-p95 claim. Integration remains 64, reference margin remains 0.15 m,
+    and all costs, diagnostics and optimizer stopping conditions are unchanged.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online

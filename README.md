@@ -18,6 +18,8 @@ PathCover 原生前端依次执行 NanoVoxMap、全图 DMP、RISP 和 GCOPTER/MI
 - **预测模型**：10D CTBR，状态为位置、WXYZ 四元数和世界速度。优化控制为总推力 N 与机体角速度，执行时将总推力除以质量。
 - **成本节点**：默认 N=5，含当前节点，共 4 段 0.1 s 转移。Actor 输入 69 维特征，输出 140 个成本参数。旧 7 参数检查点不适用于该契约。
 
+Newton 与 Flightmare 的力矩分配均优先保留可行请求的总推力。若旋翼目标力越界，执行器统一缩放力矩。两端仍使用各自的电机动态模型，不能将 CTBR 指令等同于瞬时实际机体响应。
+
 ## 依赖与构建
 
 Linux、Python 3.12、CUDA 13、Isaac Lab 3、Newton、Warp 和原生 TurboMPC CUDA 扩展。原生前端还需要 Eigen3、Boost 头文件和 Qhull。使用项目锁定的 `uv.lock`；参考源码保持只读。

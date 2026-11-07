@@ -1741,9 +1741,31 @@ namespace trajectory_server
                         pena += weightThrust * violaThrustPena;
                     }
 
-                    flatMap.backward(gradPos, gradVel, gradThr, gradQuat, gradOmg,
-                                     totalGradPos, totalGradVel, totalGradAcc, totalGradJer,
-                                     totalGradPsi, totalGradPsiD);
+                    // A zero gradient with respect to thrust, attitude and
+                    // body rates has no contribution through the flatness map.
+                    // Use exact zero tests; retain the original path for any
+                    // nonfinite forward result or active dynamic derivative.
+                    const bool flatGradientZero = metrics.finite && gradThr == 0.0
+                        && (gradQuat.array() == 0.0).all()
+                        && (gradOmg.array() == 0.0).all();
+                    if (flatGradientZero)
+                    {
+                        if (pena == 0.0 && (gradPos.array() == 0.0).all()
+                            && (gradVel.array() == 0.0).all())
+                        {
+                            continue;
+                        }
+                        totalGradPos = gradPos;
+                        totalGradVel = gradVel;
+                        totalGradAcc.setZero();
+                        totalGradJer.setZero();
+                    }
+                    else
+                    {
+                        flatMap.backward(gradPos, gradVel, gradThr, gradQuat, gradOmg,
+                                         totalGradPos, totalGradVel, totalGradAcc, totalGradJer,
+                                         totalGradPsi, totalGradPsiD);
+                    }
 
                     node = (j == 0 || j == integralResolution) ? 0.5 : 1.0;
                     alpha = j * integralFrac;
