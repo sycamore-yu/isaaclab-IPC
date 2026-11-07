@@ -48,7 +48,7 @@ def goal_observation(state, body_rates, goal, config, *, max_planes=128, warm_st
                                  ctbr_config=config, warm_start_controls=warm_start_controls)
 
 
-def benchmark_frontend_config(case, config, reference_speed=6.0):
+def benchmark_frontend_config(case, config, reference_speed=3.0):
     from .pathcover_native import PathCoverConfig
 
     mapping = case["planner"]["rog_map"]
@@ -58,16 +58,18 @@ def benchmark_frontend_config(case, config, reference_speed=6.0):
     upper[2] = mapping["virtual_ceil_height"]
     physical_speed = min(case["planner"]["traj_opt"]["boundary"]["max_vel"],
                          *config.velocity_upper, *(-value for value in config.velocity_lower))
+    reference = PathCoverConfig(mass=config.mass, gravity=config.gravity)
     return PathCoverConfig(
         bounds_lower=tuple(lower), bounds_upper=tuple(upper),
         resolution=max(0.1, mapping["resolution"]),
         search_resolution=0.25 if mapping["resolution"] < 0.25 else None,
         robot_radius=case["planner"]["super_planner"]["robot_r"],
         max_velocity=physical_speed, nominal_velocity=min(reference_speed, physical_speed),
-        mass=config.mass, thrust_min=config.mass * config.specific_thrust_limits[0],
-        thrust_max=config.mass * config.specific_thrust_limits[1],
+        mass=config.mass, gravity=config.gravity,
+        thrust_min=max(reference.thrust_min, config.mass * config.specific_thrust_limits[0]),
+        thrust_max=min(reference.thrust_max, config.mass * config.specific_thrust_limits[1]),
         body_rate_max=min(config.body_rate_limits[:2]), body_yaw_rate_max=config.body_rate_limits[2],
-        tilt_max=0.8, use_cuda=True,
+        use_cuda=True,
     )
 
 
@@ -75,7 +77,7 @@ class CTBRController:
     """Shared actor and frontend contracts; no ROS objects or hidden PPO state."""
 
     def __init__(self, benchmark, *, policy, frontend="pathcover", checkpoint=None,
-                 device="cuda:0", max_planes=128, reference_speed=6.0):
+                 device="cuda:0", max_planes=128, reference_speed=3.0):
         started = perf_counter()
         self.device = torch.device(device)
         self.case = load_case(benchmark)
@@ -186,7 +188,7 @@ def main(args=None):
             defaults = dict(policy="fixed-ctbr", execution="dynamic", benchmark="high_speed",
                             checkpoint="", frontend="pathcover", device="cuda:0",
                             output_directory="results/marsim-ctbr", simulated_time=True,
-                            frequency=100.0, replan_frequency=10.0, reference_speed=6.0)
+                            frequency=100.0, replan_frequency=10.0, reference_speed=3.0)
             for key, value in defaults.items():
                 self.declare_parameter(key, value)
             self.options = p = {key: self.get_parameter(key).value for key in defaults}

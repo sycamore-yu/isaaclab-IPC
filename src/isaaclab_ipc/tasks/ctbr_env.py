@@ -79,7 +79,6 @@ def pathcover_config_for_ctbr(model, overrides):
             raise ValueError(f"PathCover {name} must equal the CTBR model")
         options[name] = value
     upper_limits = {
-        "thrust_max": model.mass * model.specific_thrust_limits[1],
         "body_rate_max": min(model.body_rate_limits[:2]),
         "body_yaw_rate_max": model.body_rate_limits[2],
         "max_velocity": min(*model.velocity_upper, *(-value for value in model.velocity_lower)),
@@ -91,11 +90,18 @@ def pathcover_config_for_ctbr(model, overrides):
         if value > cap:
             raise ValueError(f"PathCover {name} exceeds the CTBR limit {cap}")
         options[name] = value
-    options.setdefault("nominal_velocity", min(options["max_velocity"], 6.0))
+    reference = PathCoverConfig(mass=model.mass, gravity=model.gravity, max_velocity=options["max_velocity"])
+    options.setdefault("nominal_velocity", reference.nominal_velocity)
     floor = model.mass * model.specific_thrust_limits[0]
-    options.setdefault("thrust_min", floor)
+    cap = model.mass * model.specific_thrust_limits[1]
+    if options.get("thrust_min") is None:
+        options["thrust_min"] = max(reference.thrust_min, floor)
+    if options.get("thrust_max") is None:
+        options["thrust_max"] = min(reference.thrust_max, cap)
     if options["thrust_min"] < floor:
         raise ValueError("PathCover thrust_min is below the CTBR minimum")
+    if options["thrust_max"] > cap:
+        raise ValueError("PathCover thrust_max exceeds the CTBR maximum")
     return PathCoverConfig(**options)
 
 

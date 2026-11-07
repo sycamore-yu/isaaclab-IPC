@@ -55,6 +55,13 @@ code and evidence remain available; this branch develops the new AC-MPC route.
   measured initial speed changes. Historical `speed_acceptance_limit_m_s` names
   now denote this quality threshold, not online rejection. CTBR hard velocity
   constraints remain unchanged.
+- Use the upstream reference preset for the formal A1/A2 baseline: nominal speed
+  3 m/s, tilt 0.7854 rad, penalty weights `(1e4, 100, 1e4, 1e4, 1e4)`.
+  Scale upstream thrust bounds `(2, 10) N` by `mass / 0.716 kg` and intersect them
+  with the CTBR physical force range. This defines the reference optimization
+  limits; the MPC retains its physical input constraints. Preserve measured
+  initial PVA even when it exceeds a reference limit. Prior 6 m/s runs remain
+  separate stress results; do not combine them with the new matched baseline.
 - Rollout observations freeze state, reference, SFC and warm-start controls.
   PPO replay does not mutate the frontend or use a hidden last-solve cache.
 - The CTBR adapter supplies an optional three-point `initial_motion_seed` to
@@ -77,6 +84,24 @@ Remove the old CTBR reference governor, jerk recovery coupling and duplicate
 online execution-trajectory acceptance from the new route. Solver residuals,
 hard SFC constraints and independent collision evaluation remain measurable.
 Failure reports must not be turned into successful navigation statistics.
+
+Flightmare retains feasible requested collective force during rotor saturation
+and uniformly scales the torque vector. Feasible native allocations remain
+unchanged. Motor lag and dynamic integration remain active; Newton's additional
+motor lag compensation still differs from Flightmare's exponential response.
+
+Convert inflated occupancy into search cells on the integer voxel lattice.
+Only positive-volume overlap occupies a coarse cell. Recognize commensurate
+resolution ratios at configuration time; do not route geometry through packed
+float centres. Packed points remain a diagnostic representation.
+
+Construct heading with a native scalar ODE that bounds body yaw rate pointwise.
+Use adaptive RK4 and cubic Hermite interpolation, and return the derivative of
+the same interpolant. Fade heading feedback continuously below 0.1 m/s.
+Local integration tolerances do not certify the full trajectory's roll, pitch,
+thrust or corridor constraints. Preserve true undefined thrust-frame failures.
+On a heading failure retain the existing native candidate; serialize it only
+when failure diagnostics are requested, outside the measured planning call.
 
 The 100 Hz actuator clock and 10 Hz MPC replanning are separate. Simulation
 time execution is supported. Wall-time planning p95 below 100 ms is a measured

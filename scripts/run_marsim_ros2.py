@@ -32,8 +32,8 @@ def main():
     parser.add_argument("--benchmark", choices=("high_speed", "dense"), required=True)
     parser.add_argument("--policy", choices=("super", "ipc", "fixed-ctbr", "acmpc"), default="fixed-ctbr")
     parser.add_argument("--frontend", choices=("pathcover", "none"), default="pathcover")
-    parser.add_argument("--reference-speed", type=float, default=6.0,
-                        help="Native PathCover maximum speed in m/s, capped by the case and CTBR limits")
+    parser.add_argument("--reference-speed", type=float, default=3.0,
+                        help="Native PathCover nominal speed in m/s; physical scene/CTBR speed limits remain separate")
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--executor-parameters", type=Path)
     parser.add_argument("--output", type=Path, required=True)

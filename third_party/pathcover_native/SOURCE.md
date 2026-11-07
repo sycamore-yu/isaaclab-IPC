@@ -299,6 +299,34 @@ license; embedded geometry utilities retain their original notices.
     boundary occupancy remains separate and persistent. Diagnostic
     `inflated_cloud()` retains the original float serialization on request;
     normal map updates no longer serialize or allocate/cast a full XYZ table.
+27. V17 restores a coherent official drone reference preset: nominal speed
+    3 m/s, tilt 0.7854 rad, velocity penalty weight 100 and reference thrust
+    bounds (2, 10) N scaled by mass/0.716 kg. Newton and MARSIM factories
+    intersect the reference thrust range with the unchanged CTBR physical range.
+    Physical speed limits remain independent (High-speed 10, Dense 8, Newton
+    10 m/s). CLI, ROS parameters and launch defaults use the same nominal speed.
+    Integration remains 64, position smoothing 1e-6 m, reference margin 0.15 m
+    and the existing time initialization is retained. Explicit historical
+    pressure-test values remain configurable and stored inputs are not rewritten.
+    Defaults resolve to concrete values in newly saved configurations. On the
+    frozen V16 high-speed upward state, the preset removed the heading failure
+    but still exceeded the z<=4.8 m workspace by 0.422056 m; that result does
+    not establish complete-trajectory feasibility or performance from rest.
+28. V17 constructs heading by clipping body-r pointwise and integrating the
+    scalar yaw ODE in native C++. RK4 compares a full step with two half steps
+    at 1e-7 rad local angle tolerance; cubic Hermite interpolation checks its
+    local body-r derivative defect at 1e-4 rad/s. Base steps remain 20 ms and
+    refinement is limited to 20 levels. Heading feedback fades continuously
+    with min(horizontal_speed/0.1, 1), replacing the discontinuous low-speed
+    switch and the previous shared constant-rate interval requirement. These
+    local error checks do not certify full-curve dynamics or SFC containment.
+    Nonfinite/downward force, undefined heading and integration nonconvergence
+    remain explicit planning errors. Historical recorded linear-yaw profiles
+    retain their original interpolation. If heading construction fails, the
+    wrapper retains the existing native result; only an explicit diagnostic
+    getter copies its candidate coefficients and corridor ownership. The old
+    near-freefall reference remains dynamically invalid despite this heading
+    repair: the isolated study measured body-p/q peaks of 161.76/33.61 rad/s.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online

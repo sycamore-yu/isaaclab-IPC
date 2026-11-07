@@ -1,5 +1,6 @@
 // Native PathCover front end. Upstream provenance: third_party/pathcover_native/SOURCE.md.
 #include <pybind11/eigen.h>
+#include <pybind11/numpy.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 #include <Eigen/Dense>
@@ -19,6 +20,7 @@
 #include "distance_map_planner/distance_map_planner.h"
 #include "gcopter_solver.hpp"
 #include "pathcover_grid.h"
+#include "pathcover_yaw.h"
 #ifdef OCCUPANCY_INFLATION_WITH_CUDA
 #include "pathcover_distance_map.h"
 #endif
@@ -569,6 +571,40 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .attr("PathCoverPlanningError");
     py::register_exception<PathCoverPlanningError>(
         m, "PathCoverPlanningError", planning_error_base.ptr());
+    m.def("bounded_body_yaw_profile", [](py::array_t<double, py::array::c_style | py::array::forcecast> coefficients,
+                                          py::array_t<double, py::array::c_style | py::array::forcecast> durations,
+                                          double initial_yaw, double body_r_max, double sample_dt,
+                                          double low_speed, double gravity) {
+        if (coefficients.ndim() != 3 || coefficients.shape(1) != 3 || coefficients.shape(2) != 6
+            || durations.ndim() != 1 || coefficients.shape(0) != durations.shape(0)) {
+            throw std::invalid_argument("MINCO heading input requires [piece,3,6] coefficients and [piece] durations");
+        }
+        pathcover_yaw::Profile profile;
+        {
+            py::gil_scoped_release release;
+            try {
+                const pathcover_yaw::PolynomialGeometry polynomial(
+                    coefficients.data(), durations.data(), durations.size(), gravity);
+                pathcover_yaw::Settings settings;
+                settings.body_r_max = body_r_max;
+                settings.base_dt = sample_dt;
+                settings.low_speed = low_speed;
+                profile = pathcover_yaw::Builder(polynomial, settings).run(
+                    polynomial.boundaries.back(), initial_yaw, polynomial.boundaries);
+            } catch (const pathcover_yaw::ProfileError& error) {
+                throw PathCoverPlanningError(error.what());
+            }
+        }
+        py::array_t<double> output({static_cast<py::ssize_t>(profile.times.size()), py::ssize_t(3)});
+        auto values = output.mutable_unchecked<2>();
+        for (std::size_t i = 0; i < profile.times.size(); ++i) {
+            values(i, 0) = profile.times[i];
+            values(i, 1) = profile.values[i];
+            values(i, 2) = profile.rates[i];
+        }
+        return output;
+    }, py::arg("coefficients"), py::arg("durations"), py::arg("initial_yaw"),
+       py::arg("body_r_max"), py::arg("sample_dt"), py::arg("low_speed"), py::arg("gravity"));
     m.attr("upstream_revision") = "8723a05d1993bf0199a453b47dc6ee167d493c23";
     m.attr("cuda_built") = occupancy_inflation::cuda::built();
     py::class_<MappingStats>(m, "MappingStats")

@@ -72,6 +72,8 @@ Newton 的策略周期为 0.1 s，电机反馈和物理周期为 1/300 s。训�
 ### MARSIM
 
 ```bash
+# 当前 worktree 已构建的独立动态执行器
+export IPC_MARSIM_RUNTIME="$PWD/build/marsim-collective-v16"
 source scripts/marsim_ros2_env.sh
 export DISPLAY=:11
 
@@ -89,13 +91,15 @@ export DISPLAY=:11
 
 `dense` 场景修改 `--benchmark dense` 与输出目录。A0 使用 `--frontend none`。原 SUPER 的 `ideal/dynamic` 双执行模式继续保留。完整任务、实际失败和时钟证据见 [MARSIM 评测](docs/marsim-ros2.md)。
 
-原生 PathCover 默认名义参考速度为 6 m/s，与 Newton 训练一致。
+原生 PathCover 的正式基线采用官方 3 m/s 名义参考速度，与 Newton 训练一致。
 使用 `--reference-speed` 可显式调整，最终值仍受场景和 CTBR 速度界限制。
 `nominal_velocity` 控制速度成本，`max_velocity` 用于独立的物理参考质量检查。
 默认物理参考上限为 High-speed 10 m/s、Dense 8 m/s、Newton 10 m/s。
 这些值取自场景与 CTBR 速度界；优化器保留真实初始 PVA。
 日志分别记录名义速度超额和物理约束违反。
 控制周期与原始任务点保持独立配置。
+
+参考推力界使用官方 `(2, 10) N` 与 `0.716 kg` 的比值，按当前质量缩放，并与 MPC 物理推力界取交。质量为 `0.75 kg` 时，参考范围为 `[2.094972, 10.474860] N`。参考倾角界为 `0.7854 rad`，速度惩罚权重为 `100`。MPC 仍使用 `[0, 22.0725] N` 物理推力界。旧 `6 m/s` 数据单独保留，不混入新基线的公平比较。
 
 ## 验证
 

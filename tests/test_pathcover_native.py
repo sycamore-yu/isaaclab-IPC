@@ -16,9 +16,13 @@ from isaaclab_ipc.pathcover_native import (
 
 
 def configuration(**overrides):
+    # Keep the established numerical regression fixture independent of new
+    # reference defaults. Real first-frame validation uses the runtime factories.
     return replace(
         PathCoverConfig(bounds_lower=(-2.0, -3.0, 0.0), bounds_upper=(6.0, 3.0, 3.0),
                         resolution=0.2, robot_radius=0.2, max_velocity=2.0,
+                        thrust_min=0.0, thrust_max=3 * 0.75 * 9.81, tilt_max=1.2,
+                        penalty_weights=(1e4, 1e3, 1e4, 1e4, 1e4),
                         max_iterations=256, use_cuda=False),
         **overrides,
     )
@@ -37,7 +41,20 @@ def native_module():
     return pytest.importorskip("isaaclab_ipc._pathcover_native")
 
 
-def test_nominal_speed_resolves_to_physical_limit_and_validates_order():
+def test_official_reference_defaults_resolve_to_concrete_mass_scaled_values():
+    cfg = PathCoverConfig(mass=0.9)
+    assert cfg.nominal_velocity == 3.0
+    assert cfg.thrust_min == pytest.approx(2.0 / 0.716 * 0.9)
+    assert cfg.thrust_max == pytest.approx(10.0 / 0.716 * 0.9)
+    assert cfg.tilt_max == 0.7854
+    assert cfg.penalty_weights == (1e4, 100.0, 1e4, 1e4, 1e4)
+    options = cfg.native_options()
+    assert options["nominal_velocity"] == cfg.nominal_velocity
+    assert options["thrust_min"] == cfg.thrust_min
+    assert options["thrust_max"] == cfg.thrust_max
+
+
+def test_nominal_speed_clamps_default_to_physical_limit_and_validates_order():
     assert configuration().native_options()["nominal_velocity"] == 2.0
     assert configuration(max_velocity=4.0, nominal_velocity=2.0).native_options()["nominal_velocity"] == 2.0
     for nominal, physical in ((3.0, 2.0), (0.0, 2.0), (np.nan, 2.0), (2.0, np.inf)):

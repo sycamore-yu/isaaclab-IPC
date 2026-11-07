@@ -28,13 +28,15 @@ class PathCoverConfig:
     # Physical reference speed diagnostic. The cruise-speed penalty can use a
     # lower nominal value; finite soft violations remain visible in plan metrics.
     max_velocity: float = 6.0
-    nominal_velocity: float | None = None
+    nominal_velocity: float | None = None  # Defaults to min(3 m/s, physical bound).
     mass: float = 0.75
     gravity: float = 9.81
-    thrust_min: float = 0.0
+    # Official reference limits scale with mass; controller factories intersect
+    # them with their physical force limits. Explicit historical limits persist.
+    thrust_min: float | None = None
     thrust_max: float | None = None
     body_rate_max: float = 3.0
-    tilt_max: float = 1.2
+    tilt_max: float = 0.7854
     max_corridors: int = 6
     pieces_per_polytope: int = 1
     integral_resolution: int = 64
@@ -43,7 +45,7 @@ class PathCoverConfig:
     time_weight: float = 100.0
     # Metre-valued inward offset of the reference position-penalty copy only.
     safety_margin: float = 0.15
-    penalty_weights: tuple[float, ...] = (1e4, 1e3, 1e4, 1e4, 1e4)
+    penalty_weights: tuple[float, ...] = (1e4, 100.0, 1e4, 1e4, 1e4)
     # Width in metres of the smoothed L1 position penalty. Dynamic smoothing
     # retains the upstream 0.01 in each corresponding constraint's units.
     position_penalty_smoothing_m: float = 1e-6
@@ -63,21 +65,27 @@ class PathCoverConfig:
     yaw_low_speed: float = 0.1
 
     def __post_init__(self):
-        nominal = self.max_velocity if self.nominal_velocity is None else self.nominal_velocity
+        nominal = min(3.0, self.max_velocity) if self.nominal_velocity is None else self.nominal_velocity
         if (not math.isfinite(self.max_velocity) or not math.isfinite(nominal)
                 or not 0 < nominal <= self.max_velocity):
             raise ValueError("PathCover speeds require 0 < nominal_velocity <= max_velocity")
+        # Resolve defaults in saved snapshots as concrete values, so later
+        # default changes cannot reinterpret a recorded planning problem.
+        object.__setattr__(self, "nominal_velocity", nominal)
+        if self.thrust_min is None:
+            object.__setattr__(self, "thrust_min", 2.0 / 0.716 * self.mass)
+        if self.thrust_max is None:
+            object.__setattr__(self, "thrust_max", 10.0 / 0.716 * self.mass)
+        if (not math.isfinite(self.thrust_min) or not math.isfinite(self.thrust_max)
+                or not 0 <= self.thrust_min < self.thrust_max):
+            raise ValueError("PathCover reference thrust limits require 0 <= thrust_min < thrust_max")
 
     def native_options(self):
         values = asdict(self)
-        if self.nominal_velocity is None:
-            values["nominal_velocity"] = self.max_velocity
         if self.search_resolution is None:
             values["search_resolution"] = self.resolution
         if self.robot_radius_z is None:
             values["robot_radius_z"] = self.robot_radius
-        if self.thrust_max is None:
-            values["thrust_max"] = 3 * self.mass * self.gravity
         return values
 
 
@@ -113,54 +121,20 @@ class PathCoverSegment:
 
 
 def _bounded_body_yaw_profile(trajectory):
-    """Project heading rates onto body-r intervals at start/mid/end of each step.
+    """Integrate pointwise bounded body-r with native RK4 and Hermite interpolation.
 
-    For c=z.h and s²=1-c², body r=(z_z*yaw_rate+c*p*s)/s².
-    Two midpoint/end projections constrain the piecewise-linear heading profile.
-    These finite samples are not a continuous-time certificate.
+    Heading feedback fades continuously by min(horizontal_speed / yaw_low_speed, 1).
+    Native local tolerances are 1e-7 rad for RK4 step doubling and 1e-4 rad/s
+    for the Hermite body-r defect; these are not a global trajectory certificate.
     """
-    count = max(1, int(np.ceil(trajectory.duration / trajectory.yaw_sample_dt)))
-    times = np.linspace(0.0, trajectory.duration, count + 1)
-    half_times = np.linspace(0.0, trajectory.duration, 2 * count + 1)
-    _, velocity, acceleration, jerk = trajectory._derivatives(half_times)
-    force = acceleration + np.array([0.0, 0.0, trajectory.gravity])
-    magnitude = np.linalg.norm(force, axis=-1)
-    if not np.isfinite(magnitude).all() or np.any(magnitude <= 0.0) or np.any(force[:, 2] <= 0.0):
-        raise PathCoverPlanningError("PathCover heading requires a finite upright thrust direction")
-    z = force / magnitude[:, None]
-    zdot = (jerk - z * np.sum(z * jerk, axis=-1)[:, None]) / magnitude[:, None]
-    # z.(zdot x h) = sin(yaw)*t1 + cos(yaw)*t2 = p*s.
-    t1 = z[:, 2] * zdot[:, 0] - z[:, 0] * zdot[:, 2]
-    t2 = z[:, 1] * zdot[:, 2] - z[:, 2] * zdot[:, 1]
-    target = np.arctan2(velocity[:, 1], velocity[:, 0])
-    speed = np.linalg.norm(velocity[:, :2], axis=-1)
-    yaw = np.empty(count + 1)
-    yaw[0] = trajectory.initial_yaw
+    from . import _pathcover_native
 
-    def bounds(index, angle):
-        cosine, sine = math.cos(angle), math.sin(angle)
-        c = z[index, 0] * cosine + z[index, 1] * sine
-        s2 = 1.0 - c * c
-        offset = c * (t1[index] * sine + t2[index] * cosine)
-        return ((-trajectory.body_yaw_rate_max * s2 - offset) / z[index, 2],
-                (trajectory.body_yaw_rate_max * s2 - offset) / z[index, 2])
-
-    for i in range(count):
-        step = times[i + 1] - times[i]
-        angle = yaw[i]
-        error = math.atan2(math.sin(target[2 * i + 2] - angle), math.cos(target[2 * i + 2] - angle))
-        nominal = error / step if speed[2 * i + 2] > trajectory.yaw_low_speed else 0.0
-        first_low, first_high = bounds(2 * i, angle)
-        rate = min(max(nominal, first_low), first_high)
-        for _ in range(2):
-            middle_low, middle_high = bounds(2 * i + 1, angle + 0.5 * step * rate)
-            last_low, last_high = bounds(2 * i + 2, angle + step * rate)
-            low, high = max(first_low, middle_low, last_low), min(first_high, middle_high, last_high)
-            if low > high:
-                raise PathCoverPlanningError("PathCover heading step has no common body-r interval")
-            rate = min(max(nominal, low), high)
-        yaw[i + 1] = angle + step * rate
-    return times, yaw
+    profile = _pathcover_native.bounded_body_yaw_profile(
+        trajectory.coefficients, trajectory.durations, trajectory.initial_yaw,
+        trajectory.body_yaw_rate_max, trajectory.yaw_sample_dt,
+        trajectory.yaw_low_speed, trajectory.gravity,
+    )
+    return profile[:, 0], profile[:, 1], profile[:, 2]
 
 
 @dataclass(frozen=True)
@@ -176,15 +150,19 @@ class PathCoverTrajectory:
     _boundaries: np.ndarray = field(init=False, repr=False)
     _yaw_times: np.ndarray = field(init=False, repr=False)
     _yaw_values: np.ndarray = field(init=False, repr=False)
+    # Saved pre-ODE plans have no endpoint rates; retain their recorded linear
+    # profile when reading those historical diagnostic snapshots.
+    _yaw_rates: np.ndarray | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
         if (np.any(np.asarray(self.durations) <= 0) or not np.isfinite(self.durations).all()
                 or not np.isfinite(self.coefficients).all()):
             raise ValueError("MINCO coefficients must be finite and durations must be positive")
         object.__setattr__(self, "_boundaries", np.concatenate(([0.0], np.cumsum(self.durations))))
-        times, yaw = _bounded_body_yaw_profile(self)
+        times, yaw, rates = _bounded_body_yaw_profile(self)
         object.__setattr__(self, "_yaw_times", times)
         object.__setattr__(self, "_yaw_values", yaw)
+        object.__setattr__(self, "_yaw_rates", rates)
 
     @property
     def duration(self):
@@ -214,9 +192,20 @@ class PathCoverTrajectory:
         """Evaluate scalar/vector relative times; hold the terminal pose after expiry."""
         times = np.asarray(relative_times, dtype=np.float64)
         position, velocity, acceleration, jerk = self._derivatives(times)
-        yaw = np.interp(times, self._yaw_times, self._yaw_values)
         index = np.clip(np.searchsorted(self._yaw_times[1:], times, side="left"), 0, len(self._yaw_times) - 2)
-        yaw_rate = np.diff(self._yaw_values)[index] / np.diff(self._yaw_times)[index]
+        step = self._yaw_times[index + 1] - self._yaw_times[index]
+        if self._yaw_rates is None:
+            yaw = np.interp(times, self._yaw_times, self._yaw_values)
+            yaw_rate = np.diff(self._yaw_values)[index] / step
+        else:
+            fraction = (np.clip(times, 0.0, self.duration) - self._yaw_times[index]) / step
+            s2, s3 = fraction**2, fraction**3
+            y0, y1 = self._yaw_values[index], self._yaw_values[index + 1]
+            d0, d1 = self._yaw_rates[index], self._yaw_rates[index + 1]
+            yaw = ((2 * s3 - 3 * s2 + 1) * y0 + (s3 - 2 * s2 + fraction) * step * d0
+                   + (-2 * s3 + 3 * s2) * y1 + (s3 - s2) * step * d1)
+            yaw_rate = (6 * fraction * (1 - fraction) * (y1 - y0) / step
+                        + (3 * s2 - 4 * fraction + 1) * d0 + (3 * s2 - 2 * fraction) * d1)
         yaw_rate = np.where((times < 0) | (times >= self.duration), 0.0, yaw_rate)
         return PathCoverSample(position, velocity, acceleration, jerk, yaw, yaw_rate)
 
@@ -244,8 +233,10 @@ class NativePathCoverFrontend:
 
         self.config = config or PathCoverConfig()
         self._native = _pathcover_native.NativeFrontend(self.config.native_options())
+        self._yaw_failure = None
 
     def reset(self):
+        self._yaw_failure = None
         self._native.reset()
 
     def update_cloud(self, points_world, sensor_origin):
@@ -264,7 +255,29 @@ class NativePathCoverFrontend:
         return self._native.obstacle_centers(), 0.5 * resolution
 
     def failed_problem(self):
-        """Retrieve a GCOPTER failure snapshot; successful plans do not copy this data."""
+        """Copy failure diagnostics on request; successful plans do not copy this data."""
+        if self._yaw_failure is not None:
+            result, state, error = self._yaw_failure
+            constraint_metrics = np.asarray(result.constraint_metrics).copy()
+            return {
+                "stage": "yaw", "error": error, "config": self.config.native_options(),
+                "initial_pva": np.column_stack((state.position, state.velocity, state.acceleration)),
+                "terminal_pva": np.column_stack((result.local_goal, np.zeros(3), np.zeros(3))),
+                "initial_yaw": float(state.yaw), "start_time": float(state.time),
+                "corridors": tuple(result.corridors), "optimizer_status": result.optimizer_status,
+                "trial_durations": np.asarray(result.durations).copy(),
+                "constraint_metrics": constraint_metrics,
+                "constraint_metrics_order": ("sfc_max_m", "speed_max_m_s", "thrust_min_n",
+                                             "thrust_max_n", "tilt_max_rad", "rate_max_rad_s"),
+                "constraint_finite": bool(np.isfinite(constraint_metrics).all()),
+                "time_initialization": result.time_initialization,
+                "candidate": {
+                    "coefficients": np.stack(result.coefficients),
+                    "durations": np.asarray(result.durations).copy(),
+                    "corridor_indices": np.asarray(result.corridor_indices).copy(),
+                    "objective": float(result.cost),
+                },
+            }
         problem = self._native.failed_problem()
         if problem is not None:
             problem["config"] = self.config.native_options()
@@ -277,6 +290,7 @@ class NativePathCoverFrontend:
         seed retains point RISP; the front end does not infer a control period.
         """
         begin = perf_counter()
+        self._yaw_failure = None
         update = None
         if points_world is not None:
             origin = current_state.position if sensor_origin is None else sensor_origin
@@ -289,11 +303,17 @@ class NativePathCoverFrontend:
             np.empty((0, 3)) if initial_motion_seed is None else np.asarray(initial_motion_seed, dtype=np.float64),
         )
         yaw_begin = perf_counter()
-        trajectory = PathCoverTrajectory(
-            coefficients=np.stack(result.coefficients), durations=np.asarray(result.durations),
-            initial_yaw=current_state.yaw, body_yaw_rate_max=self.config.body_yaw_rate_max,
-            yaw_sample_dt=self.config.yaw_sample_dt, yaw_low_speed=self.config.yaw_low_speed, gravity=self.config.gravity,
-        )
+        try:
+            trajectory = PathCoverTrajectory(
+                coefficients=np.stack(result.coefficients), durations=np.asarray(result.durations),
+                initial_yaw=current_state.yaw, body_yaw_rate_max=self.config.body_yaw_rate_max,
+                yaw_sample_dt=self.config.yaw_sample_dt, yaw_low_speed=self.config.yaw_low_speed, gravity=self.config.gravity,
+            )
+        except PathCoverPlanningError as error:
+            # Retain the existing native result only. Extract arrays if a caller
+            # explicitly requests failed_problem(), after the plan has failed.
+            self._yaw_failure = (result, current_state, str(error))
+            raise
         yaw_ms = (perf_counter() - yaw_begin) * 1000
         boundaries = np.concatenate(([0.0], np.cumsum(trajectory.durations)))
         segments = tuple(
