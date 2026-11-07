@@ -38,6 +38,16 @@ namespace lbfgs
         double g_epsilon = 1.0e-5;
 
         /**
+         * Optional objective-relative gradient stopping threshold.
+         *  Zero disables this additional test. For finite f, convergence also
+         *  holds when ||g||_inf / max(1, ||x||_inf) / max(1, |f|) is below it.
+         *  The original absolute test remains active. Objective values and
+         *  line-search conditions are unchanged. This test is not invariant
+         *  to adding a constant to the objective.
+         */
+        double g_relative_epsilon = 0.0;
+
+        /**
          * Distance for delta-based convergence test.
          *  This parameter determines the distance, in iterations, to compute
          *  the rate of decrease of the cost function. If the value of this
@@ -147,7 +157,7 @@ namespace lbfgs
         LBFGSERR_INVALID_N,
         /** Invalid parameter lbfgs_parameter_t::mem_size specified. */
         LBFGSERR_INVALID_MEMSIZE,
-        /** Invalid parameter lbfgs_parameter_t::g_epsilon specified. */
+        /** Invalid absolute or objective-relative gradient threshold. */
         LBFGSERR_INVALID_GEPSILON,
         /** Invalid parameter lbfgs_parameter_t::past specified. */
         LBFGSERR_INVALID_TESTPERIOD,
@@ -457,7 +467,8 @@ namespace lbfgs
         {
             return LBFGSERR_INVALID_MEMSIZE;
         }
-        if (param.g_epsilon < 0.0)
+        if (param.g_epsilon < 0.0 || param.g_relative_epsilon < 0.0 ||
+            !std::isfinite(param.g_relative_epsilon))
         {
             return LBFGSERR_INVALID_GEPSILON;
         }
@@ -534,7 +545,10 @@ namespace lbfgs
         gnorm_inf = g.cwiseAbs().maxCoeff();
         xnorm_inf = x.cwiseAbs().maxCoeff();
 
-        if (gnorm_inf / std::max(1.0, xnorm_inf) < param.g_epsilon)
+        if (gnorm_inf / std::max(1.0, xnorm_inf) < param.g_epsilon ||
+            (param.g_relative_epsilon > 0.0 && std::isfinite(fx) &&
+             (gnorm_inf / std::max(1.0, xnorm_inf)) / std::max(1.0, std::fabs(fx)) <
+                 param.g_relative_epsilon))
         {
             /* The initial guess is already a stationary point. */
             ret = LBFGS_CONVERGENCE;
@@ -591,11 +605,15 @@ namespace lbfgs
                 /*
                 Convergence test.
                 The criterion is given by the following formula:
-                ||g(x)||_inf / max(1, ||x||_inf) < g_epsilon
+                The original absolute criterion or the optional objective-relative
+                criterion, evaluated only at an accepted line-search point.
                 */
                 gnorm_inf = g.cwiseAbs().maxCoeff();
                 xnorm_inf = x.cwiseAbs().maxCoeff();
-                if (gnorm_inf / std::max(1.0, xnorm_inf) < param.g_epsilon)
+                if (gnorm_inf / std::max(1.0, xnorm_inf) < param.g_epsilon ||
+                    (param.g_relative_epsilon > 0.0 && std::isfinite(fx) &&
+                     (gnorm_inf / std::max(1.0, xnorm_inf)) / std::max(1.0, std::fabs(fx)) <
+                         param.g_relative_epsilon))
                 {
                     /* Convergence. */
                     ret = LBFGS_CONVERGENCE;
@@ -728,7 +746,7 @@ namespace lbfgs
         switch (err)
         {
         case LBFGS_CONVERGENCE:
-            return "Success: reached convergence (g_epsilon).";
+            return "Success: reached gradient convergence.";
 
         case LBFGS_STOP:
             return "Success: met stopping criteria (past f decrease less than delta).";
@@ -746,7 +764,7 @@ namespace lbfgs
             return "Invalid parameter lbfgs_parameter_t::mem_size specified.";
 
         case LBFGSERR_INVALID_GEPSILON:
-            return "Invalid parameter lbfgs_parameter_t::g_epsilon specified.";
+            return "Invalid absolute or objective-relative gradient threshold.";
 
         case LBFGSERR_INVALID_TESTPERIOD:
             return "Invalid parameter lbfgs_parameter_t::past specified.";

@@ -92,6 +92,20 @@ Reuse native TurboMPC CUDA/cuDSS and its PyTorch adjoint. Keep dynamics and
 warm-start rollout on the GPU, batch environments, and compile fixed-shape
 tensor calculations. Do not recreate the JAX bridge or replace the solver.
 
+In 3D GCOPTER's main L-BFGS solve, retain the absolute gradient condition
+`||g||_inf / max(1, ||x||_inf) < 1e-5` and also allow
+`(||g||_inf / max(1, ||x||_inf)) / max(1, |J|) < 1e-7` for finite `J`.
+The optional relative condition is disabled in every other L-BFGS use.
+Apply it only at the initial or accepted iterate, before another line search.
+Raw costs, Wolfe conditions, the existing past-improvement condition and physical
+quality tolerances remain unchanged. This changes gradient stopping semantics;
+it does not reinterpret a negative optimizer status as convergence. The fixed
+positive GCOPTER objective has no added constant offset. The condition measures
+scaled stationarity, not trajectory feasibility or an objective-error bound.
+An independently solved one-piece failure was already within 19.4 ns of the
+optimal duration; approximately 1e-12 native cost noise defeated its line search.
+Retain the failed run and the high-precision comparison as evidence.
+
 Remove the old CTBR reference governor, jerk recovery coupling and duplicate
 online execution-trajectory acceptance from the new route. Solver residuals,
 hard SFC constraints and independent collision evaluation remain measurable.

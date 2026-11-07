@@ -492,6 +492,26 @@ license; embedded geometry utilities retain their original notices.
     path for long rays retain their behavior. Successful CUDA arithmetic is
     unchanged. This is not transactional rollback: earlier completed chunks
     may already have updated the map when the call fails.
+41. V23 adds an optional objective-relative L-BFGS gradient stopping threshold,
+    defaulting to zero so other library callers retain their original test.
+    Only the main 3D GCOPTER solve sets it to 1e-7, alongside the unchanged
+    absolute threshold 1e-5. At the initial point and after an accepted step,
+    either `g_inf / max(1, x_inf) < 1e-5` or, for finite objective J,
+    `g_inf / max(1, x_inf) / max(1, abs(J)) < 1e-7` establishes convergence.
+    The divisions are separate to avoid overflowing a product of scales.
+    The raw objective, Wolfe line search, past-decrease test, iteration limits
+    and handling of failed line searches are unchanged. The scalar time
+    initialization, shortest-path and inverse-parameterization solves keep
+    the default disabled relative test. Invalid thresholds reuse the existing
+    error code; historical status numbers are unchanged.
+    This addresses the recorded V22 Newton one-piece failure: its initial time
+    was 19.4 ns from the 100-digit stationary point, with a true objective gap
+    9.56e-14, while about 1e-12 evaluation noise defeated the next line search.
+    The additional test returned normal convergence in one main evaluation.
+    Five other frozen problems retained bitwise-identical coefficients,
+    durations and optimizer work, including the known original-SFC negative
+    case. This is an objective-scaled stationarity criterion, not a feasibility
+    or objective-error certificate; adding a constant to J changes its scale.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online

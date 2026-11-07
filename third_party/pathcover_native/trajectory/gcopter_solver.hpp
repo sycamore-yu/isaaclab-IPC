@@ -2344,6 +2344,9 @@ namespace trajectory_server
             // Restore L-BFGS's standard gradient convergence test. Disabling it
             // can demand an objective decrease smaller than one floating ULP.
             lbfgs_params.g_epsilon = 1.0e-5;
+            // Add objective-scaled stationarity for the full positive objective.
+            // Keep the raw objective, Wolfe search and past-decrease test.
+            lbfgs_params.g_relative_epsilon = 1.0e-7;
             lbfgs_params.delta = relCostTol;
             lbfgs_params.max_iterations = maxIterations;
 
