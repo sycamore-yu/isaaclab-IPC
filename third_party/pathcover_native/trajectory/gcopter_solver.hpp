@@ -1678,7 +1678,6 @@ namespace trajectory_server
             double step, alpha;
             Eigen::Matrix<double, CoeffRows, 1> beta0, beta1, beta2, beta3, beta4;
             Eigen::Vector3d outerNormal;
-            int K, L;
             double violaPos, violaVel, violaOmg, violaTheta, violaThrust;
             double violaPosPenaD, violaVelPenaD, violaOmgPenaD, violaThetaPenaD, violaThrustPenaD;
             double violaPosPena, violaVelPena, violaOmgPena, violaThetaPena, violaThrustPena;
@@ -1690,6 +1689,10 @@ namespace trajectory_server
             {
                 const Eigen::Matrix<double, CoeffRows, 3> &c = coeffs.template block<CoeffRows, 3>(i * CoeffRows, 0);
                 step = T(i) * integralFrac;
+                const int L = hIdx(i);
+                const int K = hPolys[L].rows();
+                // One buffer per piece, reused at every quadrature node.
+                Eigen::ArrayXd projectedPositions(K);
                 for (int j = 0; j <= integralResolution; j++)
                 {
                     fillDerivativeBasis<false>(j * step, beta0, beta1, beta2, beta3, beta4);
@@ -1730,16 +1733,19 @@ namespace trajectory_server
                     gradPos.setZero(), gradVel.setZero(), gradOmg.setZero();
                     pena = 0.0;
 
-                    L = hIdx(i);
-                    K = hPolys[L].rows();
+                    // Preserve Vector3d::dot's original (x + y) + z order.
+                    projectedPositions =
+                        (hPolys[L].col(0).array() * pos(0)
+                         + hPolys[L].col(1).array() * pos(1))
+                        + hPolys[L].col(2).array() * pos(2);
                     for (int k = 0; k < K; k++)
                     {
-                        outerNormal = hPolys[L].block<1, 3>(k, 0);
-                        const double projectedPosition = outerNormal.dot(pos);
+                        const double projectedPosition = projectedPositions(k);
                         violaPos = projectedPosition + hPolys[L](k, 3);
                         metrics.sfc = std::max(metrics.sfc, projectedPosition + originalHPolys[L](k, 3));
                         if (smoothedL1(violaPos, positionSmoothFactor, violaPosPena, violaPosPenaD))
                         {
+                            outerNormal = hPolys[L].block<1, 3>(k, 0);
                             gradPos += weightPos * violaPosPenaD * outerNormal;
                             pena += weightPos * violaPosPena;
                         }
@@ -2443,7 +2449,7 @@ namespace trajectory_server
             backwardP(points, vPolyIdx, vPolytopes, xi);
 
             double minCostFunctional;
-            lbfgs_params.mem_size = 256;
+            lbfgs_params.mem_size = 32;
             lbfgs_params.past = 3;
             lbfgs_params.min_step = 1.0e-32;
             // Restore L-BFGS's standard gradient convergence test. Disabling it

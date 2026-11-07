@@ -129,6 +129,22 @@ An independently solved one-piece failure was already within 19.4 ns of the
 optimal duration; approximately 1e-12 native cost noise defeated its line search.
 Retain the failed run and the high-precision comparison as evidence.
 
+Use a history length of 32 in the 3D main solve. Keep the short-path, vertex and
+one-dimensional time initializers unchanged. The prior 256-entry history gave
+973 objective evaluations on a measured slow input; 32 gave 486. The objective,
+constraints, quadrature and stopping criteria remain the same, but the changed
+search direction can select a different nonconvex solution. All 600 frozen V24
+Dense references passed the original full-curve quality tolerances with this
+configuration. Preserve objective regressions, including the 15.4674% maximum,
+and validate complete task and latency separately. This is an explicit speed
+and local-solution tradeoff, not a bitwise-equivalent optimization.
+
+Batch position-plane projections while preserving the original three-term dot
+order and face-order cost/gradient accumulation. Reuse one buffer per piece;
+do not allocate per quadrature node. This independent arithmetic optimization
+retains the frozen numerical outputs. Keep the existing portable CPU build flags;
+the measured native-instruction target did not improve the main workload.
+
 Remove the old CTBR reference governor, jerk recovery coupling and duplicate
 online execution-trajectory acceptance from the new route. Solver residuals,
 hard SFC constraints and independent collision evaluation remain measurable.

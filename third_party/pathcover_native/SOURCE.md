@@ -601,6 +601,38 @@ license; embedded geometry utilities retain their original notices.
     result; work is included in the existing corridor timer. RISP's random state
     is reset after interval construction, preserving the prior unchanged-seed
     planning path. The map, inflation, CTBR dynamics and hard bounds are unchanged.
+47. The 3D GCOPTER position penalty projects all faces using column-wise Eigen
+    arrays, preserving the original Vector3d dot order `(x + y) + z`. One scratch
+    array per piece is reused across quadrature nodes. The scalar face loop still
+    updates original-SFC quality and accumulates penalties/gradients in the same
+    order; it loads the full normal only inside the position-penalty branch.
+    The isolated plane-only comparison retains the objective, bounds,
+    64-subdivision quadrature, L-BFGS history of 256, stopping rules and CPU
+    instruction target. Seven frozen clean
+    optimizer outputs and four archived Dense trajectories remain bitwise equal.
+    The permanent caller contract compares cost, coefficient/time gradients and
+    raw SFC quality against the original scalar-dot accumulation, including odd
+    face counts and cancellation. The isolated paired timing evidence is in
+    `pathcover-plane-projection-v25-study.json`; it shows a small complete-solve
+    improvement and retains every negative timing pair, not an end-to-end budget
+    claim. No production CUDA kernel or solver parameter is added by this change.
+48. The main 3D GCOPTER solve uses L-BFGS history 32 instead of 256. Two-dimensional
+    optimization, shortest-path and vertex-projection solves, scalar time
+    initialization, objective/penalty terms, quadrature, Wolfe search and all
+    stopping thresholds retain their previous settings. This changes search
+    directions and the selected nonconvex solution; it is not an equivalent
+    arithmetic optimization. On the seven frozen problems, the slowest actual
+    V24 input changed from 518 accepted steps/973 evaluations to 238/486.
+    All seven full-reference checks passed. The complete 600-problem V24 Dense
+    archive also returned positive status and passed the unchanged numerical
+    full-SFC and saved-yaw physical checks. Raw SFC maximum was 6.72074e-6 m;
+    maximum actual body-r was 1.50010101 rad/s, within the existing offline
+    allowance but not exactly below 1.5. The same raw objective increased by
+    up to 15.4674%; that reference duration changed from 4.25893 to 4.77574 s.
+    Another duration increased from 4.88408 to 6.34995 s. These quality/work
+    tradeoffs remain explicit in `pathcover-gcopter-work-history32-v25-study.json`.
+    Frozen-input checks do not establish behavior on states induced by the new
+    references or an end-to-end planning latency guarantee.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online
