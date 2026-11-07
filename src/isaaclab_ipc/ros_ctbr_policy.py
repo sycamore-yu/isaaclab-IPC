@@ -329,14 +329,21 @@ def main(args=None):
                 self.publish_stats(dict(event="solve", stamp=now, state_time=state_time,
                                         plan_sequence_id=self.sequence,
                                         qp_failures=self.qp_failures, **stats))
-                if stats["qp_failed"] and not (self.directory / "first-unsolved.pt").exists():
+                snapshot_name = ("first-unsolved.pt" if stats["qp_failed"] else
+                                 "first-large-qp-work.pt" if stats["qp_iterations_total"] >= 4096 else None)
+                # Capture the exact incoming warm start even when the final MPC
+                # succeeds after expensive QPs. Serialization follows planning
+                # timing and happens only once for each diagnostic category.
+                if snapshot_name and not (self.directory / snapshot_name).exists():
                     torch.save(dict(observation=self.controller.last_observation.cpu(),
+                                    stamp=now, state_time=state_time, stats=stats,
+                                    policy=self.options["policy"], checkpoint=self.options["checkpoint"],
                                     solver_config=self.controller.actor.solver_metadata(),
                                     frontend_plan=self.controller.navigation.last_plans[0]
                                     if self.controller.navigation is not None else None,
                                     result={key: value.cpu() if isinstance(value, torch.Tensor) else value
                                             for key, value in self.controller.last_result.items()}),
-                               self.directory / "first-unsolved.pt")
+                               self.directory / snapshot_name)
             command = TwistStamped()
             command.header.stamp = stamp.to_msg()
             command.header.frame_id = "body"
