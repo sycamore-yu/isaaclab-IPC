@@ -31,6 +31,15 @@ V12 旧版比较与后续正负结果保留在下文，不填入新版验收的�
 每个 MARSIM 运行保存源码、原生库、执行器和 checkpoint 的摘要。
 这些生成物按仓库约定不提交到 Git。
 
+`scripts/run_marsim_ros2.py --capture-reference-plans` 可选保存完整参考。
+该选项默认关闭，仅用于原生 CTBR 正式评测的离线质量分析。
+开启后保留已经返回的 CPU 多项式、yaw、SFC 与状态快照；
+退出时一次写入 `policy/reference-plans.pt`，不重新运行优化或轨迹积分。
+记录包含 `stamp`、`state_time` 和 `plan_sequence_id`。
+离线分析必须按 evaluator 的实际时间窗口筛选，不能将关闭期间的额外计划计入正式分母。
+归档追加发生在已记录规划计时之后；控制回调耗时仍包含追加工作。
+它不改变参考接受语义，也不替代物理执行结果。
+
 ## 当前数学与执行契约
 
 状态为世界位置、WXYZ 四元数和世界速度，共 10 维。

@@ -188,7 +188,8 @@ def main(args=None):
             defaults = dict(policy="fixed-ctbr", execution="dynamic", benchmark="high_speed",
                             checkpoint="", frontend="pathcover", device="cuda:0",
                             output_directory="results/marsim-ctbr", simulated_time=True,
-                            frequency=100.0, replan_frequency=10.0, reference_speed=3.0)
+                            frequency=100.0, replan_frequency=10.0, reference_speed=3.0,
+                            capture_reference_plans=False)
             for key, value in defaults.items():
                 self.declare_parameter(key, value)
             self.options = p = {key: self.get_parameter(key).value for key in defaults}
@@ -203,6 +204,7 @@ def main(args=None):
             directory.mkdir(parents=True, exist_ok=True)
             self.directory = directory
             self.record = (directory / "policy.jsonl").open("w", buffering=1)
+            self.reference_records = [] if p["capture_reference_plans"] else None
             checkpoint_sha = None
             if p["checkpoint"]:
                 with Path(p["checkpoint"]).open("rb") as source:
@@ -218,6 +220,8 @@ def main(args=None):
                     else "100 Hz ROS timer; synchronous 10 Hz MPC, measured wall cadence",
                 state_order="world position, quaternion WXYZ, world velocity",
                 control_units="collective specific thrust m/s^2, body angular rates rad/s",
+                reference_archive_scope="Returned CPU plans retained after solve timing; serialized at shutdown; no extra integration"
+                    if p["capture_reference_plans"] else None,
                 execution_acceptance="direct first MPC control; no duplicate trajectory integration")
             (directory / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
             self.state = self.body_rates = self.goal = self.cloud = self.action = None
@@ -362,6 +366,15 @@ def main(args=None):
                                     frontend_config=asdict(frontend.config),
                                     gcopter_problem=problem,
                                     frontend_plan=plan), reference_snapshot)
+                if self.reference_records is not None and self.controller.navigation is not None:
+                    # Plans own their CPU coefficient/SFC/yaw arrays. Keep the
+                    # returned object; no map copy, GPU transfer or reevaluation.
+                    self.reference_records.append(dict(
+                        stamp=now, state_time=state_time, plan_sequence_id=self.sequence,
+                        state=self.state.copy(), body_rates=self.body_rates.copy(),
+                        acceleration=self.acceleration.copy(), goal=self.goal.copy(),
+                        frontend_plan=self.controller.navigation.last_plans[0],
+                    ))
             command = TwistStamped()
             command.header.stamp = stamp.to_msg()
             command.header.frame_id = "body"
@@ -385,6 +398,14 @@ def main(args=None):
         def close(self):
             if self.timer is not None:
                 self.timer.cancel()
+            if self.reference_records is not None:
+                torch.save(dict(
+                    schema_version=1,
+                    frontend_config=asdict(self.controller.navigation.frontends[0].config)
+                        if self.controller.navigation is not None else None,
+                    records=self.reference_records,
+                    scope="Filter by evaluator stamp/sequence; shutdown plans may follow the last evaluated action",
+                ), self.directory / "reference-plans.pt")
             self.controller.close()
             self.record.close()
 

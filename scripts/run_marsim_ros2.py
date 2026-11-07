@@ -34,6 +34,8 @@ def main():
     parser.add_argument("--frontend", choices=("pathcover", "none"), default="pathcover")
     parser.add_argument("--reference-speed", type=float, default=3.0,
                         help="Native PathCover nominal speed in m/s; physical scene/CTBR speed limits remain separate")
+    parser.add_argument("--capture-reference-plans", action="store_true",
+                        help="Retain returned CPU plans for offline continuous reference checks; write once at shutdown")
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--executor-parameters", type=Path)
     parser.add_argument("--output", type=Path, required=True)
@@ -50,6 +52,8 @@ def main():
         parser.error("--policy acmpc requires --checkpoint")
     if args.policy in ("fixed-ctbr", "acmpc") and args.mode != "dynamic":
         parser.error("The native CTBR route requires --mode dynamic")
+    if args.capture_reference_plans and args.policy not in ("fixed-ctbr", "acmpc"):
+        parser.error("--capture-reference-plans requires a native CTBR policy")
     if not 0 < args.reference_speed < float("inf"):
         parser.error("--reference-speed must be finite and positive")
     if args.executor_parameters and args.mode != "dynamic":
@@ -67,6 +71,7 @@ def main():
                    f"execution:={args.mode}", f"benchmark:={args.benchmark}", f"policy:={args.policy}",
                    f"frontend:={args.frontend}",
                    f"reference_speed:={args.reference_speed}",
+                   f"capture_reference_plans:={'true' if args.capture_reference_plans else 'false'}",
                    f"time_mode:={args.time_mode}",
                    f"output:={output}", "record:=false", f"render_prefix:={args.render_prefix}"]
         if args.checkpoint:
@@ -90,6 +95,7 @@ def main():
         "launch": command, "monitor": monitor_command, "ros_domain_id": args.domain,
         "time_mode": args.time_mode, "frontend": args.frontend,
         "reference_speed_m_s": args.reference_speed,
+        "capture_reference_plans": args.capture_reference_plans,
         "git_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "marsim_runtime": str(runtime),
         "executable_sha256": {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
