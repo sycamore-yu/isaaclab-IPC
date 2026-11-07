@@ -344,6 +344,24 @@ def main(args=None):
                                     result={key: value.cpu() if isinstance(value, torch.Tensor) else value
                                             for key, value in self.controller.last_result.items()}),
                                self.directory / snapshot_name)
+                reference_snapshot = self.directory / "first-reference-sfc.pt"
+                if (self.controller.navigation is not None
+                        and stats.get("optimizer_sfc_max_m", 0.0) > 1e-4
+                        and not reference_snapshot.exists()):
+                    # Reuse the returned polynomial and existing diagnostics.
+                    # No map copy, additional integration or acceptance pass.
+                    plan = self.controller.navigation.last_plans[0]
+                    frontend = self.controller.navigation.frontends[0]
+                    problem = dict(initial_pva=np.column_stack((self.state[:3], self.state[7:10], self.acceleration)),
+                                   terminal_pva=np.column_stack((plan.local_goal, np.zeros(3), np.zeros(3))),
+                                   corridors=plan.corridors, config=frontend.config.native_options(),
+                                   optimizer_status=stats["optimizer_status"], initial_yaw=plan.trajectory.initial_yaw)
+                    torch.save(dict(stamp=now, state_time=state_time, stats=stats,
+                                    state=self.state, body_rates=self.body_rates,
+                                    acceleration=self.acceleration, goal=self.goal,
+                                    frontend_config=asdict(frontend.config),
+                                    gcopter_problem=problem,
+                                    frontend_plan=plan), reference_snapshot)
             command = TwistStamped()
             command.header.stamp = stamp.to_msg()
             command.header.frame_id = "body"
