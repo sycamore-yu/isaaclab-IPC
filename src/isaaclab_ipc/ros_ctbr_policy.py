@@ -48,7 +48,8 @@ def goal_observation(state, body_rates, goal, config, *, max_planes=128, warm_st
                                  ctbr_config=config, warm_start_controls=warm_start_controls)
 
 
-def benchmark_frontend_config(case, config, reference_speed=3.0):
+def benchmark_frontend_config(case, config, reference_speed=3.0, *, nominal_thrust_min=None):
+    """Match CTBR physical bounds with a separate positive reference cost target."""
     from .pathcover_native import PathCoverConfig
 
     mapping = case["planner"]["rog_map"]
@@ -58,16 +59,20 @@ def benchmark_frontend_config(case, config, reference_speed=3.0):
     upper[2] = mapping["virtual_ceil_height"]
     physical_speed = min(case["planner"]["traj_opt"]["boundary"]["max_vel"],
                          *config.velocity_upper, *(-value for value in config.velocity_lower))
-    reference = PathCoverConfig(mass=config.mass, gravity=config.gravity)
     return PathCoverConfig(
         bounds_lower=tuple(lower), bounds_upper=tuple(upper),
         resolution=max(0.1, mapping["resolution"]),
         search_resolution=0.25 if mapping["resolution"] < 0.25 else None,
         robot_radius=case["planner"]["super_planner"]["robot_r"],
+        max_corridors=4, safety_margin=0.0,
         max_velocity=physical_speed, nominal_velocity=min(reference_speed, physical_speed),
         mass=config.mass, gravity=config.gravity,
-        thrust_min=max(reference.thrust_min, config.mass * config.specific_thrust_limits[0]),
+        thrust_min=config.mass * config.specific_thrust_limits[0],
+        nominal_thrust_min=(max(2.0 / 0.716 * config.mass, config.mass * config.specific_thrust_limits[0])
+                            if nominal_thrust_min is None else nominal_thrust_min),
         thrust_max=config.mass * config.specific_thrust_limits[1],
+        # The chart's boundary is nominal; zero/non-upright force still errors.
+        tilt_max=np.pi / 2,
         body_rate_max=min(config.body_rate_limits[:2]), body_yaw_rate_max=config.body_rate_limits[2],
         use_cuda=True,
     )
@@ -359,7 +364,9 @@ def main(args=None):
                     problem = dict(initial_pva=np.column_stack((self.state[:3], self.state[7:10], self.acceleration)),
                                    terminal_pva=np.column_stack((plan.local_goal, np.zeros(3), np.zeros(3))),
                                    corridors=plan.corridors, config=frontend.config.native_options(),
-                                   optimizer_status=stats["optimizer_status"], initial_yaw=plan.trajectory.initial_yaw)
+                                   optimizer_status=stats["optimizer_status"], initial_yaw=plan.trajectory.initial_yaw,
+                                   initial_boundary=plan.metrics["initial_boundary"],
+                                   initial_thrust_axis=plan.metrics["initial_boundary"]["thrust_axis"])
                     torch.save(dict(stamp=now, state_time=state_time, stats=stats,
                                     state=self.state, body_rates=self.body_rates,
                                     acceleration=self.acceleration, goal=self.goal,

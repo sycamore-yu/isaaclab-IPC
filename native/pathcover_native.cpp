@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <limits>
 #include <memory>
 #include <optional>
 #include <stdexcept>
@@ -64,7 +65,7 @@ static py::dict timeInitializationDict(const TimeInitialization &value) {
 struct Options {
     Vec3 lower, upper;
     double resolution, search_resolution, radius, radius_z, max_velocity, nominal_velocity, mass, gravity;
-    double thrust_min, thrust_max, body_rate_max, reference_body_rate_margin, tilt_max;
+    double thrust_min, nominal_thrust_min, thrust_max, body_rate_max, reference_body_rate_margin, tilt_max;
     double potential_radius, dmp_heuristic_weight, time_weight, safety_margin, endpoint_connection_radius;
     double relative_tolerance, alpha, position_penalty_smoothing;
     int horizon, pieces_per_polytope, integral_resolution, max_iterations, num_threads;
@@ -85,7 +86,13 @@ struct Options {
         mass = values["mass"].cast<double>();
         gravity = values["gravity"].cast<double>();
         thrust_min = values["thrust_min"].cast<double>();
+        nominal_thrust_min = values.contains("nominal_thrust_min") && !values["nominal_thrust_min"].is_none()
+            ? values["nominal_thrust_min"].cast<double>() : thrust_min;
         thrust_max = values["thrust_max"].cast<double>();
+        if (!std::isfinite(thrust_min) || !std::isfinite(nominal_thrust_min) || !std::isfinite(thrust_max)
+            || thrust_min < 0 || nominal_thrust_min < thrust_min || nominal_thrust_min >= thrust_max) {
+            throw std::invalid_argument("PathCover thrust limits require 0 <= thrust_min <= nominal_thrust_min < thrust_max");
+        }
         body_rate_max = values["body_rate_max"].cast<double>();
         reference_body_rate_margin = values["reference_body_rate_margin"].cast<double>();
         if (!std::isfinite(body_rate_max) || !std::isfinite(reference_body_rate_margin)
@@ -119,10 +126,72 @@ struct MappingStats {
     bool gpu_mapping = false, gpu_inflation = false, gpu_box_compression = false;
 };
 
+struct InitialBoundary {
+    Vec3 measured_acceleration = Vec3::Zero();
+    std::optional<Vec3> reference_acceleration, thrust_axis;
+    double force_lower_n = 0.0, force_upper_n = 0.0;
+    double force_guess_raw_n = 0.0, force_guess_n = 0.0;
+    bool force_guess_was_projected = false;
+    std::optional<double> force_n;
+
+    bool permitsHold(double hover_force) const {
+        if (!thrust_axis) return measured_acceleration.norm() < 1e-8;
+        return thrust_axis->x() == 0.0 && thrust_axis->y() == 0.0 && thrust_axis->z() == 1.0
+            && force_lower_n <= hover_force && hover_force <= force_upper_n;
+    }
+};
+
+static InitialBoundary initialBoundaryForInput(const Vec3 &acceleration,
+                                              const std::optional<Vec3> &axis,
+                                              const Options &options) {
+    if (axis && (!axis->allFinite() || std::abs(axis->norm() - 1.0) > 1e-10)) {
+        throw std::invalid_argument("PathCover initial thrust axis must be a finite unit vector");
+    }
+    InitialBoundary result;
+    result.measured_acceleration = acceleration;
+    result.thrust_axis = axis;
+    result.force_lower_n = options.thrust_min;
+    result.force_upper_n = options.thrust_max;
+    const Vec3 force_acceleration = acceleration + Vec3(0.0, 0.0, options.gravity);
+    result.force_guess_raw_n = options.mass * (axis ? axis->dot(force_acceleration) : force_acceleration.norm());
+    result.force_guess_n = result.force_guess_raw_n;
+    if (axis) {
+        // Metadata records only the initialization projection used by the solver.
+        const double epsilon = std::numeric_limits<double>::epsilon();
+        const double raw_fraction = (result.force_guess_raw_n - options.thrust_min)
+            / (options.thrust_max - options.thrust_min);
+        const double fraction = std::clamp(raw_fraction, epsilon, 1.0 - epsilon);
+        result.force_guess_n = options.thrust_min + fraction * (options.thrust_max - options.thrust_min);
+        result.force_guess_was_projected = fraction != raw_fraction;
+    }
+    return result;
+}
+
+static py::dict initialBoundaryDict(const InitialBoundary &value) {
+    auto vector = [](const std::optional<Vec3> &input) -> py::object {
+        if (!input) return py::none();
+        return py::make_tuple(input->x(), input->y(), input->z());
+    };
+    py::dict result;
+    result["mode"] = value.thrust_axis ? "ctbr_collective" : "fixed_pva";
+    result["measured_acceleration"] = py::make_tuple(
+        value.measured_acceleration.x(), value.measured_acceleration.y(), value.measured_acceleration.z());
+    result["reference_acceleration"] = vector(value.reference_acceleration);
+    result["thrust_axis"] = vector(value.thrust_axis);
+    result["force_lower_n"] = value.force_lower_n;
+    result["force_upper_n"] = value.force_upper_n;
+    result["force_guess_raw_n"] = value.force_guess_raw_n;
+    result["force_guess_n"] = value.force_guess_n;
+    result["force_guess_was_projected"] = value.force_guess_was_projected;
+    result["force_n"] = py::cast(value.force_n);
+    return result;
+}
+
 struct PlanResult {
     Points path;
     Points selected_initial_motion_seed;
     bool initial_motion_seed_adjusted = false;
+    InitialBoundary initial_boundary;
     Vec3 local_goal;
     std::vector<HPoly> corridors;
     std::vector<Coefficients> coefficients;
@@ -180,6 +249,8 @@ class NativeFrontend {
     MappingStats last_update_;
     bool map_dirty_ = true;
     std::optional<OptimizationFailure> failed_problem_;
+    // Exists only during a call or after failure. No candidate is fabricated.
+    std::optional<InitialBoundary> pending_initial_boundary_;
 
     void make_map() {
         map_ = std::make_unique<NanoVoxMap::OccupancyMapd>(
@@ -288,6 +359,8 @@ public:
         geometry_box_halfwidths_.clear();
         map_dirty_ = true;
         last_update_ = MappingStats{};
+        failed_problem_.reset();
+        pending_initial_boundary_.reset();
     }
 
     MappingStats update_cloud(const Points &points, const Vec3 &sensor_origin) {
@@ -394,8 +467,11 @@ public:
     }
 
     py::object failed_problem() const {
-        if (!failed_problem_) return py::none();
+        if (!failed_problem_ && !pending_initial_boundary_) return py::none();
         py::dict value;
+        if (pending_initial_boundary_)
+            value["initial_boundary"] = initialBoundaryDict(*pending_initial_boundary_);
+        if (!failed_problem_) return value;
         value["initial_pva"] = py::cast(failed_problem_->initial);
         value["terminal_pva"] = py::cast(failed_problem_->terminal);
         value["corridors"] = py::cast(failed_problem_->corridors);
@@ -418,6 +494,14 @@ public:
         value["reference_body_rate_margin_rad_s"] = options_.reference_body_rate_margin;
         value["optimizer_body_rate_target_rad_s"] = options_.body_rate_max - options_.reference_body_rate_margin;
         value["body_rate_physical_limit_rad_s"] = options_.body_rate_max;
+        const double initial_thrust = options_.mass
+            * (failed_problem_->initial.col(2) + Vec3(0.0, 0.0, options_.gravity)).norm();
+        value["thrust_physical_min_n"] = options_.thrust_min;
+        value["thrust_nominal_min_n"] = options_.nominal_thrust_min;
+        value["thrust_physical_max_n"] = options_.thrust_max;
+        value["thrust_nominal_shortfall_n"] = std::max(options_.nominal_thrust_min - failed_problem_->constraint_metrics(2), 0.0);
+        value["thrust_initial_n"] = initial_thrust;
+        value["thrust_initial_nominal_shortfall_n"] = std::max(options_.nominal_thrust_min - initial_thrust, 0.0);
         py::dict allowed_error;
         allowed_error["sfc_m"] = kSfcFeasibilityToleranceM;
         allowed_error["speed_relative"] = 1e-3;
@@ -449,8 +533,10 @@ public:
 
     PlanResult plan(const Vec3 &position, const Vec3 &velocity,
                     const Vec3 &acceleration, const Vec3 &goal, const Points &initial_motion_seed,
-                    const Points &initial_motion_tip_segment) {
+                    const Points &initial_motion_tip_segment,
+                    const std::optional<Vec3> &initial_thrust_axis = std::nullopt) {
         failed_problem_.reset();
+        pending_initial_boundary_.reset();
         if (!position.allFinite() || !velocity.allFinite() || !acceleration.allFinite() || !goal.allFinite()) {
             throw std::invalid_argument("PathCover state and goal must be finite");
         }
@@ -463,6 +549,10 @@ public:
             || !initial_motion_tip_segment.allFinite()
             || (initial_motion_tip_segment.rows() && initial_motion_seed.rows() != 3)) {
             throw std::invalid_argument("PathCover motion tip segment requires two finite points and a three-point seed");
+        }
+        pending_initial_boundary_ = initialBoundaryForInput(acceleration, initial_thrust_axis, options_);
+        if (initial_thrust_axis && initial_thrust_axis->z() <= 0.0) {
+            throw PathCoverPlanningError("PathCover initial thrust axis is outside the upright heading chart");
         }
         std::vector<Vec3> seed_region;
         for (Eigen::Index i = 0; i < initial_motion_seed.rows(); ++i) {
@@ -480,6 +570,7 @@ public:
             throw PathCoverPlanningError("PathCover state or goal violates workspace body clearance");
         }
         PlanResult result;
+        result.initial_boundary = *pending_initial_boundary_;
         result.initial_speed = velocity.norm();
         result.speed_acceptance_limit = speedAcceptanceLimit(options_.max_velocity);
         const auto search_begin = Clock::now();
@@ -607,8 +698,14 @@ public:
         result.corridor_ms = milliseconds(corridor_begin);
 
         const auto trajectory_begin = Clock::now();
-        if ((result.local_goal - position).norm() < 1e-8 && velocity.norm() < 1e-8
-            && acceleration.norm() < 1e-8) {
+        const bool zero_length = (result.local_goal - position).norm() < 1e-8;
+        const bool hold = zero_length && velocity.norm() < 1e-8
+            && result.initial_boundary.permitsHold(options_.mass * options_.gravity)
+            && (!initial_thrust_axis || (goal - position).norm() < 1e-8);
+        if (initial_thrust_axis && zero_length && !hold) {
+            throw PathCoverPlanningError("PathCover zero-length CTBR reference cannot hold this boundary state");
+        }
+        if (hold) {
             Coefficients hold = Coefficients::Zero();
             hold.col(5) = position;
             result.coefficients.push_back(hold);
@@ -632,7 +729,7 @@ public:
             terminal.col(0) = result.local_goal;
             Eigen::VectorXd bounds(5), physics(6);
             bounds << options_.nominal_velocity, options_.body_rate_max - options_.reference_body_rate_margin, options_.tilt_max,
-                options_.thrust_min, options_.thrust_max;
+                options_.nominal_thrust_min, options_.thrust_max;
             physics << options_.mass, options_.gravity, 0.0, 0.0, 0.0, 1e-3;
             if (!solver.setup(options_.time_weight, initial, terminal, result.corridors,
                               options_.safety_margin, 2.0, options_.pieces_per_polytope,
@@ -642,6 +739,13 @@ public:
                 throw PathCoverPlanningError("PathCover GCOPTER corridor decomposition failed");
             }
             solver.setPositionPenaltySmoothing(options_.position_penalty_smoothing);
+            if (initial_thrust_axis) {
+                solver.enableInitialForce(*initial_thrust_axis, options_.thrust_min, options_.thrust_max,
+                                          result.initial_boundary.force_guess_raw_n);
+                result.initial_boundary.force_guess_n = solver.getInitialForce().guess;
+                result.initial_boundary.force_guess_was_projected = solver.getInitialForce().guessWasProjected;
+                *pending_initial_boundary_ = result.initial_boundary;
+            }
             result.applied_reference_margins = solver.getAppliedMargins();
             result.reference_margin_caps = solver.getMarginCaps();
             result.applied_reference_face_margins = solver.getAppliedFaceMargins();
@@ -689,6 +793,12 @@ public:
             && m(2) >= options_.thrust_min - 1e-3 && m(3) <= options_.thrust_max + 1e-3
             && m(4) <= options_.tilt_max + 1e-3 && m(5) <= options_.body_rate_max + 1e-3;
         result.trajectory_ms = milliseconds(trajectory_begin);
+        // Coefficients are in descending power order. Report the actual curve
+        // boundary, separately from the measured acceleration used as a guess.
+        result.initial_boundary.reference_acceleration = 2.0 * result.coefficients.front().col(3);
+        result.initial_boundary.force_n = options_.mass
+            * (*result.initial_boundary.reference_acceleration + Vec3(0.0, 0.0, options_.gravity)).norm();
+        pending_initial_boundary_.reset();
         return result;
     }
 };
@@ -750,6 +860,9 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def_readonly("path", &PlanResult::path)
         .def_readonly("selected_initial_motion_seed", &PlanResult::selected_initial_motion_seed)
         .def_readonly("initial_motion_seed_adjusted", &PlanResult::initial_motion_seed_adjusted)
+        .def_property_readonly("initial_boundary", [](const PlanResult &value) {
+            return initialBoundaryDict(value.initial_boundary);
+        })
         .def_readonly("local_goal", &PlanResult::local_goal)
         .def_readonly("corridors", &PlanResult::corridors)
         .def_readonly("coefficients", &PlanResult::coefficients)
@@ -789,7 +902,8 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def("update_cloud", &NativeFrontend::update_cloud, py::call_guard<py::gil_scoped_release>())
         .def("plan", &NativeFrontend::plan, py::arg("position"), py::arg("velocity"),
              py::arg("acceleration"), py::arg("goal"), py::arg("initial_motion_seed") = Points(0, 3),
-             py::arg("initial_motion_tip_segment") = Points(0, 3), py::call_guard<py::gil_scoped_release>())
+             py::arg("initial_motion_tip_segment") = Points(0, 3),
+             py::arg("initial_thrust_axis") = py::none(), py::call_guard<py::gil_scoped_release>())
         .def("inflated_cloud", &NativeFrontend::inflated_cloud, py::call_guard<py::gil_scoped_release>())
         .def("obstacle_centers", &NativeFrontend::obstacle_centers, py::call_guard<py::gil_scoped_release>())
         .def("search_obstacle_centers", &NativeFrontend::search_obstacle_centers, py::call_guard<py::gil_scoped_release>())

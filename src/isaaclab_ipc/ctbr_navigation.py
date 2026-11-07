@@ -12,6 +12,24 @@ import numpy as np
 import torch
 
 
+def ctbr_boundary_frame(quaternion_wxyz):
+    """Return the measured thrust axis and flatness heading from a CTBR frame.
+
+    PathCover constructs y = normalize(z cross heading). Its heading is therefore
+    atan2(-R01, R11), which preserves the measured upright frame at positive
+    collective force. Euler yaw does not preserve that frame when tilted.
+    """
+    quaternion = np.asarray(quaternion_wxyz, dtype=np.float64).reshape(4)
+    norm = np.linalg.norm(quaternion)
+    if not np.isfinite(quaternion).all() or not np.isfinite(norm) or norm == 0.0:
+        raise ValueError("The CTBR boundary quaternion must be finite and nonzero")
+    w, x, y, z = quaternion / norm
+    thrust_axis = np.array((2.0 * (x * z + w * y), 2.0 * (y * z - w * x),
+                            1.0 - 2.0 * (x * x + y * y)))
+    heading = float(np.arctan2(2.0 * (w * z - x * y), 1.0 - 2.0 * (x * x + z * z)))
+    return thrust_axis, heading
+
+
 @dataclass(frozen=True)
 class SampledPlan:
     pva: np.ndarray
@@ -99,9 +117,11 @@ class PathCoverNavigation:
         self._reference_limits = self.frontends[0].config.native_options()
         self.reference_quality = {
             "scope": "Returned and sampled frontend plans, including initial/reset plans; cumulative across resets. "
-                     "Optimizer quadrature and MPC reference-node diagnostics, not continuous or physical violations.",
+                     "Optimizer quadrature and MPC reference-node diagnostics, not continuous or physical violations. "
+                     "Any positive nominal thrust shortfall is a separate soft-target diagnostic.",
             "returned_plans": 0,
             "optimizer_quadrature_infeasible_plans": 0,
+            "nominal_thrust_shortfall_plans": 0,
             "optimizer_extrema": {},
             "maximum_positive_residual": {},
             "maximum_mpc_reference_sfc_violation_m": 0.0,
@@ -150,6 +170,7 @@ class PathCoverNavigation:
         quality, limits = self.reference_quality, self._reference_limits
         quality["returned_plans"] += 1
         quality["optimizer_quadrature_infeasible_plans"] += int(not metrics["optimizer_quadrature_feasible"])
+        quality["nominal_thrust_shortfall_plans"] += int(metrics["thrust_nominal_shortfall_n"] > 0.0)
         extrema = quality["optimizer_extrema"]
         for name in ("sfc_max_m", "speed_max_m_s", "thrust_min_n", "thrust_max_n",
                      "tilt_max_rad", "zero_yaw_body_rate_max_rad_s"):
@@ -161,6 +182,7 @@ class PathCoverNavigation:
             "speed_physical_m_s": metrics["optimizer_speed_max_m_s"] - limits["max_velocity"],
             "speed_nominal_m_s": metrics["speed_nominal_excess_m_s"],
             "thrust_lower_n": limits["thrust_min"] - metrics["optimizer_thrust_min_n"],
+            "thrust_nominal_lower_n": metrics["thrust_nominal_shortfall_n"],
             "thrust_upper_n": metrics["optimizer_thrust_max_n"] - limits["thrust_max"],
             "tilt_rad": metrics["optimizer_tilt_max_rad"] - limits["tilt_max"],
             "zero_yaw_body_rate_rad_s": metrics["optimizer_zero_yaw_body_rate_max_rad_s"] - limits["body_rate_max"],
@@ -223,8 +245,7 @@ class PathCoverNavigation:
         def plan_one(row):
             index = ids[row]
             frontend, values, now = self.frontends[index], physical[row], times[index]
-            qw, qx, qy, qz = values[3:7]
-            yaw = np.arctan2(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz))
+            thrust_axis, yaw = ctbr_boundary_frame(values[3:7])
             state = PathCoverState(position=values[:3], velocity=values[7:10],
                                    acceleration=values[10:13], yaw=float(yaw), time=float(now))
             points = clouds.get(index) if isinstance(clouds, dict) else clouds[index]
@@ -232,7 +253,8 @@ class PathCoverNavigation:
             try:
                 motion = values[16:].reshape(5, 3)
                 plan = frontend.plan(points, state, values[13:16],
-                                     initial_motion_seed=motion[:3], initial_motion_tip_segment=motion[3:])
+                                     initial_motion_seed=motion[:3], initial_motion_tip_segment=motion[3:],
+                                     initial_thrust_axis=thrust_axis)
             except PathCoverPlanningError as error:
                 return None, error, 1000 * (perf_counter() - started), None
             elapsed = 1000 * (perf_counter() - started)

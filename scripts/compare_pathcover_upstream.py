@@ -99,7 +99,7 @@ def serialized_input(cloud, initial, goal, cfg):
         cfg.time_weight, cfg.safety_margin, cfg.pieces_per_polytope, cfg.integral_resolution,
         cfg.relative_tolerance, cfg.max_iterations, cfg.native_options()["nominal_velocity"],
         cfg.body_rate_max - cfg.reference_body_rate_margin,
-        cfg.tilt_max, cfg.thrust_min, options["thrust_max"], *cfg.penalty_weights,
+        cfg.tilt_max, cfg.nominal_thrust_min, options["thrust_max"], *cfg.penalty_weights,
         cfg.mass, cfg.gravity, 0.0, 0.0, 0.0, 0.001,
     ]
     return " ".join(map(str, values)) + "\n"

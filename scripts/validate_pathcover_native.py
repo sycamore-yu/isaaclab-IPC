@@ -59,6 +59,14 @@ int main(int argc, char** argv) {
 #ifdef PATHCOVER_PORTED
     double position_smoothing; std::cin >> position_smoothing;
     solver.setPositionPenaltySmoothing(position_smoothing);
+    // Old frozen inputs end at smoothing and retain their fixed-PVA boundary.
+    int collective_boundary = 0;
+    if (std::cin >> collective_boundary && collective_boundary) {
+        Eigen::Vector3d axis;
+        double lower, upper, measured_guess;
+        std::cin >> axis.x() >> axis.y() >> axis.z() >> lower >> upper >> measured_guess;
+        solver.enableInitialForce(axis, lower, upper, measured_guess);
+    }
 #endif
     Trajectory<5> trajectory;
     const double objective = solver.optimize(trajectory, tolerance, iterations);
@@ -92,7 +100,25 @@ def fixture():
     return cloud, state, np.array([5.0, 0.0, 1.5]), config
 
 
+def serialized_gcopter_input(plan, state, config):
+    """Use the same nominal cost bounds for both GCOPTER implementations."""
+    values = [*state.position, *state.velocity, *state.acceleration, *plan.local_goal, *np.zeros(6), len(plan.corridors)]
+    for corridor in plan.corridors:
+        values.extend([len(corridor), *corridor.ravel()])
+    options = config.native_options()
+    values.extend([
+        config.time_weight, config.safety_margin, config.pieces_per_polytope, config.integral_resolution,
+        config.relative_tolerance, config.max_iterations,
+        options["nominal_velocity"], config.body_rate_max - config.reference_body_rate_margin,
+        config.tilt_max, config.nominal_thrust_min, options["thrust_max"],
+        *config.penalty_weights, config.mass, config.gravity, 0.0, 0.0, 0.0, 0.001,
+    ])
+    return " ".join(str(value) for value in values)
+
+
 def official_gcopter(upstream, plan, state, config):
+    if getattr(plan, "metrics", {}).get("initial_boundary", {}).get("mode", "fixed_pva") != "fixed_pva":
+        raise ValueError("Unmodified official GCOPTER has no CTBR collective boundary")
     revision = subprocess.check_output(["git", "-C", str(upstream), "rev-parse", "HEAD"], text=True).strip()
     if revision != PIN:
         raise ValueError(f"Expected PathCover {PIN}, found {revision}")
@@ -108,18 +134,7 @@ def official_gcopter(upstream, plan, state, config):
              "-I/usr/include/eigen3", f"-I{upstream / 'src/trajectory_server/include'}",
              str(source), "-o", str(binary)], check=True,
         )
-    values = [*state.position, *state.velocity, *state.acceleration, *plan.local_goal, *np.zeros(6), len(plan.corridors)]
-    for corridor in plan.corridors:
-        values.extend([len(corridor), *corridor.ravel()])
-    options = config.native_options()
-    values.extend([
-        config.time_weight, config.safety_margin, config.pieces_per_polytope, config.integral_resolution,
-        config.relative_tolerance, config.max_iterations,
-        options["nominal_velocity"], config.body_rate_max - config.reference_body_rate_margin,
-        config.tilt_max, config.thrust_min, options["thrust_max"],
-        *config.penalty_weights, config.mass, config.gravity, 0.0, 0.0, 0.0, 0.001,
-    ])
-    serialized = " ".join(str(value) for value in values)
+    serialized = serialized_gcopter_input(plan, state, config)
     (directory / "upstream_gcopter_input.txt").write_text(serialized + "\n")
     completed = subprocess.run([str(binary)], input=serialized, text=True, capture_output=True)
     if completed.returncode:

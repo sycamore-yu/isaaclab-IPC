@@ -69,10 +69,13 @@ def make_forest_ctbr_cfg():
 
 
 def pathcover_config_for_ctbr(model, overrides):
-    """Use the controller's physical model and optionally stricter planning limits."""
+    """Separate physical force bounds from the positive reference cost target."""
     from isaaclab_ipc.pathcover_native import PathCoverConfig
 
     options = dict(overrides)
+    options.setdefault("max_corridors", 4)
+    # Obstacle clearance is already encoded by occupancy inflation and raw SFCs.
+    options.setdefault("safety_margin", 0.0)
     for name in ("mass", "gravity"):
         value = getattr(model, name)
         if name in options and not math.isclose(options[name], value, rel_tol=0, abs_tol=1e-9):
@@ -95,9 +98,15 @@ def pathcover_config_for_ctbr(model, overrides):
     floor = model.mass * model.specific_thrust_limits[0]
     cap = model.mass * model.specific_thrust_limits[1]
     if options.get("thrust_min") is None:
-        options["thrust_min"] = max(reference.thrust_min, floor)
+        options["thrust_min"] = floor
     if options.get("thrust_max") is None:
         options["thrust_max"] = cap
+    if options.get("nominal_thrust_min") is None:
+        options["nominal_thrust_min"] = max(reference.thrust_min, options["thrust_min"])
+    if options.get("tilt_max") is None:
+        # Nominal chart boundary, not a CTBR attitude constraint. Native yaw
+        # still rejects zero or non-upright force; stricter explicit limits stay.
+        options["tilt_max"] = math.pi / 2
     if options["thrust_min"] < floor:
         raise ValueError("PathCover thrust_min is below the CTBR minimum")
     if options["thrust_max"] > cap:

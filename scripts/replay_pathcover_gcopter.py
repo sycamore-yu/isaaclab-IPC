@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 from validate_pathcover_native import ORACLE_SOURCE, PIN
 
+from isaaclab_ipc.ctbr_navigation import ctbr_boundary_frame
 from isaaclab_ipc.pathcover_native import (
     PathCoverConfig,
     PathCoverPlan,
@@ -28,21 +29,29 @@ def serialized_problem(problem, config):
         config.time_weight, config.safety_margin, config.pieces_per_polytope, config.integral_resolution,
         config.relative_tolerance, config.max_iterations,
         config.native_options()["nominal_velocity"], config.body_rate_max - config.reference_body_rate_margin,
-        config.tilt_max, config.thrust_min,
+        config.tilt_max, config.nominal_thrust_min,
         config.native_options()["thrust_max"], *config.penalty_weights,
         config.mass, config.gravity, 0.0, 0.0, 0.0, 0.001, config.position_penalty_smoothing_m,
     ])
+    if problem.get("initial_boundary", {}).get("mode", "fixed_pva") == "ctbr_collective":
+        axis = np.asarray(problem["initial_boundary"]["thrust_axis"], dtype=np.float64)
+        measured_force = np.asarray(problem["initial_pva"])[:, 2] + [0.0, 0.0, config.gravity]
+        guess = config.mass * float(measured_force @ axis)
+        values.extend([1, *axis, config.thrust_min, config.thrust_max, guess])
     return " ".join(str(value) for value in values)
 
 
 def config_from_snapshot(values):
-    """Resolve recorded settings without adding a later reference-rate margin."""
+    """Keep recorded cost bounds, including pre-nominal-floor snapshots."""
     config_values = dict(values)
     # Offline migration of frozen V1-V7 evidence. Production has only body yaw.
     if "yaw_rate_max" in config_values:
         config_values["body_yaw_rate_max"] = config_values.pop("yaw_rate_max")
     config_values.setdefault("position_penalty_smoothing_m", 0.01)
     config_values.setdefault("reference_body_rate_margin", 0.0)
+    # A recorded physical lower bound was also the optimizer target before this
+    # split. Do not apply the current CTBR factory default during offline replay.
+    config_values.setdefault("nominal_thrust_min", config_values.get("thrust_min"))
     return PathCoverConfig(**config_values)
 
 
@@ -61,6 +70,9 @@ def build_solver(root, include, name, ported):
 
 
 def replay(binary, text, problem, config, ported):
+    boundary_mode = problem.get("initial_boundary", {}).get("mode", "fixed_pva")
+    if not ported and boundary_mode != "fixed_pva":
+        raise ValueError("Unmodified official GCOPTER has no CTBR collective boundary; fixed-PVA comparison is a different problem")
     completed = subprocess.run([str(binary), str(config.random_seed)], input=text,
                                text=True, capture_output=True)
     result = {"success": completed.returncode == 0, "returncode": completed.returncode,
@@ -89,8 +101,14 @@ def replay(binary, text, problem, config, ported):
                          problem["terminal_pva"][:, 0], {"optimizer_status": 1, "objective": objective})
     numerics = validate_pathcover_plan(plan, config)
     numerics.pop("optimizer_status")
+    sample = trajectory.sample(0.0)
+    initial_pva = np.column_stack((sample.position, sample.velocity, sample.acceleration))
+    initial_force = config.mass * np.linalg.norm(sample.acceleration + [0.0, 0.0, config.gravity])
     result.update(objective=objective, durations_s=data[:, 0].tolist(),
-                  coefficients=trajectory.coefficients.tolist(), numerics=numerics)
+                  coefficients=trajectory.coefficients.tolist(), numerics=numerics,
+                  initial_boundary_mode=boundary_mode,
+                  measured_initial_pva=np.asarray(problem["initial_pva"]).tolist(),
+                  reference_initial_pva=initial_pva.tolist(), reference_initial_force_n=float(initial_force))
     return result
 
 
@@ -107,11 +125,17 @@ def main():
     problem = captured.get("gcopter_problem", captured)
     if problem is None or "initial_pva" not in problem:
         raise ValueError("Capture does not contain NativePathCoverFrontend.failed_problem()")
-    if "state" in captured:
+    boundary_mode = problem.get("initial_boundary", {}).get("mode", "fixed_pva")
+    if args.upstream and boundary_mode != "fixed_pva":
+        raise ValueError("Unmodified official GCOPTER does not support the captured CTBR collective boundary")
+    if "initial_yaw" not in problem and "state" in captured:
         state = np.asarray(captured["state"]).reshape(-1)
-        w, x, y, z = state[3:7]
-        problem["initial_yaw"] = float(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
-    elif "current_state" in captured:
+        if boundary_mode == "ctbr_collective":
+            _, problem["initial_yaw"] = ctbr_boundary_frame(state[3:7])
+        else:
+            w, x, y, z = state[3:7]
+            problem["initial_yaw"] = float(np.arctan2(2 * (w * z + x * y), 1 - 2 * (y * y + z * z)))
+    elif "initial_yaw" not in problem and "current_state" in captured:
         state = captured["current_state"]
         problem["initial_yaw"] = float(state["yaw"] if isinstance(state, dict) else state.yaw)
     config = config_from_snapshot(problem["config"])
@@ -124,6 +148,8 @@ def main():
     force = np.asarray(problem["initial_pva"])[:, 2] + np.array([0.0, 0.0, config.gravity])
     norm = float(np.linalg.norm(force))
     result = {"input": str(args.input), "captured_status": int(problem["optimizer_status"]),
+              "initial_boundary_mode": boundary_mode,
+              "captured_initial_boundary": problem.get("initial_boundary", {"mode": "fixed_pva"}),
               "yaw_profile": "body-r constrained heading, V8 semantics",
               "captured_trial_durations": [float(value) if np.isfinite(value) else None
                                            for value in problem.get("trial_durations", [])],
@@ -131,9 +157,13 @@ def main():
               "reference_body_rate_margin_rad_s": config.reference_body_rate_margin,
               "optimizer_body_rate_target_rad_s": config.body_rate_max - config.reference_body_rate_margin,
               "body_rate_physical_limit_rad_s": config.body_rate_max,
+              "thrust_physical_min_n": config.thrust_min,
+              "thrust_nominal_min_n": config.nominal_thrust_min,
+              "thrust_physical_max_n": config.thrust_max,
               "initial": {
                   "speed_m_s": float(np.linalg.norm(problem["initial_pva"][:, 1])),
                   "thrust_n": config.mass * norm,
+                  "thrust_nominal_shortfall_n": max(config.nominal_thrust_min - config.mass * norm, 0.0),
                   "tilt_rad": float(np.arccos(np.clip(force[2] / norm, -1, 1))) if norm else None,
               }}
     ported = build_solver(root, root / "third_party/pathcover_native/trajectory", "ported", True)

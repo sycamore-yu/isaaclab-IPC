@@ -1,6 +1,7 @@
 """New AC-MPC contracts: node costs, immutable references and checkpoint identity."""
 
 import copy
+import math
 
 import pytest
 import torch
@@ -192,35 +193,56 @@ def test_articulation_mass_includes_rotor_links():
         checked_articulation_mass(robot, 0.75)
 
 def test_frontend_and_ctbr_share_physical_parameters():
+    from isaaclab_ipc.pathcover_native import PathCoverConfig
     from isaaclab_ipc.tasks.ctbr_env import pathcover_config_for_ctbr
 
     model = CTBRConfig(mass=0.9, gravity=9.7)
     frontend = pathcover_config_for_ctbr(model, {"max_velocity": 4.0, "body_rate_max": 2.0})
     assert frontend.mass == model.mass and frontend.gravity == model.gravity
     assert frontend.thrust_max == pytest.approx(model.mass * model.specific_thrust_limits[1])
-    assert frontend.thrust_min == pytest.approx(2.0 / 0.716 * model.mass)
+    assert frontend.thrust_min == model.mass * model.specific_thrust_limits[0]
+    assert frontend.nominal_thrust_min == pytest.approx(2.0 / 0.716 * model.mass)
     assert frontend.body_yaw_rate_max == model.body_rate_limits[2]
     assert frontend.max_velocity == 4.0 and frontend.body_rate_max == 2.0
     assert frontend.nominal_velocity == 3.0
     default = pathcover_config_for_ctbr(model, {})
     assert default.max_velocity == 10.0 and default.nominal_velocity == 3.0
-    assert default.tilt_max == 0.7854
+    assert default.tilt_max == math.pi / 2
+    assert default.max_corridors == 4 and default.safety_margin == 0.0
+    assert default.pieces_per_polytope == 1
+    standalone = PathCoverConfig()
+    assert standalone.max_corridors == 6 and standalone.safety_margin == 0.15
     assert default.penalty_weights == (1e5, 100.0, 1e4, 1e4, 1e4)
     assert default.body_rate_max == 3.0 and default.reference_body_rate_margin == 0.01
     assert model.body_rate_limits == (3.0, 3.0, 1.5)
     narrow = CTBRConfig(mass=0.9, specific_thrust_limits=(4.0, 12.0))
     restricted = pathcover_config_for_ctbr(narrow, {})
     assert restricted.thrust_min == pytest.approx(3.6)
+    assert restricted.nominal_thrust_min == restricted.thrust_min
     assert restricted.thrust_max == pytest.approx(10.8)
     stress = pathcover_config_for_ctbr(model, {
-        "nominal_velocity": 6.0, "thrust_min": 0.0,
+        "nominal_velocity": 6.0, "thrust_min": 0.0, "nominal_thrust_min": 0.0,
         "thrust_max": model.mass * model.specific_thrust_limits[1],
         "tilt_max": 0.8, "penalty_weights": (1e4, 1e3, 1e4, 1e4, 1e4),
+        "max_corridors": 6, "safety_margin": 0.15,
     })
     assert stress.nominal_velocity == 6.0 and stress.thrust_min == 0.0
+    assert stress.nominal_thrust_min == 0.0
     assert stress.thrust_max == model.mass * model.specific_thrust_limits[1]
-    conservative = pathcover_config_for_ctbr(model, {"thrust_max": 10.0 / 0.716 * model.mass})
+    assert stress.tilt_max == 0.8
+    assert stress.max_corridors == 6 and stress.safety_margin == 0.15
+    conservative = pathcover_config_for_ctbr(model, {
+        "thrust_min": 2.0 / 0.716 * model.mass, "thrust_max": 10.0 / 0.716 * model.mass,
+        "tilt_max": 0.7854,
+    })
+    assert conservative.thrust_min == pytest.approx(2.0 / 0.716 * model.mass)
+    assert conservative.nominal_thrust_min == conservative.thrust_min
     assert conservative.thrust_max == pytest.approx(10.0 / 0.716 * model.mass)
+    assert conservative.tilt_max == 0.7854
+    with pytest.raises(ValueError, match="thrust_min"):
+        pathcover_config_for_ctbr(narrow, {"thrust_min": 3.5})
+    with pytest.raises(ValueError, match="nominal_thrust_min"):
+        pathcover_config_for_ctbr(narrow, {"nominal_thrust_min": 3.5})
     with pytest.raises(ValueError, match="mass"):
         pathcover_config_for_ctbr(model, {"mass": 0.75})
     with pytest.raises(ValueError, match="body_yaw_rate_max"):
@@ -236,9 +258,12 @@ def test_marsim_keeps_cruise_target_distinct_from_physical_speed(benchmark, phys
     frontend = benchmark_frontend_config(load_case(benchmark), model)
     assert frontend.max_velocity == physical_speed
     assert frontend.nominal_velocity == 3.0
-    assert frontend.thrust_min == pytest.approx(2.0 / 0.716 * model.mass)
+    assert frontend.thrust_min == model.mass * model.specific_thrust_limits[0]
+    assert frontend.nominal_thrust_min == pytest.approx(2.0 / 0.716 * model.mass)
     assert frontend.thrust_max == pytest.approx(model.mass * model.specific_thrust_limits[1])
-    assert frontend.tilt_max == 0.7854
+    assert frontend.tilt_max == math.pi / 2
+    assert frontend.max_corridors == 4 and frontend.safety_margin == 0.0
+    assert frontend.pieces_per_polytope == 1
     assert frontend.penalty_weights == (1e5, 100.0, 1e4, 1e4, 1e4)
     assert frontend.body_rate_max == 3.0 and frontend.reference_body_rate_margin == 0.01
     assert model.body_rate_limits == (3.0, 3.0, 1.5)
@@ -247,7 +272,12 @@ def test_marsim_keeps_cruise_target_distinct_from_physical_speed(benchmark, phys
     narrow = CTBRConfig(specific_thrust_limits=(4.0, 12.0))
     restricted = benchmark_frontend_config(load_case(benchmark), narrow)
     assert restricted.thrust_min == pytest.approx(4.0 * narrow.mass)
+    assert restricted.nominal_thrust_min == restricted.thrust_min
     assert restricted.thrust_max == pytest.approx(12.0 * narrow.mass)
+    explicit = benchmark_frontend_config(load_case(benchmark), model, nominal_thrust_min=0.0)
+    assert explicit.nominal_thrust_min == explicit.thrust_min == 0.0
+    with pytest.raises(ValueError, match="nominal_thrust_min"):
+        benchmark_frontend_config(load_case(benchmark), narrow, nominal_thrust_min=2.0)
 
 
 def test_single_environment_snapshots_have_canonical_strides():

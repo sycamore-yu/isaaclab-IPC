@@ -59,6 +59,7 @@ def test_official_reference_defaults_resolve_to_concrete_mass_scaled_values():
     cfg = PathCoverConfig(mass=0.9)
     assert cfg.nominal_velocity == 3.0
     assert cfg.thrust_min == pytest.approx(2.0 / 0.716 * 0.9)
+    assert cfg.nominal_thrust_min == cfg.thrust_min
     assert cfg.thrust_max == pytest.approx(10.0 / 0.716 * 0.9)
     assert cfg.tilt_max == 0.7854
     assert cfg.penalty_weights == (1e5, 100.0, 1e4, 1e4, 1e4)
@@ -68,8 +69,83 @@ def test_official_reference_defaults_resolve_to_concrete_mass_scaled_values():
     options = cfg.native_options()
     assert options["nominal_velocity"] == cfg.nominal_velocity
     assert options["thrust_min"] == cfg.thrust_min
+    assert options["nominal_thrust_min"] == cfg.thrust_min
     assert options["thrust_max"] == cfg.thrust_max
     assert options["reference_body_rate_margin"] == 0.01
+
+
+@pytest.mark.parametrize("physical, nominal, maximum", [
+    (1.0, 0.5, 3.0), (0.0, 3.0, 3.0), (0.0, np.nan, 3.0),
+    (0.0, np.inf, 3.0), (-1.0, 1.0, 3.0), (np.nan, 1.0, 3.0), (0.0, 1.0, np.inf),
+])
+def test_nominal_thrust_floor_validates_physical_order(physical, nominal, maximum):
+    with pytest.raises(ValueError, match="nominal_thrust_min"):
+        PathCoverConfig(thrust_min=physical, nominal_thrust_min=nominal, thrust_max=maximum)
+
+
+@pytest.mark.parametrize("entry", ["replay", "upstream_compare", "upstream_validation"])
+def test_recorded_nominal_thrust_replay_keeps_old_cost_bound(monkeypatch, entry):
+    from pathlib import Path
+    from types import SimpleNamespace
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    from compare_pathcover_upstream import serialized_input
+    from replay_pathcover_gcopter import config_from_snapshot, serialized_problem
+    from validate_pathcover_native import serialized_gcopter_input
+
+    current = PathCoverConfig(thrust_min=0.5, nominal_thrust_min=2.5, thrust_max=20.0).native_options()
+    historical = dict(current)
+    historical.pop("nominal_thrust_min")
+    old, new = config_from_snapshot(historical), config_from_snapshot(current)
+    assert old.thrust_min == new.thrust_min == 0.5
+    assert old.nominal_thrust_min == 0.5 and new.nominal_thrust_min == 2.5
+    problem = {"initial_pva": np.zeros((3, 3)), "terminal_pva": np.zeros((3, 3)), "corridors": ()}
+    state = PathCoverState(np.zeros(3), np.zeros(3), np.zeros(3))
+    plan = SimpleNamespace(local_goal=np.zeros(3), corridors=())
+    serializers = {
+        "replay": (lambda cfg: serialized_problem(problem, cfg), -14),
+        "upstream_compare": (lambda cfg: serialized_input(np.empty((0, 3)), np.zeros((3, 3)), np.zeros(3), cfg), -13),
+        "upstream_validation": (lambda cfg: serialized_gcopter_input(plan, state, cfg), -13),
+    }
+    serialize, index = serializers[entry]
+    old_values = np.fromstring(serialize(old), sep=" ")
+    new_values = np.fromstring(serialize(new), sep=" ")
+    assert old_values[index] == 0.5 and new_values[index] == 2.5
+    np.testing.assert_array_equal(np.delete(old_values, len(old_values) + index),
+                                  np.delete(new_values, len(new_values) + index))
+    assert "nominal_thrust_min" not in historical
+
+
+def test_offline_thrust_quality_reports_nominal_shortfall_separately():
+    from types import SimpleNamespace
+
+    from isaaclab_ipc.pathcover_native import PathCoverSample
+
+    cfg = PathCoverConfig(thrust_min=0.0, nominal_thrust_min=2.5, thrust_max=20.0)
+    thrust = 1.0
+    acceleration = np.array([0.0, 0.0, thrust / cfg.mass - cfg.gravity])
+    coefficients = np.zeros((1, 3, 6))
+    coefficients[0, :, 3] = acceleration / 2
+    coefficients[0, 2, 5] = 1.0
+
+    def sample(times):
+        return PathCoverSample(
+            np.array([0.0, 0.0, 1.0]) + 0.5 * times[:, None] ** 2 * acceleration,
+            times[:, None] * acceleration, np.broadcast_to(acceleration, (len(times), 3)),
+            np.zeros((len(times), 3)), np.zeros(len(times)), np.zeros(len(times)),
+        )
+
+    plan = SimpleNamespace(
+        trajectory=SimpleNamespace(coefficients=coefficients, duration=0.1),
+        segments=(SimpleNamespace(corridor_index=0, duration=0.1),),
+        corridors=(np.array([[0.0, 0.0, 1.0, -2.0], [0.0, 0.0, -1.0, 0.0]]),),
+        sample=sample, metrics={"optimizer_status": 0},
+    )
+    quality = validate_pathcover_plan(plan, cfg)
+    assert quality["finite"] and quality["min_thrust_n"] == pytest.approx(thrust)
+    assert cfg.thrust_min <= quality["min_thrust_n"] <= cfg.thrust_max
+    assert quality["thrust_nominal_shortfall_n"] == pytest.approx(1.5)
+    assert quality["max_abs_body_rate_components_rad_s"] == [0.0, 0.0, 0.0]
 
 
 @pytest.mark.parametrize("margin, maximum", [(-0.01, 3.0), (3.0, 3.0), (np.nan, 3.0),

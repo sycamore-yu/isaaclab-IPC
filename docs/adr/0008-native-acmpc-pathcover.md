@@ -19,6 +19,16 @@ code and evidence remain available; this branch develops the new AC-MPC route.
   JPS guide region, although a legal full-grid path exists. Upstream JPS remains
   available for the independent original-chain comparison; `search_radius`
   belongs only to that comparison.
+- CTBR factories retain at most four ordered RISP corridors. Native PathCover
+  selects the last corridor's DMP exit as the local terminal position and solves
+  a complete new zero-terminal-velocity/acceleration MINCO trajectory. This is
+  a shorter planning horizon, not truncation of an already optimized curve.
+  Standalone PathCover retains six corridors and explicit Newton overrides persist.
+  A matched 14-input study passes the same full-curve quality thresholds for both
+  horizons. Its ten changed inputs reduce quadrature-node work by 34.373% and
+  plane projection work by 25.371%, but seq578 increases work. The shortest new
+  reference is 1.413821 s, longer than the N5 0.4 s window. Complete navigation
+  and end-to-end latency still require physical evaluation.
 - The state is `[p_world(3), q_wxyz(4), v_world(3)]`. The control is collective
   force in N and body rates in rad/s. Execution divides force by vehicle mass.
 - `N` counts cost nodes, including the measured initial state, as in AC-MPC.
@@ -34,15 +44,14 @@ code and evidence remain available; this branch develops the new AC-MPC route.
 - Apply robot clearance once in the frontend. The MPC uses every returned SFC
   face as a hard constraint. GCOPTER's soft penalties alone are not a proof of
   constraint satisfaction; record sampled violations during validation.
-- Request the official YAML's 0.15 m reference position margin in GCOPTER's penalty copy.
-  It shifts the unit-normal position residual only, with the existing caps from
-  polytope/intersection inscribed radii. In the first and last corridor, additionally
-  cap each face's margin by the fixed endpoint's nonnegative original clearance.
-  A fixed point on an original SFC face must not be required to move 0.15 m inward.
-  Original SFCs, endpoint PVA, waypoint parameterization, map inflation and vehicle
-  radius stay identical. Record requested margin, geometric caps and actual
-  per-face margins separately. The per-corridor applied value is the minimum
-  actual face margin. This remains a soft objective, not guaranteed clearance.
+- CTBR factories use zero additional GCOPTER position margin. Robot clearance
+  remains in occupancy inflation and the returned raw SFCs. The earlier additional
+  0.15 m inward penalty offset could conflict with braking near a corridor face;
+  removing it does not enlarge those SFCs or change the physical collision radius.
+  Standalone PathCover retains the official YAML's 0.15 m reference margin, and
+  explicit Newton overrides remain supported. Nonzero margins retain the existing
+  polytope/intersection caps and endpoint face-clearance caps. Record requested
+  and applied margins separately. A soft position penalty never proves clearance.
 - Match the official frontend's reference acceptance semantics: optimization must
   produce a finite cost and a nonempty numerical trajectory. Interface conditions
   such as positive durations and a defined attitude/yaw remain necessary.
@@ -51,7 +60,22 @@ code and evidence remain available; this branch develops the new AC-MPC route.
   zero-heading rate metric. It is not a full-curve feasibility certificate.
   Offline P1 quality checks keep their original tolerances; removing the veto
   does not make previously violating references pass those checks.
-- Preserve measured initial PVA. `nominal_velocity` controls GCOPTER's existing
+- Preserve measured initial position, quaternion and velocity for CTBR. Acceleration
+  is not a 10D CTBR state: it depends on the optimizable collective control.
+  Pass the normalized measured quaternion's body-z axis to native PathCover and
+  optimize one initial force scalar within the physical actuator bounds, with
+  `a0 = F0 * body_z / mass - gravity * e_z`. The measured acceleration initializes
+  F0 through its projection on body-z; it is not an equality boundary. Preserve
+  both measured and reference acceleration and the raw/projected force guess in
+  snapshots. Standalone calls without this optional axis keep fixed initial PVA.
+  Historical captures without boundary metadata retain their fixed-PVA semantics.
+- Construct the initial flatness heading as `atan2(-R01, R11)` from the measured
+  rotation. For an upright body-z and positive force this reproduces the measured
+  frame; Euler yaw generally does not. Zero or non-upright force still has no valid
+  heading under this chart. Body rates remain controls, not additional boundary
+  state constraints. Newton and Flightmare actuator lag is still present, so this
+  reference boundary requires physical task validation as well as curve checks.
+- `nominal_velocity` controls GCOPTER's existing
   speed cost; the independent `max_velocity` is the physical reference bound.
   The navigation factories derive that diagnostic bound from the scene and the
   most restrictive CTBR velocity component. Report nominal exceedance separately
@@ -60,20 +84,44 @@ code and evidence remain available; this branch develops the new AC-MPC route.
   now denote this quality threshold, not online rejection. CTBR hard velocity
   constraints remain unchanged.
 - Use the same reference preset for the formal A1/A2 baseline: nominal speed
-  3 m/s, tilt 0.7854 rad. V22 raises only the position penalty from the upstream
+  3 m/s. V22 raises only the position penalty from the upstream
   1e4 to 1e5 after an exactly reproduced SFC violation. Weights are
   `(1e5, 100, 1e4, 1e4, 1e4)`; increasing the rate weight as well reintroduced
   a 16.762 mm SFC violation and was rejected.
   Standalone PathCover retains the upstream thrust defaults `(2, 10) N` scaled by
-  `mass / 0.716 kg`. The CTBR Newton and MARSIM factories use the physical CTBR
-  upper force bound for reference optimization: `mass * specific_thrust_limits[1]`,
-  currently 22.0725 N. Their lower reference bound still intersects the upstream
-  lower bound with CTBR's lower force bound. This V24 change removes the earlier
-  10.474860335 N reference upper bound; it does not change the MPC or executor
-  limits. Preserve the old-model failures. A demonstrated feasible full curve for
+  `mass / 0.716 kg`. The CTBR Newton and MARSIM factories define physical force
+  bounds from `mass * specific_thrust_limits`, currently 0 to 22.0725 N.
+  Keep a separate `nominal_thrust_min`, normally `mass * 2 / 0.716`, as a positive
+  soft planning target. The GCOPTER thrust penalty uses this nominal lower bound
+  and the physical upper bound. Quadrature and physical quality diagnostics use
+  the physical lower bound; report nominal shortfalls separately. Require
+  `physical_min <= nominal_min < physical_max`. Standalone and historical
+  configurations without the new field use their own recorded `thrust_min` as
+  the nominal target. Explicit targets persist in snapshots and numerical replay.
+  The V24 upper-bound change removes the earlier 10.474860335 N reference upper
+  bound. Neither change alters the MPC or executor limits. A fixed measured
+  initial force below the nominal target is a soft-target shortfall, not a
+  physical impossibility. Positive soft cost does not guarantee force stays away
+  from zero between quadrature nodes. For CTBR factories the default tilt is pi/2, the
+  nominal boundary of the existing strictly upright heading chart; CTBR itself
+  has no hard tilt bound. Preserve an explicitly requested stricter limit in
+  the Newton factory. Standalone PathCover keeps its upstream 0.7854 rad tilt.
+  Nonzero force and strictly positive vertical force remain actual chart-domain
+  requirements. Zero-force or horizontal/inverted references must still report
+  their existing explicit errors; no force clamp or invented heading is added.
+  In the old fixed-PVA boundary, measured initial acceleration determined force
+  and tilt. In V26, six thrust-floor and three tilt failures were already at that fixed
+  boundary; changing duration or stopping rules cannot remove those conflicts.
+  An isolated experiment also lowering the optimizer target to zero passed
+  11 of 15 frozen failing references, leaving the SFC case and three body-rate
+  cases. A later extra-piece experiment exposed a near-zero-force rate peak
+  between quadrature nodes, so do not confuse a zero physical lower bound with
+  a numerically useful flatness planning target. These are explicit model/cost
+  decisions, not relaxed numerical quality tolerances.
+  Preserve all old-model failures. A demonstrated feasible full curve for
   a saved descending state peaks at 13.59695 N; this is a witness under the
   actual force range, not proof that every old-model
-  solution was infeasible. Preserve measured initial PVA. Prior 6 m/s runs remain
+  solution was infeasible. Prior 6 m/s runs remain
   separate stress results; do not combine them with the new matched baseline.
 - Keep the physical roll/pitch rate bound separate from the reference target.
   `reference_body_rate_margin=0.01 rad/s` lowers only GCOPTER's zero-heading
@@ -110,6 +158,18 @@ code and evidence remain available; this branch develops the new AC-MPC route.
   period, and its standalone point-seed API remains available.
 
 ## Numerical and execution decisions
+
+For the optional CTBR initial boundary, add one unconstrained scalar eta to the
+existing S3NU GCOPTER variables. Map it through
+`F0 = lower + (upper-lower) * (1+tanh(eta))/2`. Project only the initialization
+fraction into a finite open interval before atanh, and record that projection.
+Apply the same initial acceleration before duration initialization, each MINCO
+objective evaluation and final trajectory construction. The MINCO adjoint row 2
+is the derivative with respect to initial acceleration; contract it with body-z
+divided by mass and the tanh derivative. No second optimizer, force clamp,
+additional piece or changed stopping rule is introduced. Preserve generic S2/S4
+and standalone fixed-PVA behavior. The bounded parametrization reaches physical
+endpoints as a limit; the nominal positive force target remains a soft cost.
 
 Reuse native TurboMPC CUDA/cuDSS and its PyTorch adjoint. Keep dynamics and
 warm-start rollout on the GPU, batch environments, and compile fixed-shape

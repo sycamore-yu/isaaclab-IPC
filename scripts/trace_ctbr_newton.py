@@ -9,6 +9,7 @@ unchanged. The first frontend input and the last observation are frozen for repl
 import argparse
 import json
 import sys
+from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 
@@ -44,22 +45,27 @@ def main():
             current_state=asdict(current_state), goal=np.asarray(goal).copy(),
             reset_generation=reset_generations.get(id(frontend), 0),
         )
-        if kwargs.get("sensor_origin") is not None:
-            frozen["sensor_origin"] = np.asarray(kwargs["sensor_origin"]).copy()
-        if kwargs.get("initial_motion_seed") is not None:
-            frozen["initial_motion_seed"] = np.asarray(kwargs["initial_motion_seed"]).copy()
+        for name in ("sensor_origin", "initial_motion_seed", "initial_motion_tip_segment", "initial_thrust_axis"):
+            if kwargs.get(name) is not None:
+                frozen[name] = np.asarray(kwargs[name]).copy()
         inputs = args.output / "frontend-inputs"
         inputs.mkdir(exist_ok=True)
         torch.save(frozen, inputs / f"{plan_count:05d}.pt")
         if plan_count == 1:
             torch.save(frozen, args.output / "first-frontend-input.pt")
         try:
-            return original_plan(frontend, points_world, current_state, goal, **kwargs)
+            result = original_plan(frontend, points_world, current_state, goal, **kwargs)
         except BaseException:
             frozen["gcopter_problem"] = frontend.failed_problem()
             frozen["frontend_config"] = asdict(frontend.config)
             torch.save(frozen, args.output / "failed-frontend-call.pt")
             raise
+        if "initial_boundary" in result.metrics:
+            frozen["initial_boundary"] = deepcopy(result.metrics["initial_boundary"])
+            torch.save(frozen, inputs / f"{plan_count:05d}.pt")
+            if plan_count == 1:
+                torch.save(frozen, args.output / "first-frontend-input.pt")
+        return result
 
     def reset(frontend):
         key = id(frontend)

@@ -1135,6 +1135,8 @@ namespace trajectory_server
 #include "gcopter/minco.hpp"
 #include "gcopter/flatness.hpp"
 #include <chrono>
+#include <limits>
+#include <stdexcept>
 #include "gcopter/lbfgs.hpp"
 #include "gcopter/trajectory.hpp"
 
@@ -1199,16 +1201,39 @@ namespace trajectory_server
             double scale = 1.0, elapsedMs = 0.0;
         };
 
+        // V27 CTBR boundary mode. Disabled by default: standalone still fixes PVA.
+        struct InitialForce {
+            bool enabled = false;
+            bool guessWasProjected = false;
+            Eigen::Vector3d axis = Eigen::Vector3d::Zero();
+            double lower = 0.0, upper = 0.0, guessRaw = 0.0, guess = 0.0;
+            double etaGuess = 0.0, eta = 0.0, force = 0.0;
+        };
+
     private:
         typename Traits::Minco minco;
         flatness::FlatnessMap flatmap;
         ConstraintMetrics constraintMetrics;
         TimeInitialization timeInitialization;
         double positionSmoothEps = 0.01;
+        InitialForce initialForce;
 
         double rho;
         BoundaryT headState;
         BoundaryT tailState;
+
+        inline void applyInitialForce(double eta)
+        {
+            if constexpr (S == 3)
+            {
+                initialForce.eta = eta;
+                initialForce.force = initialForce.lower + (initialForce.upper - initialForce.lower) *
+                    (0.5 * (1.0 + std::tanh(eta)));
+                headState.col(2) = initialForce.axis * (initialForce.force / physicalPm(0));
+                headState(2, 2) -= physicalPm(1);
+                minco.setHeadAcceleration(headState.col(2));
+            }
+        }
 
         PolyhedraV vPolytopes;
         PolyhedraH hPolytopes;
@@ -1920,6 +1945,8 @@ namespace trajectory_server
             forwardT(tau, obj.times);
             forwardP(xi, obj.vPolyIdx, obj.vPolytopes, obj.points);
 
+            if (obj.initialForce.enabled)
+                obj.applyInitialForce(x(dimTau + dimXi));
             double cost;
             obj.minco.setParameters(obj.points, obj.times);
             obj.minco.getEnergy(cost);
@@ -1946,8 +1973,27 @@ namespace trajectory_server
                                         cost, obj.partialGradByTimes, obj.partialGradByCoeffs);
             }
 
-            obj.minco.propogateGrad(obj.partialGradByCoeffs, obj.partialGradByTimes,
-                                    obj.gradByPoints, obj.gradByTimes);
+            if constexpr (S == 3)
+            {
+                Eigen::Vector3d gradByHeadAcceleration;
+                obj.minco.propogateGrad(obj.partialGradByCoeffs, obj.partialGradByTimes,
+                    obj.gradByPoints, obj.gradByTimes,
+                    obj.initialForce.enabled ? &gradByHeadAcceleration : nullptr);
+                if (obj.initialForce.enabled)
+                {
+                    const double tanhEta = std::tanh(x(dimTau + dimXi));
+                    const double forceDerivative = 0.5 * (obj.initialForce.upper - obj.initialForce.lower) *
+                        (1.0 - tanhEta * tanhEta);
+                    g(dimTau + dimXi) = gradByHeadAcceleration.dot(obj.initialForce.axis) *
+                        forceDerivative / obj.physicalPm(0);
+                }
+            }
+            else
+            {
+                // S4 retains its original MINCO interface and fixed boundary.
+                obj.minco.propogateGrad(obj.partialGradByCoeffs, obj.partialGradByTimes,
+                                        obj.gradByPoints, obj.gradByTimes);
+            }
 
             cost += weightT * obj.times.sum();
             obj.gradByTimes.array() += weightT;
@@ -2345,6 +2391,7 @@ namespace trajectory_server
                          const Eigen::VectorXd &penaltyWeights,
                          const Eigen::VectorXd &physicalParams)
         {
+            initialForce = InitialForce{};
             rho = timeWeight;
             headState = initialState;
             tailState = terminalState;
@@ -2446,6 +2493,38 @@ namespace trajectory_server
 
     public:
         inline int getStatus() const { return last_status_; }
+        // Call after setup. Only 3D minimum-jerk references expose this control.
+        inline void enableInitialForce(const Eigen::Vector3d &axis, double lower,
+                                       double upper, double measuredGuess)
+        {
+            if constexpr (S != 3)
+            {
+                throw std::invalid_argument("Free initial force requires 3D MINCO S3");
+            }
+            else
+            {
+                if (!axis.allFinite() || std::abs(axis.norm() - 1.0) > 1e-10 ||
+                    !std::isfinite(lower) || !std::isfinite(upper) || lower < 0.0 ||
+                    upper <= lower || !std::isfinite(measuredGuess))
+                    throw std::invalid_argument("Invalid initial-force boundary contract");
+                initialForce.enabled = true;
+                initialForce.axis = axis;
+                initialForce.lower = lower;
+                initialForce.upper = upper;
+                initialForce.guessRaw = measuredGuess;
+                // Project only the initialization guess into the finite inverse
+                // tanh domain. The physical interval and measured PVA stay recorded.
+                const double epsilon = std::numeric_limits<double>::epsilon();
+                const double rawFraction = (measuredGuess - lower) / (upper - lower);
+                const double fraction = std::clamp(rawFraction, epsilon, 1.0 - epsilon);
+                initialForce.guessWasProjected = fraction != rawFraction;
+                initialForce.guess = lower + fraction * (upper - lower);
+                initialForce.etaGuess = std::atanh(2.0 * fraction - 1.0);
+                applyInitialForce(initialForce.etaGuess);
+            }
+        }
+
+        inline const InitialForce &getInitialForce() const { return initialForce; }
         inline const Eigen::VectorXi &getPiecePolytopeIndices() const { return hPolyIdx; }
         inline const Eigen::VectorXd &getTrialDurations() const { return times; }
         inline const ConstraintMetrics &getConstraintMetrics() const { return constraintMetrics; }
@@ -2494,10 +2573,11 @@ namespace trajectory_server
                                const double &relCostTol,
                                const int &maxIterations)
         {
-            Eigen::VectorXd x(temporalDim + spatialDim);
+            Eigen::VectorXd x(temporalDim + spatialDim + (initialForce.enabled ? 1 : 0));
             Eigen::Map<Eigen::VectorXd> tau(x.data(), temporalDim);
             Eigen::Map<Eigen::VectorXd> xi(x.data() + temporalDim, spatialDim);
 
+            if (initialForce.enabled) applyInitialForce(initialForce.etaGuess);
             setInitial(shortPath, allocSpeed, pieceIdx, points, times);
             const int initializationStatus = initializeTimeScale();
             if (initializationStatus < 0) {
@@ -2507,6 +2587,7 @@ namespace trajectory_server
             }
             backwardT(times, tau);
             backwardP(points, vPolyIdx, vPolytopes, xi);
+            if (initialForce.enabled) x(temporalDim + spatialDim) = initialForce.etaGuess;
 
             double minCostFunctional;
             lbfgs_params.mem_size = 32;
@@ -2534,6 +2615,7 @@ namespace trajectory_server
             {
                 forwardT(tau, times);
                 forwardP(xi, vPolyIdx, vPolytopes, points);
+                if (initialForce.enabled) applyInitialForce(x(temporalDim + spatialDim));
                 minco.setParameters(points, times);
                 minco.getTrajectory(traj);
             }

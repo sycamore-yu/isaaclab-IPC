@@ -33,9 +33,11 @@ class PathCoverConfig:
     nominal_velocity: float | None = None  # Defaults to min(3 m/s, physical bound).
     mass: float = 0.75
     gravity: float = 9.81
-    # Official reference limits scale with mass; controller factories intersect
-    # them with their physical force limits. Explicit historical limits persist.
+    # Standalone defaults retain mass-scaled official reference limits.
+    # CTBR factories supply physical force bounds and a separate positive soft
+    # target. A nominal shortfall is not a physical-bound violation.
     thrust_min: float | None = None
+    nominal_thrust_min: float | None = None
     thrust_max: float | None = None
     body_rate_max: float = 3.0
     # Inward offset for the optimizer's zero-yaw rate proxy only. The physical
@@ -90,9 +92,14 @@ class PathCoverConfig:
             object.__setattr__(self, "thrust_min", 2.0 / 0.716 * self.mass)
         if self.thrust_max is None:
             object.__setattr__(self, "thrust_max", 10.0 / 0.716 * self.mass)
-        if (not math.isfinite(self.thrust_min) or not math.isfinite(self.thrust_max)
-                or not 0 <= self.thrust_min < self.thrust_max):
-            raise ValueError("PathCover reference thrust limits require 0 <= thrust_min < thrust_max")
+        if self.nominal_thrust_min is None:
+            # Missing fields in historical snapshots retain their recorded
+            # thrust_min as the optimizer target.
+            object.__setattr__(self, "nominal_thrust_min", self.thrust_min)
+        if (not math.isfinite(self.thrust_min) or not math.isfinite(self.nominal_thrust_min)
+                or not math.isfinite(self.thrust_max)
+                or not 0 <= self.thrust_min <= self.nominal_thrust_min < self.thrust_max):
+            raise ValueError("PathCover thrust limits require 0 <= thrust_min <= nominal_thrust_min < thrust_max")
 
     def native_options(self):
         values = asdict(self)
@@ -279,14 +286,19 @@ class NativePathCoverFrontend:
     def failed_problem(self):
         """Copy failure diagnostics on request; successful plans do not copy this data."""
         if self._yaw_failure is not None:
-            result, state, error, seed, tip_segment = self._yaw_failure
+            result, state, error, seed, tip_segment, thrust_axis = self._yaw_failure
             constraint_metrics = np.asarray(result.constraint_metrics).copy()
+            initial_thrust = self.config.mass * np.linalg.norm(
+                state.acceleration + np.array([0.0, 0.0, self.config.gravity]),
+            )
             return {
                 "stage": "yaw", "error": error, "config": self.config.native_options(),
                 "initial_pva": np.column_stack((state.position, state.velocity, state.acceleration)),
                 "terminal_pva": np.column_stack((result.local_goal, np.zeros(3), np.zeros(3))),
                 "initial_yaw": float(state.yaw), "start_time": float(state.time),
                 "initial_motion_seed": seed.copy(), "initial_motion_tip_segment": tip_segment.copy(),
+                "initial_thrust_axis": None if thrust_axis is None else thrust_axis.copy(),
+                "initial_boundary": dict(result.initial_boundary),
                 "corridors": tuple(result.corridors), "optimizer_status": result.optimizer_status,
                 "trial_durations": np.asarray(result.durations).copy(),
                 "constraint_metrics": constraint_metrics,
@@ -296,6 +308,12 @@ class NativePathCoverFrontend:
                 "reference_body_rate_margin_rad_s": self.config.reference_body_rate_margin,
                 "optimizer_body_rate_target_rad_s": self.config.body_rate_max - self.config.reference_body_rate_margin,
                 "body_rate_physical_limit_rad_s": self.config.body_rate_max,
+                "thrust_physical_min_n": self.config.thrust_min,
+                "thrust_nominal_min_n": self.config.nominal_thrust_min,
+                "thrust_physical_max_n": self.config.thrust_max,
+                "thrust_nominal_shortfall_n": max(self.config.nominal_thrust_min - float(constraint_metrics[2]), 0.0),
+                "thrust_initial_n": float(initial_thrust),
+                "thrust_initial_nominal_shortfall_n": max(self.config.nominal_thrust_min - float(initial_thrust), 0.0),
                 "time_initialization": result.time_initialization,
                 "candidate": {
                     "coefficients": np.stack(result.coefficients),
@@ -306,23 +324,33 @@ class NativePathCoverFrontend:
             }
         problem = self._native.failed_problem()
         if self._native_failure is not None:
-            seed, tip_segment, error = self._native_failure
+            seed, tip_segment, thrust_axis, yaw, start_time, error = self._native_failure
             if problem is None:
                 problem = {"stage": "native_plan", "error": error}
+            problem.setdefault("stage", "native_plan")
+            problem.setdefault("error", error)
             problem["initial_motion_seed"] = seed.copy()
             problem["initial_motion_tip_segment"] = tip_segment.copy()
+            problem["initial_thrust_axis"] = None if thrust_axis is None else thrust_axis.copy()
+            problem["initial_yaw"] = float(yaw)
+            problem["start_time"] = float(start_time)
         if problem is not None:
             problem["config"] = self.config.native_options()
         return problem
 
     def plan(self, points_world, current_state: PathCoverState, goal, *, sensor_origin=None,
-             initial_motion_seed=None, initial_motion_tip_segment=None):
+             initial_motion_seed=None, initial_motion_tip_segment=None, initial_thrust_axis=None):
         """Plan with an optional world-space convex seed for the first SFC.
 
         CTBR supplies p0/p1 and a preferred p2 in ``initial_motion_seed``. An
         optional two-endpoint ``initial_motion_tip_segment`` lets geometry select
         another p2 while keeping p0/p1 fixed. No control equality is imposed.
         Omitting the seed retains point RISP; the frontend has no control period.
+
+        With a measured unit ``initial_thrust_axis``, optimize the initial
+        collective force within the physical bounds. Position and velocity stay
+        fixed; measured acceleration becomes an initialization measurement, not
+        a hard boundary. Without an axis, preserve the original fixed-PVA model.
         """
         begin = perf_counter()
         self._yaw_failure = None
@@ -330,6 +358,8 @@ class NativePathCoverFrontend:
         seed = np.empty((0, 3)) if initial_motion_seed is None else np.asarray(initial_motion_seed, dtype=np.float64)
         tip_segment = (np.empty((0, 3)) if initial_motion_tip_segment is None
                        else np.asarray(initial_motion_tip_segment, dtype=np.float64))
+        thrust_axis = (None if initial_thrust_axis is None
+                       else np.asarray(initial_thrust_axis, dtype=np.float64).reshape(3))
         update = None
         if points_world is not None:
             origin = current_state.position if sensor_origin is None else sensor_origin
@@ -339,12 +369,13 @@ class NativePathCoverFrontend:
                 np.asarray(current_state.position, dtype=np.float64).reshape(3),
                 np.asarray(current_state.velocity, dtype=np.float64).reshape(3),
                 np.asarray(current_state.acceleration, dtype=np.float64).reshape(3),
-                np.asarray(goal, dtype=np.float64).reshape(3), seed, tip_segment,
+                np.asarray(goal, dtype=np.float64).reshape(3), seed, tip_segment, thrust_axis,
             )
         except PathCoverPlanningError as error:
             # Keep small input views, without copying arrays on successful calls.
             # Failure serialization is requested later by the existing recorder.
-            self._native_failure = (seed, tip_segment, str(error))
+            self._native_failure = (seed, tip_segment, thrust_axis, current_state.yaw,
+                                    current_state.time, str(error))
             raise
         yaw_begin = perf_counter()
         try:
@@ -356,7 +387,7 @@ class NativePathCoverFrontend:
         except PathCoverPlanningError as error:
             # Retain the existing native result only. Extract arrays if a caller
             # explicitly requests failed_problem(), after the plan has failed.
-            self._yaw_failure = (result, current_state, str(error), seed, tip_segment)
+            self._yaw_failure = (result, current_state, str(error), seed, tip_segment, thrust_axis)
             raise
         yaw_ms = (perf_counter() - yaw_begin) * 1000
         boundaries = np.concatenate(([0.0], np.cumsum(trajectory.durations)))
@@ -366,7 +397,11 @@ class NativePathCoverFrontend:
         )
         last_map = self._native.last_update
         nominal_velocity = self.config.max_velocity if self.config.nominal_velocity is None else self.config.nominal_velocity
+        initial_thrust = self.config.mass * np.linalg.norm(
+            current_state.acceleration + np.array([0.0, 0.0, self.config.gravity]),
+        )
         initialization = result.time_initialization
+        initial_boundary = dict(result.initial_boundary)
         metrics = {
             "mapping_ms": update.mapping_ms if update is not None else 0.0,
             "inflation_ms": update.inflation_ms if update is not None else 0.0,
@@ -392,8 +427,12 @@ class NativePathCoverFrontend:
             "time_initialization_evaluations": initialization["evaluations"],
             "time_initialization_scale": initialization["scale"],
             "optimizer_status": result.optimizer_status, "objective": result.cost,
+            "initial_boundary": initial_boundary,
             "optimizer_quadrature_feasible": result.optimizer_quadrature_feasible,
-            "constraint_metrics_semantics": "optimizer quadrature diagnostics; not continuous-time feasibility",
+            "constraint_metrics_semantics": (
+                "optimizer quadrature diagnostics against physical bounds; nominal targets are separate; "
+                "not continuous-time feasibility"
+            ),
             "reference_body_rate_margin_rad_s": self.config.reference_body_rate_margin,
             "optimizer_body_rate_target_rad_s": self.config.body_rate_max - self.config.reference_body_rate_margin,
             "body_rate_physical_limit_rad_s": self.config.body_rate_max,
@@ -420,6 +459,13 @@ class NativePathCoverFrontend:
             "speed_physical_limit_m_s": self.config.max_velocity,
             "speed_acceptance_limit_m_s": result.speed_acceptance_limit,
             "speed_nominal_excess_m_s": max(float(result.constraint_metrics[1]) - nominal_velocity, 0.0),
+            "thrust_physical_min_n": self.config.thrust_min,
+            "thrust_nominal_min_n": self.config.nominal_thrust_min,
+            "thrust_physical_max_n": self.config.thrust_max,
+            "thrust_nominal_shortfall_n": max(self.config.nominal_thrust_min - float(result.constraint_metrics[2]), 0.0),
+            "thrust_initial_n": float(initial_thrust),
+            "thrust_initial_nominal_shortfall_n": max(self.config.nominal_thrust_min - float(initial_thrust), 0.0),
+            "reference_thrust_initial_n": initial_boundary["force_n"],
         }
         for name, value in zip(("sfc_max_m", "speed_max_m_s", "thrust_min_n", "thrust_max_n",
                                 "tilt_max_rad", "zero_yaw_body_rate_max_rad_s"), result.constraint_metrics, strict=True):
@@ -479,6 +525,7 @@ def validate_pathcover_plan(plan: PathCoverPlan, config: PathCoverConfig, *, sam
         "max_acceleration_m_s2": float(np.linalg.norm(sample.acceleration, axis=-1).max()),
         "min_thrust_n": float((config.mass * norm).min()),
         "max_thrust_n": float((config.mass * norm).max()),
+        "thrust_nominal_shortfall_n": max(config.nominal_thrust_min - float((config.mass * norm).min()), 0.0),
         "max_tilt_rad": float(np.arccos(np.clip(z[:, 2], -1, 1)).max()),
         "max_body_rate_rad_s": float(np.linalg.norm(body_rates, axis=-1).max()),
         "max_abs_body_rate_components_rad_s": np.abs(body_rates).max(axis=0).tolist(),

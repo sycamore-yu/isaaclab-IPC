@@ -448,6 +448,12 @@ namespace minco
             return;
         }
 
+        // Change only the fixed-boundary RHS. The piece system is reused.
+        inline void setHeadAcceleration(const Eigen::Matrix<double, Dim, 1> &acceleration)
+        {
+            headPVA.col(2) = acceleration;
+        }
+
         inline void setParameters(const PointMat &inPs,
                                   const Eigen::VectorXd &ts)
         {
@@ -602,13 +608,17 @@ namespace minco
         inline void propogateGrad(const CoeffMat &partialGradByCoeffs,
                                   const Eigen::VectorXd &partialGradByTimes,
                                   PointMat &gradByPoints,
-                                  Eigen::VectorXd &gradByTimes)
+                                  Eigen::VectorXd &gradByTimes,
+                                  Eigen::Matrix<double, Dim, 1> *gradByHeadAcceleration = nullptr)
 
         {
             gradByPoints.resize(Dim, N - 1);
             gradByTimes.resize(N);
             CoeffMat adjGrad = partialGradByCoeffs;
             A.solveAdj(adjGrad);
+            // B.row(2) is a0; A(2,2)=2 already contains the basis derivative.
+            if (gradByHeadAcceleration != nullptr)
+                *gradByHeadAcceleration = adjGrad.row(2).transpose();
 
             for (int i = 0; i < N - 1; i++)
             {

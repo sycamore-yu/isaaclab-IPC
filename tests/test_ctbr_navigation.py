@@ -53,7 +53,8 @@ def test_observed_position_uses_active_corridor_and_junction():
     assert position_sfc_violation(plan, [1.2, 0., 0.], 11.1) == 0.
 
 
-def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
+@pytest.mark.parametrize("separate_nominal_target", [False, True])
+def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch, separate_nominal_target):
     from isaaclab_ipc import pathcover_native
     from isaaclab_ipc.turbompc.ctbr import CTBRConfig
 
@@ -70,11 +71,13 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
         def reset(self):
             self.resets += 1
 
-        def plan(self, points, state, goal, *, initial_motion_seed, initial_motion_tip_segment):
+        def plan(self, points, state, goal, *, initial_motion_seed, initial_motion_tip_segment, initial_thrust_axis):
             self.calls += 1
             assert points == self.index
             assert state.position[0] == self.index
             assert goal[0] == 20 + self.index
+            np.testing.assert_array_equal(initial_thrust_axis, [0., 0., 1.])
+            assert state.yaw == 0.
             np.testing.assert_allclose(initial_motion_seed,
                                        state.position + np.arange(3)[:, None] * .1 * state.velocity)
             expected_tips = np.broadcast_to(state.position + .2 * state.velocity, (2, 3)).copy()
@@ -94,11 +97,14 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
                     "optimizer_quadrature_feasible": self.index != 2,
                     "optimizer_sfc_max_m": .003 if self.index == 2 else -.1,
                     "optimizer_speed_max_m_s": 7. if self.index == 2 else 4.,
-                    "optimizer_thrust_min_n": -.1 if self.index == 2 else 2.,
+                    "optimizer_thrust_min_n": -.1 if self.index == 2 else self.config.thrust_min + .5,
                     "optimizer_thrust_max_n": 23. if self.index == 2 else 8.,
                     "optimizer_tilt_max_rad": 1.3 if self.index == 2 else .2,
                     "optimizer_zero_yaw_body_rate_max_rad_s": 3.01 if self.index == 2 else 1.,
                     "speed_nominal_excess_m_s": 1. if self.index == 2 else 0.,
+                    "thrust_nominal_shortfall_n": max(
+                        self.config.nominal_thrust_min - (-.1 if self.index == 2 else self.config.thrust_min + .5), 0.,
+                    ),
                 },
                 trajectory=SimpleNamespace(sample=sample),
                 corridors=(np.array([[1., 0., 0., -100.], [-1., 0., 0., -100.]]),),
@@ -106,7 +112,9 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
             )
 
     monkeypatch.setattr(pathcover_native, "NativePathCoverFrontend", Frontend)
-    navigation = PathCoverNavigation(3, CTBRConfig(cost_nodes=2), None, device="cpu", max_planes=4)
+    config = (pathcover_native.PathCoverConfig(thrust_min=0., nominal_thrust_min=2.5)
+              if separate_nominal_target else None)
+    navigation = PathCoverNavigation(3, CTBRConfig(cost_nodes=2), config, device="cpu", max_planes=4)
     motion_batches = []
     motion_kernel = navigation._motion_seed
 
@@ -130,6 +138,7 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
         assert navigation.last_plans[1] is None
         assert navigation.reference_quality["returned_plans"] == 2
         assert navigation.reference_quality["optimizer_quadrature_infeasible_plans"] == 1
+        assert navigation.reference_quality["nominal_thrust_shortfall_plans"] == (2 if separate_nominal_target else 1)
 
         failures[1] = pathcover_native.PathCoverPlanningError("No free path")
         result, errors = navigation.observe(*args, env_ids=[2, 1, 0], allow_failures=True)
@@ -145,12 +154,14 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
         quality = navigation.reference_quality
         assert quality["returned_plans"] == 4
         assert quality["optimizer_quadrature_infeasible_plans"] == 2
+        assert quality["nominal_thrust_shortfall_plans"] == (4 if separate_nominal_target else 2)
         assert quality["optimizer_extrema"]["sfc_max_m"] == .003
         assert quality["optimizer_extrema"]["thrust_min_n"] == -.1
         limits = instances[0].config.native_options()
         assert quality["maximum_positive_residual"] == pytest.approx({
             "sfc_m": .003, "speed_physical_m_s": 1., "speed_nominal_m_s": 1.,
             "thrust_lower_n": limits["thrust_min"] + .1, "thrust_upper_n": 23. - limits["thrust_max"],
+            "thrust_nominal_lower_n": limits["nominal_thrust_min"] + .1,
             "tilt_rad": 1.3 - limits["tilt_max"], "zero_yaw_body_rate_rad_s": .01,
         })
         assert quality["maximum_mpc_reference_sfc_violation_m"] == 0.
@@ -163,8 +174,41 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
         assert motion_batches == [3, 3, 3, 3]  # Subsets never change the compiled batch shape.
         assert quality["returned_plans"] == 4
         assert quality["optimizer_quadrature_infeasible_plans"] == 2
+        assert quality["nominal_thrust_shortfall_plans"] == (4 if separate_nominal_target else 2)
     finally:
         navigation.close()
+
+
+def test_ctbr_boundary_frame_preserves_measured_attitude_with_free_collective():
+    from scipy.spatial.transform import Rotation
+
+    from isaaclab_ipc.ctbr_navigation import ctbr_boundary_frame
+    from isaaclab_ipc.turbompc.quadrotor import reference_from_pva
+
+    position, velocity = np.array([1., -2., 3.]), np.array([.4, -.1, .3])
+    # Tilted frames near both heading branches also differ from Euler yaw.
+    frames = Rotation.from_euler("xyz", [[.5, -.4, 2.9], [-.6, .55, -3.0], [0., 0., .2]])
+    for measured in frames:
+        quaternion = measured.as_quat(scalar_first=True)
+        axis, heading = ctbr_boundary_frame(quaternion)
+        np.testing.assert_allclose(axis, measured.as_matrix()[:, 2], rtol=0., atol=5e-16)
+        assert np.linalg.norm(axis) == pytest.approx(1., abs=5e-16)
+        negative_axis, negative_heading = ctbr_boundary_frame(-quaternion)
+        np.testing.assert_array_equal(negative_axis, axis)
+        assert negative_heading == heading
+        accelerations = []
+        for force in (2.1, 12.0):
+            acceleration = force / .75 * axis - np.array([0., 0., 9.81])
+            accelerations.append(acceleration)
+            pva = torch.tensor(np.r_[position, velocity, acceleration], dtype=torch.float64)[None, None]
+            reference = reference_from_pva(pva, torch.tensor([[heading]], dtype=torch.float64), 9.81)
+            np.testing.assert_array_equal(reference[0, 0, :3].numpy(), position)
+            np.testing.assert_array_equal(reference[0, 0, 7:].numpy(), velocity)
+            reconstructed = Rotation.from_quat(reference[0, 0, 3:7].numpy(), scalar_first=True)
+            assert (measured.inv() * reconstructed).magnitude() < 1e-14
+        assert np.linalg.norm(accelerations[1] - accelerations[0]) > 1.
+    axis, heading = ctbr_boundary_frame(frames[0].as_quat(scalar_first=True))
+    assert abs(heading - frames[0].as_euler("xyz")[2]) > .05
 
 
 def test_initial_motion_seed_matches_exact_ctbr_euler_positions():

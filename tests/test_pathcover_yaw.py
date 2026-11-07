@@ -91,6 +91,13 @@ def test_yaw_failure_retains_native_candidate_and_serializes_only_on_request():
         optimizer_status = 1
         cost = 123.0
         time_initialization = {"status": 0, "evaluations": 4, "scale": 1.0, "elapsed_ms": 0.1}
+        initial_boundary = {
+            "mode": "fixed_pva", "measured_acceleration": [0.0, 0.0, -19.62],
+            "reference_acceleration": [0.0, 0.0, -19.62], "thrust_axis": None,
+            "force_lower_n": 2.0, "force_upper_n": 20.0,
+            "force_guess_raw_n": 7.3575, "force_guess_n": 7.3575,
+            "force_n": 7.3575, "force_guess_was_projected": False,
+        }
 
         @property
         def coefficients(self):
