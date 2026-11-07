@@ -87,14 +87,27 @@ code and evidence remain available; this branch develops the new AC-MPC route.
 - Rollout observations freeze state, reference, SFC and warm-start controls.
   PPO replay does not mutate the frontend or use a hidden last-solve cache.
 - The CTBR adapter supplies an optional three-point `initial_motion_seed` to
-  PathCover. It contains p0, p1 and p2 from the exact Euler model, using a bounded
-  warm-start thrust. The first RISP polytope contains their convex hull; later
-  polytopes use the original point seeds. This prevents the initial corridor
-  from cutting off that inertial prefix. Complete MPC feasibility is still
-  determined by its dynamics and all node constraints.
-- Compute this seed in one compiled GPU batch and include it in the measured
-  context's existing host transfer. PathCover itself does not own the CTBR model
-  or prediction time step, and its standalone point-seed API remains available.
+  PathCover, together with an optional two-endpoint `initial_motion_tip_segment`.
+  The exact Euler model fixes p0 and p1. Its p2 still depends on the optimizable
+  first collective force. The three-point seed uses bounded warm thrust only as
+  a preference; the segment contains p2 at the physical CTBR force limits.
+  A warm seed collision does not prove all admissible first forces infeasible.
+- The native frontend queries fine occupied boxes in the swept seed hull's local
+  bounding box. For each relevant box, two fixed-dimensional linear programs
+  find the forbidden segment-parameter interval. Merge these intervals and select
+  a point inside the nearest feasible component; preserve a feasible warm seed
+  bit for bit. Contact is excluded, so an exact nearest point need not exist.
+  Interior floating-point projection uses the existing separation predicate,
+  without padding or clearing occupancy. A colliding fixed p0–p1 edge or an empty
+  feasible parameter set remains a planning failure.
+- The first RISP polytope contains the selected three-point convex hull; later
+  polytopes use the original point seeds. The selected point is a geometric
+  initialization witness, not an executed control or an equality fixing MPC F0.
+  Complete MPC feasibility is still determined by all dynamics and node constraints.
+- Compute the five points in one fixed full-batch GPU kernel and include them in
+  the measured context's existing host transfer. Partial resets select rows after
+  that full-batch computation. PathCover does not own the CTBR model or prediction
+  period, and its standalone point-seed API remains available.
 
 ## Numerical and execution decisions
 

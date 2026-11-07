@@ -70,13 +70,16 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
         def reset(self):
             self.resets += 1
 
-        def plan(self, points, state, goal, *, initial_motion_seed):
+        def plan(self, points, state, goal, *, initial_motion_seed, initial_motion_tip_segment):
             self.calls += 1
             assert points == self.index
             assert state.position[0] == self.index
             assert goal[0] == 20 + self.index
             np.testing.assert_allclose(initial_motion_seed,
                                        state.position + np.arange(3)[:, None] * .1 * state.velocity)
+            expected_tips = np.broadcast_to(state.position + .2 * state.velocity, (2, 3)).copy()
+            expected_tips[:, 2] += .01 * np.array([-9.81, 2 * 9.81])
+            np.testing.assert_allclose(initial_motion_tip_segment, expected_tips)
             if self.index in failures:
                 raise failures[self.index]
 
@@ -104,6 +107,14 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
 
     monkeypatch.setattr(pathcover_native, "NativePathCoverFrontend", Frontend)
     navigation = PathCoverNavigation(3, CTBRConfig(cost_nodes=2), None, device="cpu", max_planes=4)
+    motion_batches = []
+    motion_kernel = navigation._motion_seed
+
+    def record_motion_batch(state, acceleration, force):
+        motion_batches.append(len(state))
+        return motion_kernel(state, acceleration, force)
+
+    navigation._motion_seed = record_motion_batch
     state = torch.zeros((3, 10), dtype=torch.float64)
     state[:, 0], state[:, 2], state[:, 3] = torch.arange(3), 1., 1.
     state[:, 7] = torch.tensor([.3, .6, .9])
@@ -149,6 +160,7 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
         failures[1] = RuntimeError("Unexpected extension failure")
         with pytest.raises(RuntimeError, match="Unexpected extension failure"):
             navigation.observe(*args, env_ids=[1], allow_failures=True)
+        assert motion_batches == [3, 3, 3, 3]  # Subsets never change the compiled batch shape.
         assert quality["returned_plans"] == 4
         assert quality["optimizer_quadrature_infeasible_plans"] == 2
     finally:
@@ -172,4 +184,21 @@ def test_initial_motion_seed_matches_exact_ctbr_euler_positions():
     expected = navigation._dynamics.rollout(state, controls)[..., :3]
     for force in (controls[:, 0, 0], None):
         actual = navigation._initial_motion_seed(state, acceleration, force)
-        torch.testing.assert_close(actual, expected, rtol=0., atol=1e-12)
+        assert actual.shape == (16, 5, 3)
+        torch.testing.assert_close(actual[:, :3], expected, rtol=0., atol=1e-12)
+        for index, specific_force in enumerate(config.specific_thrust_limits, 3):
+            bounded_controls = controls.clone()
+            bounded_controls[:, 0, 0] = config.mass * specific_force
+            endpoint = navigation._dynamics.rollout(state, bounded_controls)[:, 2, :3]
+            torch.testing.assert_close(actual[:, index], endpoint, rtol=0., atol=1e-12)
+
+    # An arbitrary warm preference is clamped to the actual CTBR force bounds.
+    for preference, index in ((-10., 3), (100., 4)):
+        actual = navigation._initial_motion_seed(state, acceleration, torch.full((16,), preference, dtype=state.dtype))
+        torch.testing.assert_close(actual[:, 2], actual[:, index], rtol=0, atol=0)
+    alpha = torch.linspace(0., 1., 16, dtype=torch.float64)
+    force = config.mass * (config.specific_thrust_limits[0]
+                          + alpha * (config.specific_thrust_limits[1] - config.specific_thrust_limits[0]))
+    actual = navigation._initial_motion_seed(state, acceleration, force)
+    torch.testing.assert_close(actual[:, 2], actual[:, 3] + alpha[:, None] * (actual[:, 4] - actual[:, 3]),
+                               rtol=0., atol=1e-12)

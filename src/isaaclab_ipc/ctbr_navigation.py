@@ -119,10 +119,11 @@ class PathCoverNavigation:
                 torch.cuda.synchronize(self.device)
 
     def _initial_motion_seed(self, state, acceleration, first_force):
-        """Protect the first two exact Euler positions in the initial corridor.
+        """Return p0, p1, preferred p2 and the two physically reachable p2 endpoints.
 
-        Only the first thrust affects p2; body rates first affect position at p3.
-        This geometric seed does not certify feasibility of the complete MPC.
+        p0/p1 are fixed; only the optimizable first thrust affects p2. The
+        frontend may select another tip along the endpoint segment. Body rates
+        first affect p3, and this geometry does not certify the complete MPC.
         """
         controls = state.new_zeros((len(state), 4))
         if first_force is None:
@@ -131,10 +132,18 @@ class PathCoverNavigation:
             body_z = self._dynamics.acceleration(torch.cat((state, controls), -1)) + gravity
             first_force = self.config.mass * ((acceleration + gravity) * body_z).sum(-1) / body_z.square().sum(-1)
         lower, upper = self.config.specific_thrust_limits
-        controls[:, 0] = first_force.clamp(self.config.mass * lower, self.config.mass * upper)
-        next_velocity = state[:, 7:10] + self.config.dt * self._dynamics.acceleration(torch.cat((state, controls), -1))
+        forces = torch.stack((first_force.clamp(self.config.mass * lower, self.config.mass * upper),
+                              torch.full_like(first_force, self.config.mass * lower),
+                              torch.full_like(first_force, self.config.mass * upper)), -1)
+        controls = state.new_zeros((len(state), 3, 4))
+        controls[..., 0] = forces
+        states = state[:, None, :].expand(-1, 3, -1)
+        next_velocity = state[:, None, 7:10] + self.config.dt * self._dynamics.acceleration(
+            torch.cat((states, controls), -1),
+        )
         next_position = state[:, :3] + self.config.dt * state[:, 7:10]
-        return torch.stack((state[:, :3], next_position, next_position + self.config.dt * next_velocity), 1)
+        tips = next_position[:, None, :] + self.config.dt * next_velocity
+        return torch.cat((state[:, None, :3], next_position[:, None, :], tips), 1)
 
     def _record_reference_quality(self, metrics):
         """Accumulate CPU diagnostics once per returned plan, outside PPO replay."""
@@ -221,7 +230,9 @@ class PathCoverNavigation:
             points = clouds.get(index) if isinstance(clouds, dict) else clouds[index]
             started = perf_counter()
             try:
-                plan = frontend.plan(points, state, values[13:16], initial_motion_seed=values[16:].reshape(3, 3))
+                motion = values[16:].reshape(5, 3)
+                plan = frontend.plan(points, state, values[13:16],
+                                     initial_motion_seed=motion[:3], initial_motion_tip_segment=motion[3:])
             except PathCoverPlanningError as error:
                 return None, error, 1000 * (perf_counter() - started), None
             elapsed = 1000 * (perf_counter() - started)

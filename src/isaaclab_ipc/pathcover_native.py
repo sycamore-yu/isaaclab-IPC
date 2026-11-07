@@ -250,9 +250,11 @@ class NativePathCoverFrontend:
         self.config = config or PathCoverConfig()
         self._native = _pathcover_native.NativeFrontend(self.config.native_options())
         self._yaw_failure = None
+        self._native_failure = None
 
     def reset(self):
         self._yaw_failure = None
+        self._native_failure = None
         self._native.reset()
 
     def update_cloud(self, points_world, sensor_origin):
@@ -277,13 +279,14 @@ class NativePathCoverFrontend:
     def failed_problem(self):
         """Copy failure diagnostics on request; successful plans do not copy this data."""
         if self._yaw_failure is not None:
-            result, state, error = self._yaw_failure
+            result, state, error, seed, tip_segment = self._yaw_failure
             constraint_metrics = np.asarray(result.constraint_metrics).copy()
             return {
                 "stage": "yaw", "error": error, "config": self.config.native_options(),
                 "initial_pva": np.column_stack((state.position, state.velocity, state.acceleration)),
                 "terminal_pva": np.column_stack((result.local_goal, np.zeros(3), np.zeros(3))),
                 "initial_yaw": float(state.yaw), "start_time": float(state.time),
+                "initial_motion_seed": seed.copy(), "initial_motion_tip_segment": tip_segment.copy(),
                 "corridors": tuple(result.corridors), "optimizer_status": result.optimizer_status,
                 "trial_durations": np.asarray(result.durations).copy(),
                 "constraint_metrics": constraint_metrics,
@@ -302,29 +305,47 @@ class NativePathCoverFrontend:
                 },
             }
         problem = self._native.failed_problem()
+        if self._native_failure is not None:
+            seed, tip_segment, error = self._native_failure
+            if problem is None:
+                problem = {"stage": "native_plan", "error": error}
+            problem["initial_motion_seed"] = seed.copy()
+            problem["initial_motion_tip_segment"] = tip_segment.copy()
         if problem is not None:
             problem["config"] = self.config.native_options()
         return problem
 
-    def plan(self, points_world, current_state: PathCoverState, goal, *, sensor_origin=None, initial_motion_seed=None):
-        """Plan with an optional three-point world-space convex seed for the first SFC.
+    def plan(self, points_world, current_state: PathCoverState, goal, *, sensor_origin=None,
+             initial_motion_seed=None, initial_motion_tip_segment=None):
+        """Plan with an optional world-space convex seed for the first SFC.
 
-        CTBR supplies its exact first Euler positions in one batch. Omitting the
-        seed retains point RISP; the front end does not infer a control period.
+        CTBR supplies p0/p1 and a preferred p2 in ``initial_motion_seed``. An
+        optional two-endpoint ``initial_motion_tip_segment`` lets geometry select
+        another p2 while keeping p0/p1 fixed. No control equality is imposed.
+        Omitting the seed retains point RISP; the frontend has no control period.
         """
         begin = perf_counter()
         self._yaw_failure = None
+        self._native_failure = None
+        seed = np.empty((0, 3)) if initial_motion_seed is None else np.asarray(initial_motion_seed, dtype=np.float64)
+        tip_segment = (np.empty((0, 3)) if initial_motion_tip_segment is None
+                       else np.asarray(initial_motion_tip_segment, dtype=np.float64))
         update = None
         if points_world is not None:
             origin = current_state.position if sensor_origin is None else sensor_origin
             update = self.update_cloud(points_world, origin)
-        result = self._native.plan(
-            np.asarray(current_state.position, dtype=np.float64).reshape(3),
-            np.asarray(current_state.velocity, dtype=np.float64).reshape(3),
-            np.asarray(current_state.acceleration, dtype=np.float64).reshape(3),
-            np.asarray(goal, dtype=np.float64).reshape(3),
-            np.empty((0, 3)) if initial_motion_seed is None else np.asarray(initial_motion_seed, dtype=np.float64),
-        )
+        try:
+            result = self._native.plan(
+                np.asarray(current_state.position, dtype=np.float64).reshape(3),
+                np.asarray(current_state.velocity, dtype=np.float64).reshape(3),
+                np.asarray(current_state.acceleration, dtype=np.float64).reshape(3),
+                np.asarray(goal, dtype=np.float64).reshape(3), seed, tip_segment,
+            )
+        except PathCoverPlanningError as error:
+            # Keep small input views, without copying arrays on successful calls.
+            # Failure serialization is requested later by the existing recorder.
+            self._native_failure = (seed, tip_segment, str(error))
+            raise
         yaw_begin = perf_counter()
         try:
             trajectory = PathCoverTrajectory(
@@ -335,7 +356,7 @@ class NativePathCoverFrontend:
         except PathCoverPlanningError as error:
             # Retain the existing native result only. Extract arrays if a caller
             # explicitly requests failed_problem(), after the plan has failed.
-            self._yaw_failure = (result, current_state, str(error))
+            self._yaw_failure = (result, current_state, str(error), seed, tip_segment)
             raise
         yaw_ms = (perf_counter() - yaw_begin) * 1000
         boundaries = np.concatenate(([0.0], np.cumsum(trajectory.durations)))
@@ -357,6 +378,8 @@ class NativePathCoverFrontend:
             "dmp_xy_cache_hit": result.dmp_xy_cache_hit,
             "dmp_xy_preprocessing_ms": result.dmp_xy_preprocessing_ms,  # Already in dmp_ms.
             "search_backend": "global_dmp", "jps_ran": False,
+            "selected_initial_motion_seed": np.asarray(result.selected_initial_motion_seed).tolist(),
+            "initial_motion_seed_adjusted": result.initial_motion_seed_adjusted,
             "endpoint_connection_ms": result.endpoint_connection_ms,
             "endpoint_connection_visited_cells": result.endpoint_connection_visited_cells,
             "start_endpoint_anchors": result.start_endpoint_anchors,

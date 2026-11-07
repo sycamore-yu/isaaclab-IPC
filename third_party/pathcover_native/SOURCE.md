@@ -577,6 +577,30 @@ license; embedded geometry utilities retain their original notices.
     CTBR physical force range and all MPC hard constraints are unchanged. These
     are reference-objective changes supported by the frozen five-problem panel,
     not a new acceptance gate or a proof of continuous feasibility.
+46. An optional two-point `initial_motion_tip_segment` makes only the third
+    point of the existing three-point seed adjustable. CTBR supplies the two
+    physical first-thrust endpoints with p0, p1 and the preferred warm p2 in one
+    batched GPU calculation/transfer. Native geometry knows only the endpoint
+    segment, not mass, control period or force units. A collision-free preferred
+    seed is returned bitwise unchanged. Otherwise the first two points remain
+    fixed, and the segment is clipped to the unchanged physical workspace.
+    The authoritative fine bit-grid is queried once over the swept seed's AABB.
+    Each relevant box contributes one closed forbidden parameter interval,
+    computed by two fixed three-variable LP projections using the existing
+    Seidel implementation. Their union leaves the possible free components;
+    there is no force sampling or repeated global map scan. The nearest free
+    component is projected inward until the original 1e-10 m separating-axis
+    gap is met, to sqrt(machine epsilon) in the dimensionless segment parameter.
+    Obstacle contact endpoints remain forbidden, so an exact closest point in
+    the open feasible set is not claimed. Fixed-edge collisions, an empty free
+    set and a gap without numerical separation remain explicit planning errors.
+    The selected triangle initializes only the first RISP corridor; it does not
+    impose a force equality on MPC or certify the complete prediction horizon.
+    Calls without a tip segment retain their previous fixed-seed semantics.
+    `selected_initial_motion_seed` and `initial_motion_seed_adjusted` expose the
+    result; work is included in the existing corridor timer. RISP's random state
+    is reset after interval construction, preserving the prior unchanged-seed
+    planning path. The map, inflation, CTBR dynamics and hard bounds are unchanged.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online

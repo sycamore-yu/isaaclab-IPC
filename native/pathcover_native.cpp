@@ -22,6 +22,7 @@
 #include "pathcover_boxes.h"
 #include "pathcover_grid.h"
 #include "pathcover_endpoint.h"
+#include "pathcover_motion_seed.h"
 #include "pathcover_yaw.h"
 #ifdef OCCUPANCY_INFLATION_WITH_CUDA
 #include "pathcover_distance_map.h"
@@ -120,6 +121,8 @@ struct MappingStats {
 
 struct PlanResult {
     Points path;
+    Points selected_initial_motion_seed;
+    bool initial_motion_seed_adjusted = false;
     Vec3 local_goal;
     std::vector<HPoly> corridors;
     std::vector<Coefficients> coefficients;
@@ -445,7 +448,8 @@ public:
     }
 
     PlanResult plan(const Vec3 &position, const Vec3 &velocity,
-                    const Vec3 &acceleration, const Vec3 &goal, const Points &initial_motion_seed) {
+                    const Vec3 &acceleration, const Vec3 &goal, const Points &initial_motion_seed,
+                    const Points &initial_motion_tip_segment) {
         failed_problem_.reset();
         if (!position.allFinite() || !velocity.allFinite() || !acceleration.allFinite() || !goal.allFinite()) {
             throw std::invalid_argument("PathCover state and goal must be finite");
@@ -455,10 +459,16 @@ public:
             || (initial_motion_seed.rows() && (initial_motion_seed.row(0).transpose() - position).norm() > 1e-9)) {
             throw std::invalid_argument("PathCover initial motion seed must have three finite points starting at the current position");
         }
+        if ((initial_motion_tip_segment.rows() != 0 && initial_motion_tip_segment.rows() != 2)
+            || !initial_motion_tip_segment.allFinite()
+            || (initial_motion_tip_segment.rows() && initial_motion_seed.rows() != 3)) {
+            throw std::invalid_argument("PathCover motion tip segment requires two finite points and a three-point seed");
+        }
         std::vector<Vec3> seed_region;
         for (Eigen::Index i = 0; i < initial_motion_seed.rows(); ++i) {
             const Vec3 point = initial_motion_seed.row(i);
-            if ((point.array() < center_lower_.array()).any() || (point.array() > center_upper_.array()).any()) {
+            if ((i < 2 || initial_motion_tip_segment.rows() == 0)
+                && ((point.array() < center_lower_.array()).any() || (point.array() > center_upper_.array()).any())) {
                 throw PathCoverPlanningError("PathCover initial motion seed violates workspace body clearance");
             }
             seed_region.push_back(point);
@@ -551,6 +561,23 @@ public:
         for (std::size_t i = 0; i < path.size(); ++i) result.path.row(i) = path[i];
 
         const auto corridor_begin = Clock::now();
+        if (initial_motion_tip_segment.rows()) {
+            const pathcover_motion_seed::Triangle preferred{seed_region[0], seed_region[1], seed_region[2]};
+            const pathcover_motion_seed::TipSegment tips{
+                initial_motion_tip_segment.row(0), initial_motion_tip_segment.row(1)};
+            sdlp::permutation_rng.seed(options_.random_seed);
+            try {
+                const auto selection = pathcover_motion_seed::select(preferred, tips, fine_geometry);
+                seed_region.assign(selection.points.begin(), selection.points.end());
+                result.initial_motion_seed_adjusted = selection.adjusted;
+            } catch (const pathcover_motion_seed::NoFeasibleSeed &error) {
+                throw PathCoverPlanningError(error.what());
+            }
+        }
+        result.selected_initial_motion_seed.resize(seed_region.size(), 3);
+        for (std::size_t i = 0; i < seed_region.size(); ++i) {
+            result.selected_initial_motion_seed.row(i) = seed_region[i];
+        }
         Eigen::Matrix<double, Eigen::Dynamic, 3> bounds_A(6, 3);
         Eigen::VectorXd bounds_b(6);
         bounds_A.topRows(3) = -Eigen::Matrix3d::Identity();
@@ -721,6 +748,8 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def_readonly("gpu_box_compression", &MappingStats::gpu_box_compression);
     py::class_<PlanResult>(m, "PlanResult")
         .def_readonly("path", &PlanResult::path)
+        .def_readonly("selected_initial_motion_seed", &PlanResult::selected_initial_motion_seed)
+        .def_readonly("initial_motion_seed_adjusted", &PlanResult::initial_motion_seed_adjusted)
         .def_readonly("local_goal", &PlanResult::local_goal)
         .def_readonly("corridors", &PlanResult::corridors)
         .def_readonly("coefficients", &PlanResult::coefficients)
@@ -758,7 +787,9 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def(py::init<const py::dict &>())
         .def("reset", &NativeFrontend::reset, py::call_guard<py::gil_scoped_release>())
         .def("update_cloud", &NativeFrontend::update_cloud, py::call_guard<py::gil_scoped_release>())
-        .def("plan", &NativeFrontend::plan, py::call_guard<py::gil_scoped_release>())
+        .def("plan", &NativeFrontend::plan, py::arg("position"), py::arg("velocity"),
+             py::arg("acceleration"), py::arg("goal"), py::arg("initial_motion_seed") = Points(0, 3),
+             py::arg("initial_motion_tip_segment") = Points(0, 3), py::call_guard<py::gil_scoped_release>())
         .def("inflated_cloud", &NativeFrontend::inflated_cloud, py::call_guard<py::gil_scoped_release>())
         .def("obstacle_centers", &NativeFrontend::obstacle_centers, py::call_guard<py::gil_scoped_release>())
         .def("search_obstacle_centers", &NativeFrontend::search_obstacle_centers, py::call_guard<py::gil_scoped_release>())
