@@ -163,6 +163,11 @@ def test_cpu_cuda_mapping_and_native_solution_agree():
     assert gpu._native.last_update.gpu_mapping
     assert gpu._native.last_update.gpu_inflation
     assert gpu_plan.metrics["gpu_distance_map"]
+    assert not cpu_plan.metrics["gpu_legal_moves"]
+    assert gpu_plan.metrics["gpu_legal_moves"]
+    cached_plan = gpu.plan(None, state(), np.array([5.0, 0.0, 1.5]))
+    assert cached_plan.metrics["gpu_legal_moves"]
+    np.testing.assert_array_equal(cached_plan.path, gpu_plan.path)
 
 
 def test_coarse_search_preserves_fine_map_and_sfc_excludes_fine_occupied_boxes():

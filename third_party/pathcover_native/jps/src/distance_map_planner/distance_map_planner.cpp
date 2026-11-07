@@ -381,6 +381,7 @@ vec_E<std::pair<Veci<Dim>, int8_t>> DMPlanner<Dim>::createMask(int pow, double r
 template <int Dim>
 void DMPlanner<Dim>::setMap(const std::shared_ptr<JPS::MapUtil<Dim>> &map_util,
                             const Vecf<Dim> &pos) {
+  legal_moves_.clear();
   map_util_ = std::make_shared<JPS::MapUtil<Dim>>(*map_util);
   const auto mask = createMask(pow_, map_util_->getRes());
   // compute a 2D local distance map
@@ -451,7 +452,7 @@ void DMPlanner<Dim>::setMap(const std::shared_ptr<JPS::MapUtil<Dim>> &map_util,
 }
 
 template <int Dim>
-bool DMPlanner<Dim>::plan(const Vecf<Dim> &start, const Vecf<Dim> &goal, decimal_t eps, decimal_t cweight) {
+bool DMPlanner<Dim>::plan(const Vecf<Dim> &start, const Vecf<Dim> &goal, decimal_t eps, decimal_t cweight, bool simplify) {
   if(planner_verbose_){
     std::cout <<"Start: " << start.transpose() << std::endl;
     std::cout <<"Goal:  " << goal.transpose() << std::endl;
@@ -495,7 +496,8 @@ bool DMPlanner<Dim>::plan(const Vecf<Dim> &start, const Vecf<Dim> &goal, decimal
 
   if (Dim == 3) {
     graph_search_ = std::make_shared<DMP::GraphSearch>(
-        cmap_.data(), dim(0), dim(1), dim(2), eps, cweight, planner_verbose_);
+        cmap_.data(), dim(0), dim(1), dim(2), eps, cweight, planner_verbose_,
+        legal_moves_.empty() ? nullptr : legal_moves_.data());
     path_cost_ = graph_search_->plan(start_int(0), start_int(1), start_int(2),
                                      goal_int(0), goal_int(1), goal_int(2),
                                      search_region_);
@@ -529,12 +531,13 @@ bool DMPlanner<Dim>::plan(const Vecf<Dim> &start, const Vecf<Dim> &goal, decimal
   raw_path_ = ps;
   std::reverse(std::begin(raw_path_), std::end(raw_path_));
 
-  // Simplify the raw path
-  path_ = removeLinePts(raw_path_);
-  path_ = removeCornerPts(path_);
-  std::reverse(std::begin(path_), std::end(path_));
-  path_ = removeCornerPts(path_);
-  std::reverse(std::begin(path_), std::end(path_));
+  if (simplify) {
+    path_ = removeLinePts(raw_path_);
+    path_ = removeCornerPts(path_);
+    std::reverse(std::begin(path_), std::end(path_));
+    path_ = removeCornerPts(path_);
+    std::reverse(std::begin(path_), std::end(path_));
+  }
 
   return true;
 }
@@ -565,6 +568,23 @@ bool DMPlanner<Dim>::computeGlobalPath(const Vecf<Dim>& start, const Vecf<Dim>& 
 
 template <int Dim>
 bool DMPlanner<Dim>::computeGlobalPath(const EndpointAnchors& starts, const EndpointAnchors& goals) {
+  return plan(starts, goals, true);
+}
+
+template <int Dim>
+bool DMPlanner<Dim>::computeGlobalRawPath(const Vecf<Dim>& start, const Vecf<Dim>& goal) {
+  search_region_.clear();
+  prior_path_.clear();
+  return plan(start, goal, eps_, cweight_, false);
+}
+
+template <int Dim>
+bool DMPlanner<Dim>::computeGlobalRawPath(const EndpointAnchors& starts, const EndpointAnchors& goals) {
+  return plan(starts, goals, false);
+}
+
+template <int Dim>
+bool DMPlanner<Dim>::plan(const EndpointAnchors& starts, const EndpointAnchors& goals, bool simplify) {
   search_region_.clear(); prior_path_.clear(); path_.clear(); raw_path_.clear();
   selected_start_anchor_=selected_goal_anchor_=-1;
   path_cost_=std::numeric_limits<double>::infinity();
@@ -578,7 +598,8 @@ bool DMPlanner<Dim>::computeGlobalPath(const EndpointAnchors& starts, const Endp
     if (!checkAvailability(anchor.first)) { status_=2; return false; }
   const auto dimensions=map_util_->getDim();
   if constexpr (Dim==3)
-    graph_search_=std::make_shared<DMP::GraphSearch>(cmap_.data(),dimensions(0),dimensions(1),dimensions(2),eps_,cweight_,planner_verbose_);
+    graph_search_=std::make_shared<DMP::GraphSearch>(cmap_.data(),dimensions(0),dimensions(1),dimensions(2),eps_,cweight_,planner_verbose_,
+                                                  legal_moves_.empty() ? nullptr : legal_moves_.data());
   else
     graph_search_=std::make_shared<DMP::GraphSearch>(cmap_.data(),dimensions(0),dimensions(1),eps_,cweight_,planner_verbose_);
   auto convert = [&](const EndpointAnchors& anchors) {
@@ -603,7 +624,7 @@ bool DMPlanner<Dim>::computeGlobalPath(const EndpointAnchors& starts, const Endp
     raw_path_.push_back(map_util_->intToFloat(cell));
   }
   // Keep the certified coarse edges; only merge consecutive collinear steps.
-  path_=removeLinePts(raw_path_);
+  if (simplify) path_=removeLinePts(raw_path_);
   return true;
 }
 

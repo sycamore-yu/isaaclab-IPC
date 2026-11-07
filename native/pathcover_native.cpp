@@ -126,7 +126,7 @@ struct PlanResult {
     std::size_t endpoint_connection_visited_cells = 0, start_endpoint_anchors = 0, goal_endpoint_anchors = 0;
     double initial_speed = 0.0, speed_acceptance_limit = 0.0;
     int optimizer_status = 0;
-    bool gpu_distance_map = false;
+    bool gpu_distance_map = false, gpu_legal_moves = false;
     bool optimizer_quadrature_feasible = false;
     TimeInitialization time_initialization;
 };
@@ -169,7 +169,6 @@ class NativeFrontend {
     pathcover_grid::ResolutionRatio grid_resolution_ratio_;
     Vec3 center_lower_, center_upper_, grid_origin_;
     std::vector<int> occupied_indices_;
-    std::vector<Vec3> obstacle_centers_;
     std::vector<Vec3> geometry_box_centers_, geometry_box_halfwidths_;
     MappingStats last_update_;
     bool map_dirty_ = true;
@@ -274,7 +273,6 @@ public:
         make_map();
         inflater_.reset();
         VoxelGrid::resetOccupancy(grid_->map_, occupied_indices_);
-        obstacle_centers_.clear();
         geometry_box_centers_.clear();
         geometry_box_halfwidths_.clear();
         map_dirty_ = true;
@@ -302,23 +300,13 @@ public:
         last_update_.inflated_voxels = stats.inflated_voxels;
         const auto grid_begin = Clock::now();
         if (stats.changed) {
-            VoxelGrid::resetOccupancy(grid_->map_, occupied_indices_);
-            pathcover_grid::coarsenOccupiedVolumes(
-                inflater_.outputGrid(), grid_resolution_ratio_, grid_origin_index_, dimensions_,
-                grid_->map_, occupied_indices_);
-            std::sort(occupied_indices_.begin(), occupied_indices_.end());
-            obstacle_centers_.clear();
-            obstacle_centers_.reserve(occupied_indices_.size());
-            for (int index : occupied_indices_) {
-                const int x = index % dimensions_.x();
-                const int y = (index / dimensions_.x()) % dimensions_.y();
-                const int z = index / (dimensions_.x() * dimensions_.y());
-                obstacle_centers_.push_back(grid_origin_
-                    + (Vec3(x, y, z).array() + 0.5).matrix() * options_.search_resolution);
-            }
             // Exact union of inflated fine cells. Integer runs are merged without
             // filling gaps; no point-cloud serialization or second inflation.
             const auto boxes = pathcover_boxes::compress(inflater_.outputGrid());
+            VoxelGrid::resetOccupancy(grid_->map_, occupied_indices_);
+            pathcover_grid::coarsenOccupiedBoxes(
+                boxes, grid_resolution_ratio_, grid_origin_index_, dimensions_,
+                grid_->map_, occupied_indices_);
             geometry_box_centers_.clear();
             geometry_box_halfwidths_.clear();
             geometry_box_centers_.reserve(boxes.size());
@@ -357,8 +345,19 @@ public:
     }
 
     Points search_obstacle_centers() const {
-        Points output(obstacle_centers_.size(), 3);
-        for (std::size_t i = 0; i < obstacle_centers_.size(); ++i) output.row(i) = obstacle_centers_[i];
+        // Preserve the historical sorted diagnostic order without sorting or
+        // materializing coarse centers during every planning update.
+        auto indices = occupied_indices_;
+        std::sort(indices.begin(), indices.end());
+        Points output(indices.size(), 3);
+        for (std::size_t i = 0; i < indices.size(); ++i) {
+            const int index = indices[i];
+            const int x = index % dimensions_.x();
+            const int y = (index / dimensions_.x()) % dimensions_.y();
+            const int z = index / (dimensions_.x() * dimensions_.y());
+            output.row(i) = grid_origin_
+                + (Vec3(x, y, z).array() + 0.5).matrix() * options_.search_resolution;
+        }
         return output;
     }
 
@@ -478,14 +477,15 @@ public:
             if (map_dirty_) {
 #ifdef OCCUPANCY_INFLATION_WITH_CUDA
                 if (distance_cuda_) {
-                    auto potential = distance_cuda_->compute(grid_->map_,
+                    auto field = distance_cuda_->compute(grid_->map_,
                         {dimensions_.x(), dimensions_.y(), dimensions_.z()}, distance_mask_);
-                    dmp_->setPotentialMap(grid_, std::move(potential));
+                    dmp_->setPotentialMap(grid_, std::move(field.potential), std::move(field.legal_moves));
                 } else
 #endif
                 dmp_->setMap(grid_, position);
             }
             result.gpu_distance_map = options_.use_cuda;
+            result.gpu_legal_moves = options_.use_cuda && dmp_->hasLegalMoveMask();
             map_dirty_ = false;
             result.distance_map_ms = milliseconds(distance_map_begin);
             const auto dmp_begin = Clock::now();
@@ -494,12 +494,12 @@ public:
             bool found;
             if (ordinary_endpoints) {
                 // Preserve the original single-source/single-goal path and cost.
-                found = dmp_->computeGlobalPath(position, goal);
+                found = dmp_->computeGlobalRawPath(position, goal);
             } else {
                 DMPlanner<3>::EndpointAnchors starts, goals;
                 for (const auto& anchor : start_connections.anchors) starts.emplace_back(anchor.coarse_index, anchor.length);
                 for (const auto& anchor : goal_connections.anchors) goals.emplace_back(anchor.coarse_index, anchor.length);
-                found = dmp_->computeGlobalPath(starts, goals);
+                found = dmp_->computeGlobalRawPath(starts, goals);
             }
             if (!found) {
                 throw PathCoverPlanningError("PathCover global DMP did not find a path");
@@ -705,6 +705,7 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def_readonly("cost", &PlanResult::cost)
         .def_readonly("optimizer_status", &PlanResult::optimizer_status)
         .def_readonly("gpu_distance_map", &PlanResult::gpu_distance_map)
+        .def_readonly("gpu_legal_moves", &PlanResult::gpu_legal_moves)
         .def_readonly("search_ms", &PlanResult::search_ms)
         .def_readonly("jps_ms", &PlanResult::jps_ms)
         .def_readonly("distance_map_ms", &PlanResult::distance_map_ms)

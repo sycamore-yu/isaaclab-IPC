@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "occupancy_inflation/voxel_bit_grid.h"
+#include "pathcover_boxes.h"
 
 namespace pathcover_grid {
 
@@ -128,6 +129,47 @@ inline void coarsenOccupiedVolumes(
         }
     }
     if (have_run) occupy(run_lo, run_hi);
+}
+
+// Project the exact fine occupied union after its integer boxes have already
+// been built for RISP. Positive-volume intersection distributes over that union,
+// so this gives the same coarse cells as coarsenOccupiedVolumes without scanning
+// every fine bit again. Boxes keep upper-exclusive logical fine coordinates.
+// The caller resets cloud occupancy; virtual occupied cells are not listed.
+inline void coarsenOccupiedBoxes(
+    const std::vector<pathcover_boxes::Box>& boxes,
+    const ResolutionRatio& resolution_ratio,
+    const Eigen::Vector3i& search_origin_index,
+    const Eigen::Vector3i& dimensions,
+    std::vector<signed char>& cells,
+    std::vector<int>& occupied_indices) {
+    auto floorDivide = [](int64_t value, int64_t divisor) {
+        return value / divisor - static_cast<int64_t>(value < 0 && value % divisor != 0);
+    };
+    for (const auto& box : boxes) {
+        Eigen::Vector3i lower, upper;
+        for (int axis = 0; axis < 3; ++axis) {
+            const int64_t fine_lower = static_cast<int64_t>(box.lower[axis]) * resolution_ratio.first;
+            const int64_t fine_upper = static_cast<int64_t>(box.upper[axis]) * resolution_ratio.first;
+            const int64_t lo = floorDivide(fine_lower, resolution_ratio.second) - search_origin_index[axis];
+            const int64_t hi = -floorDivide(-fine_upper, resolution_ratio.second) - 1 - search_origin_index[axis];
+            lower[axis] = static_cast<int>(std::clamp<int64_t>(lo, 0, dimensions[axis]));
+            upper[axis] = static_cast<int>(std::clamp<int64_t>(hi, -1, dimensions[axis] - 1));
+        }
+        if ((lower.array() > upper.array()).any()) continue;
+        for (int z = lower.z(); z <= upper.z(); ++z) {
+            for (int y = lower.y(); y <= upper.y(); ++y) {
+                const int row = dimensions.x() * (y + dimensions.y() * z);
+                for (int x = lower.x(); x <= upper.x(); ++x) {
+                    const int index = row + x;
+                    if (cells[index] == 0) {
+                        cells[index] = 100;
+                        occupied_indices.push_back(index);
+                    }
+                }
+            }
+        }
+    }
 }
 
 } // namespace pathcover_grid

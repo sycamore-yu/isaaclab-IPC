@@ -111,6 +111,17 @@ obstacle volume must not change. Remove redundant half spaces using the existing
 dual convex hull procedure. This preserves the polytope, not the sum of soft
 penalties outside it.
 
+Reuse those exact integer boxes to project coarse occupancy. Merge matching X
+intervals across consecutive rows before the remaining Z sort, preserving final
+box order and RISP input. Compute 3D legal-neighbour masks together with the CUDA
+distance field. The masks depend only on original occupancy and map boundaries;
+regional search restrictions and CLOSED states stay in the search. Install the
+potential and masks together, and clear masks when replacing a map through the
+CPU interface. Retain direction order, edge costs and endpoint semantics.
+The native chain consumes the raw DMP path; the public simplified-path API
+remains available. Measure mask generation and transfer within the existing
+distance-map stage, not as a second additive timing stage.
+
 If a physically free endpoint is blocked only by coarse occupancy, connect it
 through a fine-grid local search within a 1 m axis-aligned half-width. Retain
 all reachable coarse anchors in that fixed window. Include connector lengths

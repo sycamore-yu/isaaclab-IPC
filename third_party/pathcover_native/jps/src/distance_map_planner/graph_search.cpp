@@ -37,32 +37,29 @@ GraphSearch::GraphSearch(const int8_t *cMap, int xDim, int yDim, double eps,
                          double cweight, bool verbose)
     : cMap_(cMap), xDim_(xDim), yDim_(yDim), zDim_(1), eps_(eps), cweight_(cweight),
       verbose_(verbose), use_2d_(true) {
-  hm_.resize(xDim_ * yDim_);
-  seen_.resize(xDim_ * yDim_, false);
-
-  for (int x = -1; x <= 1; x++) {
-    for (int y = -1; y <= 1; y++) {
-      if (x == 0 && y == 0)
-        continue;
-      ns_.push_back(std::vector<int>{x, y});
-    }
-  }
+  initializeNeighbours();
 }
 
 GraphSearch::GraphSearch(const int8_t *cMap, int xDim, int yDim, int zDim,
-                         double eps, double cweight, bool verbose)
-    : cMap_(cMap), xDim_(xDim), yDim_(yDim), zDim_(zDim), eps_(eps),
+                         double eps, double cweight, bool verbose, const uint32_t* legal_moves)
+    : cMap_(cMap), legal_moves_(legal_moves), xDim_(xDim), yDim_(yDim), zDim_(zDim), eps_(eps),
       cweight_(cweight), verbose_(verbose), use_2d_(false) {
-  hm_.resize(xDim_ * yDim_ * zDim_);
-  seen_.resize(xDim_ * yDim_ * zDim_, false);
+  initializeNeighbours();
+}
 
-  // Set 3D neighbors
+void GraphSearch::initializeNeighbours() {
+  // Preserve the original x/y/z emission order and the exact sqrt edge costs.
+  // Map-sized state arrays are initialized once by resetSearch(), not here.
   for (int x = -1; x <= 1; x++) {
     for (int y = -1; y <= 1; y++) {
-      for (int z = -1; z <= 1; z++) {
+      for (int z = use_2d_ ? 0 : -1; z <= (use_2d_ ? 0 : 1); z++) {
         if (x == 0 && y == 0 && z == 0)
           continue;
-        ns_.push_back(std::vector<int>{x, y, z});
+        const unsigned index = neighbourIndex(x, y, z);
+        ns_[neighbour_count_++] = {
+            x, y, z, x + y * xDim_ + z * xDim_ * yDim_,
+            uint32_t{1} << index, kRequiredFreeMasks[index],
+            std::sqrt(x * x + y * y + z * z)};
       }
     }
   }
@@ -344,23 +341,28 @@ void GraphSearch::getSucc(const StatePtr &curr, std::vector<int> &succ_ids,
   // Closed occupied voxel AABBs require all these cells to be free. Probe each
   // physical neighbour once; search-region membership applies only to the target.
   uint32_t free_mask = 0;
-  for (const auto &d : ns_) {
-    const int dz = use_2d_ ? 0 : d[2];
-    const bool free = use_2d_ ? isFree(curr->x + d[0], curr->y + d[1])
-                            : isFree(curr->x + d[0], curr->y + d[1], curr->z + dz);
-    if (free) free_mask |= uint32_t{1} << neighbourIndex(d[0], d[1], dz);
+  if (!legal_moves_) {
+    for (int i = 0; i < neighbour_count_; ++i) {
+      const auto& d = ns_[i];
+      const int x = curr->x + d.dx, y = curr->y + d.dy, z = curr->z + d.dz;
+      const bool free = x >= 0 && x < xDim_ && y >= 0 && y < yDim_
+          && (use_2d_ || (z >= 0 && z < zDim_))
+          && cMap_[curr->id + d.index_offset] < val_occ_;
+      if (free) free_mask |= d.bit;
+    }
   }
   if (use_2d_) {
-    for (const auto &d : ns_) {
-      int new_x = curr->x + d[0];
-      int new_y = curr->y + d[1];
-      const auto index = neighbourIndex(d[0], d[1], 0);
-      const uint32_t required = kRequiredFreeMasks[index];
-      if ((free_mask & required) != required) continue;
+    for (int i = 0; i < neighbour_count_; ++i) {
+      const auto& d = ns_[i];
+      int new_x = curr->x + d.dx;
+      int new_y = curr->y + d.dy;
+      if ((free_mask & d.required_free) != d.required_free) continue;
 
-      int new_id = coordToId(new_x, new_y);
+      int new_id = curr->id + d.index_offset;
       if (!global_ && !in_region_[new_id])
         continue;
+      // CLOSED is a search state, never an obstacle in the physical free mask.
+      if (seen_[new_id] && hm_[new_id]->closed) continue;
 
       if (!seen_[new_id]) {
         seen_[new_id] = true;
@@ -369,21 +371,21 @@ void GraphSearch::getSucc(const StatePtr &curr, std::vector<int> &succ_ids,
       }
 
       succ_ids.push_back(new_id);
-      succ_costs.push_back(std::sqrt(d[0] * d[0] + d[1] * d[1]) +
-                           cweight_ * (cMap_[new_id]));
+      succ_costs.push_back(d.step + cweight_ * (cMap_[new_id]));
     }
   } else {
-    for (const auto &d : ns_) {
-      int new_x = curr->x + d[0];
-      int new_y = curr->y + d[1];
-      int new_z = curr->z + d[2];
-      const auto index = neighbourIndex(d[0], d[1], d[2]);
-      const uint32_t required = kRequiredFreeMasks[index];
-      if ((free_mask & required) != required) continue;
+    const uint32_t legal = legal_moves_ ? legal_moves_[curr->id] : 0;
+    for (int i = 0; i < neighbour_count_; ++i) {
+      const auto& d = ns_[i];
+      int new_x = curr->x + d.dx;
+      int new_y = curr->y + d.dy;
+      int new_z = curr->z + d.dz;
+      if (legal_moves_ ? !(legal & d.bit) : (free_mask & d.required_free) != d.required_free) continue;
 
-      int new_id = coordToId(new_x, new_y, new_z);
+      int new_id = curr->id + d.index_offset;
       if (!global_ && !in_region_[new_id])
         continue;
+      if (seen_[new_id] && hm_[new_id]->closed) continue;
 
       if (!seen_[new_id]) {
         seen_[new_id] = true;
@@ -392,8 +394,7 @@ void GraphSearch::getSucc(const StatePtr &curr, std::vector<int> &succ_ids,
       }
 
       succ_ids.push_back(new_id);
-      succ_costs.push_back(std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) +
-                           cweight_ * cMap_[new_id]);
+      succ_costs.push_back(d.step + cweight_ * cMap_[new_id]);
     }
   }
 }

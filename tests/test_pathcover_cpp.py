@@ -208,13 +208,28 @@ int main() {
                 V((trial*7)%43-21,(trial*11)%41-20,(trial*13)%39-19)};
             if (trial % 3 == 0) points.push_back(points[0] + V(1,0,0));
             if (trial % 5 == 0) points.push_back(points[0] + V(0,1,1));
+            if (trial % 7 == 0) {
+                const V base = points[0];
+                for (int z=0;z<2;++z) for (int y=0;y<3;++y) for (int x=0;x<4;++x)
+                    points.push_back(base+V(x,y,z));
+            }
+            if (trial % 11 == 0) {
+                const V base = points[0];
+                for (int z=0;z<3;++z) for (int y=0;y<3;++y) for (int x=0;x<3;++x)
+                    if (x!=1 || y!=1 || z!=1) points.push_back(base+V(x,y,z));
+            }
             auto bits = grid(points);
             std::vector<signed char> actual(size.prod(),0), expected(size.prod(),0);
             actual[0] = expected[0] = 100; // Virtual boundary; never cloud-owned.
+            auto boxed = actual;
             std::vector<int> indices;
+            std::vector<int> box_indices;
             pathcover_grid::coarsenOccupiedVolumes(bits,
                 pathcover_grid::resolutionRatio(lengths.first / 20.0, lengths.second / 20.0),
                 start, size, actual, indices);
+            pathcover_grid::coarsenOccupiedBoxes(pathcover_boxes::compress(bits),
+                pathcover_grid::resolutionRatio(lengths.first / 20.0, lengths.second / 20.0),
+                start, size, boxed, box_indices);
             for (int z=0;z<size.z();++z) for (int y=0;y<size.y();++y)
                 for (int x=0;x<size.x();++x) {
                     const V lo = (start+V(x,y,z))*lengths.second;
@@ -225,11 +240,12 @@ int main() {
                             expected[x+size.x()*(y+size.y()*z)] = 100;
                     }
                 }
-            if (actual != expected) return 4;
+            if (actual != expected || boxed != expected) return 4;
             std::sort(indices.begin(),indices.end());
+            std::sort(box_indices.begin(),box_indices.end());
             std::vector<int> want;
             for (int i=1;i<size.prod();++i) if(expected[i]) want.push_back(i);
-            if (indices != want) return 5;
+            if (indices != want || box_indices != want) return 5;
             ++cases;
         }
     }

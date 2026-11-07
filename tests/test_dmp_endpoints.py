@@ -147,6 +147,42 @@ void reuse_and_validation() {
     check(rejected,"negative connector cost accepted");
 }
 
+void raw_only() {
+    const Vec2i dim(8,7);
+    std::vector<int8_t> cells(dim.prod(),0);
+    for(int y=0;y<dim.y();++y) cells[3+dim.x()*y]=100;
+    auto map=std::make_shared<JPS::MapUtil<2>>();
+    map->setMap(Vec2f(-1,-1),dim,cells,0.25);
+    DMPlanner2D planner;planner.setEps(1.5);planner.setCweight(0.1);planner.setPotentialMap(map,cells);
+    const DMPlanner2D::EndpointAnchors starts{{Vec2i(1,3),0.025},{Vec2i(4,3),1.25}};
+    const DMPlanner2D::EndpointAnchors goals{{Vec2i(1,1),100.0},{Vec2i(6,3),0.05}};
+    check(planner.computeGlobalPath(starts,goals),"regular anchor plan failed");
+    const auto expected=planner.getRawPath();
+    const double cost=planner.getPathCost();
+    check(!planner.getPath().empty(),"legacy simplified output disappeared");
+    check(planner.getStartAnchorIndex()==1 && planner.getGoalAnchorIndex()==1,"unexpected anchor baseline");
+    check(planner.computeGlobalRawPath(starts,goals),"raw anchor plan failed");
+    check(planner.getPath().empty(),"raw API retained simplified output");
+    check(planner.getPathCost()==cost && planner.getStartAnchorIndex()==1 && planner.getGoalAnchorIndex()==1,"raw anchor metadata changed");
+    auto compare=[&](const vec_Vec2f& reference) {
+        const auto actual=planner.getRawPath();check(actual.size()==reference.size(),"raw path length changed");
+        for(std::size_t i=0;i<actual.size();++i) check((actual[i]-reference[i]).norm()==0.0,"raw path order changed");
+    };
+    compare(expected);
+    check(planner.computeGlobalPath(starts,goals) && !planner.getPath().empty(),"regular API after raw failed");
+    compare(expected);
+    const Vec2f start=map->intToFloat(Vec2i(4,3)),goal=map->intToFloat(Vec2i(6,3));
+    check(planner.computeGlobalPath(start,goal),"regular point plan failed");
+    const auto single=planner.getRawPath();const double single_cost=planner.getPathCost();
+    check(planner.computeGlobalRawPath(start,goal),"raw point plan failed");
+    check(planner.getPath().empty() && planner.getPriorPath().empty(),"raw point API retained a prior output");
+    check(planner.getPathCost()==single_cost,"raw point cost changed");
+    check(planner.getStartAnchorIndex()==-1 && planner.getGoalAnchorIndex()==-1,"raw point API retained anchor indices");
+    compare(single);
+    check(!planner.computeGlobalRawPath(DMPlanner2D::EndpointAnchors{},goals),"empty raw anchor input succeeded");
+    check(planner.getRawPath().empty() && planner.getPath().empty(),"failed raw call retained outputs");
+}
+
 int main(int argc,char** argv) {
     if(argc!=2) return 2;
     try {
@@ -159,6 +195,7 @@ int main(int argc,char** argv) {
         else if(name=="metric_units") metric_units();
         else if(name=="legacy_regression") legacy_regression();
         else if(name=="reuse_and_validation") reuse_and_validation();
+        else if(name=="raw_only") raw_only();
         else return 3;
         std::cout << name << " passed\n";
     } catch(const std::exception& error) { std::cerr << error.what() << '\n';return 1; }
@@ -189,6 +226,7 @@ def dmp_endpoint_binary(tmp_path_factory):
 @pytest.mark.parametrize("case", [
     "disconnected_start", "disconnected_goal", "virtual_goal", "connector_costs",
     "no_corner_cut", "metric_units", "legacy_regression", "reuse_and_validation",
+    "raw_only",
 ])
 def test_dmp_endpoint_connectors(dmp_endpoint_binary, case):
     result = subprocess.run([str(dmp_endpoint_binary), case], capture_output=True, text=True)

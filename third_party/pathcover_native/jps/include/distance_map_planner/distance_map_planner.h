@@ -8,6 +8,7 @@
 #include "graph_search.h"
 #include <jps_collision/map_util.h>
 #include <jps_basis/data_type.h>
+#include <stdexcept>
 
 class GraphSearch;
 /**
@@ -77,6 +78,8 @@ public:
   vec_Vecf<Dim> getSearchRegion();
   /// Get the internal map util
   std::shared_ptr<JPS::MapUtil<Dim>> getMapUtil();
+  /// Whether the currently installed map owns precomputed 3D legal moves.
+  bool hasLegalMoveMask() const { return !legal_moves_.empty(); }
 
   /**
    * @brief Generate distance map
@@ -89,10 +92,17 @@ public:
   void setMap(const std::shared_ptr<JPS::MapUtil<Dim>> &map_util,
               const Vecf<Dim>& pos);
   /// Install the identical potential field produced by an external dilation backend.
+  /// Optional 3D legal moves use direction bit (dx+1)*9+(dy+1)*3+dz+1.
+  /// They must describe this exact map's occupancy including virtual obstacles,
+  /// with all nonempty axis-subset cells free. Omit to retain CPU legality checks.
+  /// Installing another map replaces/clears the masks, never reuses stale values.
   void setPotentialMap(const std::shared_ptr<JPS::MapUtil<Dim>>& map_util,
-                       std::vector<int8_t> potential) {
+                       std::vector<int8_t> potential, std::vector<uint32_t> legal_moves = {}) {
+    if (!legal_moves.empty() && (Dim != 3 || legal_moves.size() != potential.size()))
+      throw std::invalid_argument("DMP legal moves must match the 3D potential map size");
     map_util_ = std::make_shared<JPS::MapUtil<Dim>>(*map_util);
     cmap_ = std::move(potential);
+    legal_moves_ = std::move(legal_moves);
     map_util_->map_ = cmap_;
   }
   vec_E<std::pair<Veci<Dim>, int8_t>> potentialMask(double resolution) {
@@ -109,6 +119,10 @@ public:
   /// connector lengths are divided by map resolution and the original start
   /// potential and coarse edge charges are retained.
   bool computeGlobalPath(const EndpointAnchors& starts, const EndpointAnchors& goals);
+  /// Same search, cost and anchor selection, without constructing a simplified
+  /// path. Only getRawPath() is populated; getPath() is cleared on every call.
+  bool computeGlobalRawPath(const Vecf<Dim>& start, const Vecf<Dim>& goal);
+  bool computeGlobalRawPath(const EndpointAnchors& starts, const EndpointAnchors& goals);
   /// Original input-list indices from the latest multi-anchor search; -1 otherwise.
   int getStartAnchorIndex() const { return selected_start_anchor_; }
   int getGoalAnchorIndex() const { return selected_goal_anchor_; }
@@ -117,7 +131,8 @@ protected:
   vec_E<std::pair<Veci<Dim>, int8_t>> createMask(int pow, double resolution);
   /// Need to be specified in Child class, main planning function
   bool plan(const Vecf<Dim> &start, const Vecf<Dim> &goal,
-            decimal_t eps = 1, decimal_t cweight = 0.1);
+            decimal_t eps = 1, decimal_t cweight = 0.1, bool simplify = true);
+  bool plan(const EndpointAnchors& starts, const EndpointAnchors& goals, bool simplify);
   /// remove redundant points on the same line
   vec_Vecf<Dim> removeLinePts(const vec_Vecf<Dim> &path);
   /// Remove some corner waypoints
@@ -133,6 +148,8 @@ protected:
   std::vector<bool> search_region_;
   /// 1-D map array
   std::vector<int8_t> cmap_;
+  /// Owns optional per-cell masks borrowed by the current 3D graph search.
+  std::vector<uint32_t> legal_moves_;
 
   /// Enabled for printing info
   bool planner_verbose_;

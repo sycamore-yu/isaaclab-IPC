@@ -22,9 +22,33 @@ struct Box {
 
 namespace detail {
 
-// Input boxes are maximal x runs with one-cell y/z thickness. First merge
-// identical x intervals on consecutive y rows, then identical xy rectangles
-// on consecutive z planes. No merge fills a gap or changes occupied volume.
+// The complete key gives the same final order regardless of how each plane's
+// disjoint XY rectangles were discovered. Only identical XY footprints merge.
+inline std::vector<Box> mergePlanes(std::vector<Box> runs) {
+    std::sort(runs.begin(), runs.end(), [](const Box& a, const Box& b) {
+        return std::tie(a.lower.x(), a.upper.x(), a.lower.y(), a.upper.y(), a.lower.z())
+             < std::tie(b.lower.x(), b.upper.x(), b.lower.y(), b.upper.y(), b.lower.z());
+    });
+    std::size_t count = 0;
+    for (std::size_t i = 0; i < runs.size(); ++i) {
+        const Box& current = runs[i];
+        if (count && runs[count - 1].lower.x() == current.lower.x()
+            && runs[count - 1].upper.x() == current.upper.x()
+            && runs[count - 1].lower.y() == current.lower.y()
+            && runs[count - 1].upper.y() == current.upper.y()
+            && runs[count - 1].upper.z() == current.lower.z()) {
+            runs[count - 1].upper.z() = current.upper.z();
+        } else {
+            if (count != i) runs[count] = current;
+            ++count;
+        }
+    }
+    runs.resize(count);
+    return runs;
+}
+
+// Unordered-cell reference: maximal x runs with one-cell y/z thickness are
+// sorted by interval before merging consecutive y rows.
 inline std::vector<Box> mergeRuns(std::vector<Box> runs) {
     std::sort(runs.begin(), runs.end(), [](const Box& a, const Box& b) {
         return std::tie(a.lower.z(), a.lower.x(), a.upper.x(), a.lower.y())
@@ -44,26 +68,7 @@ inline std::vector<Box> mergeRuns(std::vector<Box> runs) {
         }
     }
     runs.resize(count);
-    std::sort(runs.begin(), runs.end(), [](const Box& a, const Box& b) {
-        return std::tie(a.lower.x(), a.upper.x(), a.lower.y(), a.upper.y(), a.lower.z())
-             < std::tie(b.lower.x(), b.upper.x(), b.lower.y(), b.upper.y(), b.lower.z());
-    });
-    count = 0;
-    for (std::size_t i = 0; i < runs.size(); ++i) {
-        const Box& current = runs[i];
-        if (count && runs[count - 1].lower.x() == current.lower.x()
-            && runs[count - 1].upper.x() == current.upper.x()
-            && runs[count - 1].lower.y() == current.lower.y()
-            && runs[count - 1].upper.y() == current.upper.y()
-            && runs[count - 1].upper.z() == current.lower.z()) {
-            runs[count - 1].upper.z() = current.upper.z();
-        } else {
-            if (count != i) runs[count] = current;
-            ++count;
-        }
-    }
-    runs.resize(count);
-    return runs;
+    return mergePlanes(std::move(runs));
 }
 
 } // namespace detail
@@ -88,12 +93,18 @@ inline std::vector<Box> compress(std::vector<Cell> occupied) {
 
 // Production path: scan packed words directly, without materializing or
 // sorting one Cell per occupied voxel. Consecutive runs cross word boundaries.
+// Rows already arrive in increasing x order. Match equal intervals against the
+// immediately preceding row, avoiding the first global sort of all x runs.
 inline std::vector<Box> compress(const occupancy_inflation::VoxelBitGrid& grid) {
     if (grid.empty()) return {};
     const auto& window = grid.window();
-    std::vector<Box> runs;
+    std::vector<Box> rectangles;
+    std::vector<std::size_t> previous_row, current_row;
     for (int z = 0; z < window.dims.z(); ++z) {
+        previous_row.clear();
         for (int y = 0; y < window.dims.y(); ++y) {
+            current_row.clear();
+            std::size_t previous = 0;
             const auto* row = grid.data() + window.rowOffset(y, z);
             int pending_lower = -1, pending_upper = -1;
             auto flush = [&]() {
@@ -102,7 +113,21 @@ inline std::vector<Box> compress(const occupancy_inflation::VoxelBitGrid& grid) 
                                      window.base.y() + y, window.base.z() + z);
                     const Cell upper(window.base.x() + pending_upper,
                                      window.base.y() + y + 1, window.base.z() + z + 1);
-                    runs.push_back({lower, upper});
+                    while (previous < previous_row.size()
+                        && rectangles[previous_row[previous]].lower.x() < lower.x()) {
+                        ++previous;
+                    }
+                    std::size_t index;
+                    if (previous < previous_row.size()
+                        && rectangles[previous_row[previous]].lower.x() == lower.x()
+                        && rectangles[previous_row[previous]].upper.x() == upper.x()) {
+                        index = previous_row[previous];
+                        rectangles[index].upper.y() = upper.y();
+                    } else {
+                        index = rectangles.size();
+                        rectangles.push_back({lower, upper});
+                    }
+                    current_row.push_back(index);
                 }
             };
             for (std::size_t word = 0; word < window.wordsPerRow(); ++word) {
@@ -127,9 +152,10 @@ inline std::vector<Box> compress(const occupancy_inflation::VoxelBitGrid& grid) 
                 }
             }
             flush();
+            previous_row.swap(current_row);
         }
     }
-    return detail::mergeRuns(std::move(runs));
+    return detail::mergePlanes(std::move(rectangles));
 }
 
 } // namespace pathcover_boxes

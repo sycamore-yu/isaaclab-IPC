@@ -147,6 +147,32 @@ void partial_word() {
     require(boxes.size()==1,"last word broke a continuous run");
     require((boxes[0].upper-(window.base+window.dims)).norm()==0,"padding leaked into volume");
 }
+void adjacent_row_order() {
+    std::vector<Cell> cells;
+    const std::vector<std::vector<std::pair<int,int>>> rows{
+        {{-70,-65},{-2,2},{7,8},{62,66}},
+        {{-70,-64},{-2,2},{5,6},{62,66}},
+        {{-2,1},{7,8},{63,66}},
+        {},
+        {{-70,-65},{-2,2},{7,8},{62,66}},
+    };
+    for(int z:{-1,0,2}) for(std::size_t row=0;row<rows.size();++row)
+        for(const auto& interval:rows[row]) for(int x=interval.first;x<interval.second;++x)
+            cells.emplace_back(x,static_cast<int>(row)-2,z);
+    const auto boxes=checkBoth(cells);
+    bool merged=false;
+    for(const auto& box:boxes) merged=merged || (box.lower==Cell(-2,-2,-1) && box.upper==Cell(2,0,1));
+    require(merged,"identical adjacent rows/planes did not merge");
+    // Different ends at the same x start, missing intervals, empty rows and
+    // missing z planes must not carry a stale active-row interval.
+    std::mt19937 random(21);
+    for(int trial=0;trial<48;++trial){
+        cells.clear();
+        for(int z=-2;z<3;++z)for(int y=-4;y<5;++y)for(int x=-12;x<13;++x)
+            if(random()%10 < static_cast<unsigned>(1+trial%9))cells.emplace_back(x,y,z);
+        checkBoth(cells);
+    }
+}
 int main(int argc,char** argv) {
     if(argc!=2) return 2;
     try {
@@ -157,6 +183,7 @@ int main(int argc,char** argv) {
         else if(name=="checkerboard") checkerboard();
         else if(name=="footprints_and_gaps") footprints_and_gaps();
         else if(name=="partial_word") partial_word();
+        else if(name=="adjacent_row_order") adjacent_row_order();
         else return 3;
         std::cout<<name<<" passed\n";
     } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
@@ -186,7 +213,7 @@ def boxes_binary(tmp_path_factory):
 
 @pytest.mark.parametrize("case", [
     "empty_and_reset", "solid_negative_words", "holes", "checkerboard",
-    "footprints_and_gaps", "partial_word",
+    "footprints_and_gaps", "partial_word", "adjacent_row_order",
 ])
 def test_exact_voxel_box_compression(boxes_binary, case):
     result = subprocess.run([str(boxes_binary), case], capture_output=True, text=True)

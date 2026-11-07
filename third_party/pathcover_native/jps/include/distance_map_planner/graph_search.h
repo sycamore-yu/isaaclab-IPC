@@ -12,6 +12,7 @@
 #include <vector>                         // std::vector
 #include <unordered_map>                  // std::unordered_map
 #include <cstdint>
+#include <array>
 
 namespace DMP
 {
@@ -110,7 +111,11 @@ namespace DMP
        * @param cweight weight of distance cost, optional, default as 0.1
        * @param verbose flag for printing debug info, optional, default as False
        */
-      GraphSearch(const int8_t* cMap, int xDim, int yDim, int zDim, double eps = 1, double cweight = 0.1, bool verbose = false);
+      // Optional precomputed legal directions for this exact map. The owner
+      // keeps all xDim*yDim*zDim masks alive through plan(); nullptr computes
+      // legality on the CPU. Region/CLOSED state never belongs in these masks.
+      GraphSearch(const int8_t* cMap, int xDim, int yDim, int zDim, double eps = 1, double cweight = 0.1, bool verbose = false,
+                  const uint32_t* legal_moves = nullptr);
 
       /**
        * @brief start 2D planning thread
@@ -163,6 +168,7 @@ namespace DMP
       double plan(StatePtr& currNode_ptr, int start_id, int goal_id);
       double search(int start_id, int goal_id);
       void resetSearch(std::vector<bool> in_region);
+      void initializeNeighbours();
       double getAnchorHeur(int x, int y, int z) const;
       /// Get successor function for A*
       void getSucc(const StatePtr& curr, std::vector<int>& succ_ids, std::vector<double>& succ_costs);
@@ -185,6 +191,7 @@ namespace DMP
       double getHeur(int x, int y, int z) const;
 
       const int8_t* cMap_;
+      const uint32_t* legal_moves_ = nullptr;
       int xDim_, yDim_, zDim_;
       /// weight of heuristic
       double eps_;
@@ -210,7 +217,13 @@ namespace DMP
 
       std::vector<StatePtr> path_;
 
-      std::vector<std::vector<int>> ns_;
+      struct Neighbour {
+        int dx, dy, dz, index_offset;
+        uint32_t bit, required_free;
+        double step;
+      };
+      std::array<Neighbour, 26> ns_;
+      int neighbour_count_ = 0;
  };
 }
 #endif

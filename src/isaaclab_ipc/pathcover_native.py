@@ -361,6 +361,7 @@ class NativePathCoverFrontend:
             "geometry_boxes": last_map.geometry_boxes,
             "gpu_mapping": last_map.gpu_mapping, "gpu_inflation": last_map.gpu_inflation,
             "gpu_distance_map": result.gpu_distance_map,
+            "gpu_legal_moves": result.gpu_legal_moves,
             "speed_initial_m_s": result.initial_speed,
             "speed_nominal_limit_m_s": nominal_velocity,
             "speed_physical_limit_m_s": self.config.max_velocity,

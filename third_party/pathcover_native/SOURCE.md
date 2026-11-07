@@ -378,6 +378,54 @@ license; embedded geometry utilities retain their original notices.
     are therefore checked against the original fine occupancy; numerical
     equality with the prior coarse corridors is not claimed. No ROI boundary,
     larger MPC face capacity or extra body clearance is introduced.
+31. Coarse occupancy reuses the exact integer boxes already constructed for RISP.
+    Each upper-exclusive box is projected with the same rational-resolution
+    integer floor/ceil bounds as the prior per-voxel projection. Positive-volume
+    intersection distributes over an exact occupied union, so this skips a
+    second fine-bit scan without changing any coarse occupied cell. Existing
+    virtual occupancy and cloud-only reset ownership are unchanged. Sorting the
+    coarse cloud indices and materializing their centers now happen only in the
+    diagnostic getter, retaining its original sorted output. A frozen Dense V19
+    map with 2,218,841 fine cells and 62,280 exact boxes produced identical coarse
+    bytes, potential bytes, diagnostic centers, DMP raw path and path cost. The
+    integer boundary regression also compares both implementations against an
+    independent overlap oracle, including shared faces, negative indices and
+    unequal commensurate resolutions. No change to inflation or padding is made.
+32. DMP skips CLOSED successor candidates before computing unused transition
+    work, stores the same 26 directions, step lengths and corner masks contiguously,
+    and initializes the full search arrays once in `resetSearch`. Direction order,
+    occupancy rules, weighted heuristic, edge costs and no-reopen policy are
+    unchanged. The native chain calls explicit `computeGlobalRawPath` overloads
+    for ordinary and multi-anchor endpoints, avoiding simplified-path work whose
+    result it never consumes. These overloads clear `getPath` and fill only
+    `getRawPath`; the original `computeGlobalPath` retains its public simplified
+    output. Across 36 two-/three-dimensional global, regional and multi-anchor
+    cases, path cost bits, raw waypoint order, selected anchors and all discovered
+    state metadata match the pre-change implementation.
+33. Packed-grid box compression matches each ordered X interval against the
+    immediately preceding row with two cursors. Only identical intervals extend
+    a Y rectangle; empty rows and new Z planes reset the active row. This removes
+    the first global sort of X runs. The complete second sort and Z merge are
+    unchanged, preserving every final box and its ordering, which also preserves
+    RISP's input order. The unordered-cell overload retains the original sorted
+    construction as an independent reference. Boundary and randomized-row tests
+    compare exact unions and ordered boxes; the 2,218,841-cell Dense V19 map
+    reproduces all 62,280 archived boxes, the fine bitmap and the coarse bitmap.
+34. The CUDA distance-map update also derives one uint32 legal-move mask per
+    coarse cell from the original occupancy on the same stream. A 3D diagonal
+    remains legal only when every required axis-subset neighbour is free; map
+    bounds and virtual occupied cells remain blocking. This preprocesses the
+    existing geometry test, without using potential values or CLOSED state.
+    Potential and masks are installed together; DMPlanner owns their storage.
+    CPU `setMap` and the original two-argument potential setter clear old masks.
+    GraphSearch reads mask bits in the original direction order, retaining
+    regional restrictions, CLOSED handling, costs, heap order and the virtual
+    goal rule. Two-dimensional and unmasked CPU searches retain the original
+    geometry evaluation. CPU/GPU masks and complete discovered-state metadata
+    agree on the isolated contracts and the frozen 369,600-cell Dense map.
+    `gpu_legal_moves` reports the mask actually installed for a searched plan,
+    including reused map frames. Preprocessing and transfer remain part of
+    `distance_map_ms`; no extra kernel synchronization or timing leaf is added.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online
