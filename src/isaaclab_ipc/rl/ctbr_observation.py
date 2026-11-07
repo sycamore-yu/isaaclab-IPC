@@ -1,5 +1,6 @@
 """Frozen CTBR policy/MPC observations shared by Newton and MARSIM."""
 
+import numpy as np
 import torch
 
 from isaaclab_ipc.turbompc.quadrotor import reference_from_pva
@@ -120,3 +121,86 @@ def terminal_ctbr_observation(previous, ctbr_state, body_rates, *, ctbr_config):
         previous["plane_mask"], previous["sfc_valid"], ctbr_config,
     )
     return {name: value.clone(memory_format=torch.contiguous_format) for name, value in values.items()}
+
+
+class PackedCTBRObservation:
+    """One fixed-shape tensor derivation and one packed plan host transfer."""
+
+    def __init__(self, batch, config, max_planes, device, *, compile_kernel=True, backend="inductor"):
+        self.batch, self.config, self.faces = batch, config, max_planes
+        self.device = torch.device(device)
+        self.nodes = config.cost_nodes
+        # PVA, heading, planes, mask (0/1), reference validity, warm availability.
+        self.plan_width = self.nodes * (10 + 5 * self.faces) + 2
+        self.host = np.zeros((batch, self.plan_width), dtype=np.float64)
+        with torch.inference_mode(False), torch.no_grad():
+            self.empty_warm = torch.zeros((batch, config.horizon, 4), dtype=torch.float64, device=self.device)
+        self.derive = (torch.compile(self._derive, fullgraph=True, dynamic=False, backend=backend)
+                       if compile_kernel else self._derive)
+
+    def _derive(self, physical, planned):
+        batch, nodes, faces = self.batch, self.nodes, self.faces
+        pva_end = 9 * nodes
+        yaw_end = pva_end + nodes
+        planes_end = yaw_end + 4 * nodes * faces
+        mask_end = planes_end + nodes * faces
+        pva = planned[:, :pva_end].reshape(batch, nodes, 9)
+        yaw = planned[:, pva_end:yaw_end]
+        planes = planned[:, yaw_end:planes_end].reshape(batch, nodes, faces, 4)
+        mask = planned[:, planes_end:mask_end].reshape(batch, nodes, faces).bool()
+        valid = planned[:, mask_end:mask_end + 1].bool()
+        has_warm = planned[:, mask_end + 1:].bool().reshape(batch, 1, 1)
+        # Reuse every current quaternion/control/feature equation verbatim.
+        # The default warm reference is computed once with those same controls.
+        values = make_ctbr_observation(
+            physical[:, :10], physical[:, 10:13], physical[:, 13:16], pva, yaw, planes, mask,
+            ctbr_config=self.config, reference_valid=valid,
+        )
+        warm = physical[:, 16:].reshape(batch, nodes - 1, 4)
+        values["ctbr_warm_start"] = torch.where(has_warm, warm, values["ctbr_warm_start"]).clone(
+            memory_format=torch.contiguous_format,
+        )
+        return values
+
+    def pack_plan(self, samples, ids, valid, has_warm):
+        """Only selected rows carry plans; unused rows are never sent to the actor."""
+        self.host.fill(0)
+        nodes, faces = self.nodes, self.faces
+        for row, index in enumerate(ids):
+            sample = samples[row]
+            position = 0
+            for array in (sample.pva, sample.yaw, sample.planes, sample.plane_mask):
+                values = np.asarray(array).reshape(-1)
+                self.host[index, position:position + values.size] = values
+                position += values.size
+            assert position == nodes * (10 + 5 * faces)
+            self.host[index, -2] = valid[row]
+            self.host[index, -1] = has_warm
+        return self.host
+
+    @torch.no_grad()
+    def build(self, state, rates, goal, samples, *, ids=None, valid=None, warm=None, device_ids=None):
+        ids = list(range(self.batch)) if ids is None else list(ids)
+        valid = [True] * len(ids) if valid is None else valid
+        host = self.pack_plan(samples, ids, valid, warm is not None)
+        # Both buffers have stable leading strides, including B=1 slices. They
+        # are normal tensors under rollout inference mode as well as no_grad.
+        with torch.inference_mode(False), torch.no_grad():
+            if goal.shape == (3,):
+                goal = goal.expand(self.batch, -1)
+            controls = self.empty_warm if warm is None else warm
+            physical = torch.cat((state, rates, goal, controls.reshape(self.batch, -1)), -1).double()
+            planned = torch.as_tensor(host, dtype=torch.float64, device=self.device)
+            values = self.derive(physical, planned)
+            if ids != list(range(self.batch)):
+                indices = (torch.as_tensor(ids, device=self.device) if device_ids is None else device_ids)
+                values = {key: value.index_select(0, indices) for key, value in values.items()}
+        return values
+
+    @torch.no_grad()
+    def prewarm(self):
+        with torch.inference_mode(False), torch.no_grad():
+            physical = torch.zeros((self.batch, 16 + 4 * self.config.horizon), dtype=torch.float64, device=self.device)
+            physical[:, 3] = 1
+            planned = torch.as_tensor(self.host, dtype=torch.float64, device=self.device)
+            return self.derive(physical, planned)

@@ -11,9 +11,17 @@
 #include <limits>                         // std::numeric_limits
 #include <vector>                         // std::vector
 #include <unordered_map>                  // std::unordered_map
+#include <cstdint>
 
 namespace DMP
 {
+  /// A free grid cell and the cost of its validated endpoint connector.
+  /// Costs use the graph's grid-distance units, not metres.
+  struct GridAnchor {
+    int x, y, z;
+    double connector_cost;
+  };
+
   ///Heap element comparison
   template <class T>
   struct compare_state
@@ -131,6 +139,13 @@ namespace DMP
        */
       double plan(int xStart, int yStart, int zStart, int xGoal, int yGoal, int zGoal, std::vector<bool> in_region = std::vector<bool>());
 
+      /// One global weighted A* over all anchors; success requires popping the
+      /// virtual goal after paying its connector cost. Inputs must be free cells
+      /// with finite nonnegative connector costs. No connector geometry is tested here.
+      double plan(const std::vector<GridAnchor>& starts, const std::vector<GridAnchor>& goals);
+      int getStartAnchorIndex() const { return selected_start_anchor_; }
+      int getGoalAnchorIndex() const { return selected_goal_anchor_; }
+
       /// Get the optimal path
       std::vector<StatePtr> getPath() const;
 
@@ -146,6 +161,9 @@ namespace DMP
     private:
       /// Main planning loop
       double plan(StatePtr& currNode_ptr, int start_id, int goal_id);
+      double search(int start_id, int goal_id);
+      void resetSearch(std::vector<bool> in_region);
+      double getAnchorHeur(int x, int y, int z) const;
       /// Get successor function for A*
       void getSucc(const StatePtr& curr, std::vector<int>& succ_ids, std::vector<double>& succ_costs);
       /// Recover the optimal path
@@ -179,6 +197,11 @@ namespace DMP
       int xGoal_, yGoal_, zGoal_;
       bool use_2d_;
       bool global_;
+
+      int virtual_goal_id_ = -1;
+      int selected_start_anchor_ = -1, selected_goal_anchor_ = -1;
+      std::vector<GridAnchor> goal_anchors_;
+      std::unordered_map<int, int> start_anchor_indices_, goal_anchor_indices_;
 
       priorityQueue pq_;
       std::vector<StatePtr> hm_;

@@ -2,6 +2,7 @@
 #define PATHCOVER_HPP
 
 #include <iostream>
+#include <cstdint>
 #include <Eigen/Dense>
 #include <vector>
 #include <algorithm>
@@ -9,8 +10,10 @@
 #include <numeric>
 #include <random>
 #include <stdexcept>
+#include <type_traits>
 #include <libqhullcpp/Qhull.h>
 #include "SeedRegion.hpp"
+#include "../trajectory/gcopter/geo_utils.hpp"
 
 
 namespace PathCover {
@@ -39,17 +42,33 @@ inline void noredund(Eigen::Matrix<T, -1, dim> &A,
                      Eigen::Matrix<T, -1, 1> &b, 
                      const Eigen::Matrix<T, dim, 1> &seed) {
 
-    // Ensure seed is strictly inside the polytope by checking A*seed < b
-    Eigen::Matrix<T, -1, 1> check = b - A * seed;
-    for (int i = 0; i < check.size(); ++i) {
-        if (check(i) <= 1e-8) {  // Allow small tolerance
-            std::cout << A << "\n" << b.transpose() << "\n" << seed.transpose() << "\n";
-            throw std::invalid_argument("Seed point is not strictly inside the polytope. Redundancy removal failed!");
+    // A valid path seed can lie on a workspace face. The dual construction
+    // needs a strict interior origin, but need not use the path seed as origin.
+    Eigen::Matrix<T, dim, 1> interior = seed;
+    Eigen::Matrix<T, -1, 1> check = b - A * interior;
+    if ((check.array() <= T(1e-8)).any()) {
+        Eigen::Matrix<double, -1, dim + 1> halfspaces(A.rows(), dim + 1);
+        halfspaces.template leftCols<dim>() = A.template cast<double>();
+        halfspaces.col(dim) = -b.template cast<double>();
+        Eigen::Matrix<double, dim, 1> found;
+        bool success = false;
+        if constexpr (dim == 3) {
+            success = geo_utils::findInterior(halfspaces, found);
+        } else if constexpr (dim == 2) {
+            success = geo_utils::findInterior2d(halfspaces, found);
         }
-    }                        
+        if (!success) {
+            throw std::invalid_argument("PathCover redundancy removal needs a full-dimensional corridor");
+        }
+        interior = found.template cast<T>();
+        check = b - A * interior;
+    }
+    if (!check.allFinite() || (check.array() <= T(0)).any()) {
+        throw std::invalid_argument("PathCover redundancy removal could not obtain a strict interior point");
+    }
     
     // obtain dual polytope vertices
-    Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> D = (A.array().colwise() / (b - A * seed).array());
+    Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor> D = (A.array().colwise() / check.array());
     
 
     std::vector<int> idx;
@@ -82,7 +101,7 @@ inline void noredund(Eigen::Matrix<T, -1, dim> &A,
 // around y_seed is strictly contained in the half-space a^T x <= b.
 // alpha must lie in (0, 1); smaller alpha -> larger polytope but less margin,
 // larger alpha -> smaller polytope with a wider safety annulus around the seed.
-template<typename T, const int dim>
+template<typename T, const int dim, typename HalfWidths = T>
 inline void RISP(const std::vector<Eigen::Matrix<T, dim, 1>> &obstacle_pts, 
                  const Eigen::Matrix<T, dim, 1> &seed, 
                  const Eigen::Matrix<T, -1, dim> &A_bound, 
@@ -91,9 +110,26 @@ inline void RISP(const std::vector<Eigen::Matrix<T, dim, 1>> &obstacle_pts,
                  Eigen::Matrix<T, -1, 1> &b,
                  std::vector<int> &pts_remaining,
                  T alpha = T(0.01),
-                 T voxel_half_extent = T(0),
-                 const std::vector<Eigen::Matrix<T, dim, 1>> *seed_region = nullptr) {
+                 const HalfWidths &voxel_half_extent = T(0),
+                 const std::vector<Eigen::Matrix<T, dim, 1>> *seed_region = nullptr,
+                 Eigen::Matrix<T, -1, dim> *raw_A = nullptr,
+                 Eigen::Matrix<T, -1, 1> *raw_b = nullptr) {
     assert(alpha > T(0) && alpha < T(1) && "RISP: alpha must lie in (0, 1)");
+
+    // Uniform voxels and exact merged boxes share the same support arithmetic.
+    // Compile-time dispatch avoids allocating one half-width vector per voxel.
+    if constexpr (!std::is_arithmetic_v<HalfWidths>) {
+        if (voxel_half_extent.size() != obstacle_pts.size()) {
+            throw std::invalid_argument("RISP needs one half-width vector per obstacle box");
+        }
+    }
+    auto halfwidth = [&](std::size_t index) -> Eigen::Matrix<T, dim, 1> {
+        if constexpr (std::is_arithmetic_v<HalfWidths>) {
+            return Eigen::Matrix<T, dim, 1>::Constant(voxel_half_extent);
+        } else {
+            return voxel_half_extent[index];
+        }
+    };
 
     // Compact indices instead of copying and moving every XYZ point on each cut.
     std::vector<std::size_t> remaining(obstacle_pts.size());
@@ -108,28 +144,32 @@ inline void RISP(const std::vector<Eigen::Matrix<T, dim, 1>> &obstacle_pts,
         [&](const auto &point) { return (point - seed).squaredNorm() > T(1e-24); });
     while (!remaining.empty()) {
         std::uniform_int_distribution<std::size_t> sample(0, remaining.size() - 1);
-        const auto &centre = obstacle_pts[remaining[sample(random_engine)]];
+        const auto chosen = remaining[sample(random_engine)];
+        const auto &centre = obstacle_pts[chosen];
+        const auto half = halfwidth(chosen);
         const auto delta = (centre - seed).eval();
         // The closest point on an occupied AABB gives a separating normal.
         // A point obstacle is the zero-half-extent special case of the same cut.
         Eigen::Matrix<T, dim, 1> normal =
-            (delta.array().sign() * (delta.array().abs() - voxel_half_extent).max(T(0))).matrix();
+            (delta.array().sign() * (delta.array().abs() - half.array()).max(T(0))).matrix();
         if (normal.squaredNorm() == T(0)) {
             throw std::invalid_argument("RISP seed lies in an occupied voxel volume");
         }
         T offset = normal.dot(seed) + (T(1) - alpha) * normal.squaredNorm();
         if constexpr (dim == 3) {
             if (protect_region) {
-                const auto plane = seedHullPlane(*seed_region, centre, voxel_half_extent, alpha);
+                const auto plane = seedHullPlane(*seed_region, centre, half, alpha);
                 normal = plane.first;
                 offset = plane.second;
             }
         }
         normals.push_back(normal);
         offsets.push_back(offset);
-        const T support = voxel_half_extent * normal.template lpNorm<1>();
+        const auto absolute_normal = normal.cwiseAbs().eval();
         remaining.erase(std::remove_if(remaining.begin(), remaining.end(),
-            [&](std::size_t index) { return normal.dot(obstacle_pts[index]) - support > offset; }),
+            [&](std::size_t index) {
+                return normal.dot(obstacle_pts[index]) - absolute_normal.dot(halfwidth(index)) > offset;
+            }),
             remaining.end());
         pts_remaining.push_back(static_cast<int>(remaining.size()));
     }
@@ -143,10 +183,12 @@ inline void RISP(const std::vector<Eigen::Matrix<T, dim, 1>> &obstacle_pts,
     A.bottomRows(A_bound.rows()) = A_bound;
     b.tail(b_bound.size()) = b_bound;
 
-    // Keep each voxel's separating cut as an explicit certificate. Dropping a
-    // redundant face can replace it with a combination of faces, which prevents
-    // the direct one-face-per-box separation check used at the grid/SFC boundary.
-    if (voxel_half_extent == T(0)) noredund<T, dim>(A, b, seed);
+    // Each removal above records an explicit separating cut in this raw system.
+    // The equivalent reduced polytope can exclude a box through several faces;
+    // it need not retain a single face that separates the whole box on its own.
+    if (raw_A) *raw_A = A;
+    if (raw_b) *raw_b = b;
+    noredund<T, dim>(A, b, seed);
 }
 
 
@@ -173,7 +215,7 @@ inline Eigen::Matrix<T, Dim, 1> computePolyhedraIntersection(const Eigen::Matrix
 }
 
 
-template <typename T, int Dim>
+template <typename T, int Dim, typename HalfWidths = T>
 inline void pathCover(const std::vector<Eigen::Matrix<T, Dim, 1>> &obstacle_pts, 
                       const std::vector<Eigen::Matrix<T, Dim, 1>> &path,
                       const Eigen::Matrix<T, -1, Dim> &A_bound, 
@@ -184,8 +226,10 @@ inline void pathCover(const std::vector<Eigen::Matrix<T, Dim, 1>> &obstacle_pts,
                       std::vector<std::vector<int>> &all_pts_remaining,
                       int max_horizon = 1,
                       T alpha = T(0.01),
-                      T voxel_half_extent = T(0),
-                      const std::vector<Eigen::Matrix<T, Dim, 1>> &initial_seed_region = {}) {
+                      const HalfWidths &voxel_half_extent = T(0),
+                      const std::vector<Eigen::Matrix<T, Dim, 1>> &initial_seed_region = {},
+                      std::vector<Eigen::Matrix<T, -1, Dim>> *raw_As = nullptr,
+                      std::vector<Eigen::Matrix<T, -1, 1>> *raw_bs = nullptr) {
 
     if (path.empty() || max_horizon < 1) {
         throw std::invalid_argument("PathCover needs a path and a positive corridor horizon");
@@ -194,15 +238,20 @@ inline void pathCover(const std::vector<Eigen::Matrix<T, Dim, 1>> &obstacle_pts,
     b.clear();
     seed.clear();
     all_pts_remaining.clear();
-    Eigen::Matrix<T, -1, Dim> current_A;
-    Eigen::Matrix<T, -1, 1> current_b;
+    if (raw_As) raw_As->clear();
+    if (raw_bs) raw_bs->clear();
+    Eigen::Matrix<T, -1, Dim> current_A, raw_A;
+    Eigen::Matrix<T, -1, 1> current_b, raw_b;
     std::vector<int> decay;
     auto append = [&](const Eigen::Matrix<T, Dim, 1> &point) {
         RISP<T, Dim>(obstacle_pts, point, A_bound, b_bound,
                      current_A, current_b, decay, alpha, voxel_half_extent,
-                     A.empty() && !initial_seed_region.empty() ? &initial_seed_region : nullptr);
+                     A.empty() && !initial_seed_region.empty() ? &initial_seed_region : nullptr,
+                     raw_As ? &raw_A : nullptr, raw_bs ? &raw_b : nullptr);
         A.push_back(current_A);
         b.push_back(current_b);
+        if (raw_As) raw_As->push_back(raw_A);
+        if (raw_bs) raw_bs->push_back(raw_b);
         seed.push_back(point);
         all_pts_remaining.push_back(decay);
     };

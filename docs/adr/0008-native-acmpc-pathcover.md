@@ -95,6 +95,30 @@ Only positive-volume overlap occupies a coarse cell. Recognize commensurate
 resolution ratios at configuration time; do not route geometry through packed
 float centres. Packed points remain a diagnostic representation.
 
+Use authoritative fine occupancy for RISP and motion-seed geometry; retain the
+conservatively coarsened map for DMP. Coalesce adjacent occupied integer voxels
+into disjoint rectangular boxes with exactly the same union. RISP uses each
+box's three half extents. Its randomized cuts can change with grouping, but the
+obstacle volume must not change. Remove redundant half spaces using the existing
+dual convex hull procedure. This preserves the polytope, not the sum of soft
+penalties outside it.
+
+If a physically free endpoint is blocked only by coarse occupancy, connect it
+through a fine-grid local search within a 1 m axis-aligned half-width. Retain
+all reachable coarse anchors in that fixed window. Include connector lengths
+in the multi-source/multi-goal DMP objective and terminate only when its virtual
+goal is removed from OPEN. Validate connector segments against fine voxel boxes.
+Do not clear coarse occupancy or silently enlarge the local search window.
+This finite hybrid graph does not claim completeness in continuous free space.
+Use exact body-clearance workspace bounds for geometry; only the coarse search
+rounds those bounds inward to complete grid cells.
+
+Pack sampled PVA, yaw, SFC and validity into one host-to-device transfer and
+compile the existing tensor observation equations for the fixed full batch.
+Select partial-reset rows afterwards, preserving frozen snapshots and avoiding
+one compilation per subset size. Prewarm through the existing constructor
+synchronization point; do not synchronize each predicted node.
+
 Construct heading with a native scalar ODE that bounds body yaw rate pointwise.
 Use adaptive RK4 and cubic Hermite interpolation, and return the derivative of
 the same interpolant. Fade heading feedback continuously below 0.1 m/s.

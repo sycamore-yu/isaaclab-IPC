@@ -23,8 +23,9 @@ license; embedded geometry utilities retain their original notices.
    Point inputs retain the upstream cutting-plane equation. Native navigation
    supplies occupied voxel AABBs: each normal points from the seed to the closest
    point on a box, and the support function removes only boxes lying completely
-   beyond the cut. Each separating cut is retained, providing a direct
-   one-face-per-box exclusion certificate instead of a centre-only approximation.
+   beyond the cut. Through V18 each separating cut was retained. V19 restores
+   upstream redundancy removal after constructing the same obstacle-free polytope;
+   direct one-face-per-box certificates are checked before that equivalent cleanup.
    A per-thread seeded generator replaces global `rand()`.
    The GCOPTER Seidel LP permutation stream is also per-thread and reseeded at
    each solve, so equal frozen inputs remain reproducible across CPU/CUDA maps.
@@ -41,7 +42,8 @@ license; embedded geometry utilities retain their original notices.
    supplies body clearance once. V15 gives GCOPTER's reference position penalty
    the official drone YAML's 0.15 m inward offset, as detailed in item 24 below.
    Physical workspace bounds, including virtual ground/ceiling, are shrunk by
-   the body radii once and rounded inward to complete free search cells. This
+   the body radii once. The coarse search rounds these inward to complete free cells; V19
+   geometry and local connections retain the exact physical bounds. This
    handles boundaries that do not appear in the observed cloud. Mapping and
    search grids are anchored at world zero rather than an arbitrary box origin.
    The native ellipsoid inflation mask covers the source voxel volume plus the
@@ -85,11 +87,10 @@ license; embedded geometry utilities retain their original notices.
    exactly. One bulk upload/download replaces the CPU obstacle-by-mask loop;
    GPU kernels do not change the search cost or create a learned surrogate.
 8. Optional `search_resolution` conservatively coarsens occupied fine voxels for
-   JPS/DMP and RISP AABB geometry. NanoVoxMap and inflation retain `resolution`.
-   Search and SFC use identical occupied volumes, so a trajectory cannot enter
-   a cell that the next search classifies as occupied while satisfying its SFC.
-   No start cell is cleared and no fine-to-coarse connector is silently inserted.
-   The coarse grid
+   DMP. Through V18, RISP also used those coarse AABBs. V19 uses the authoritative
+   inflated fine volumes for RISP and explicit local endpoint connections, as
+   detailed in item 30. NanoVoxMap and inflation retain `resolution`; no start
+   cell is cleared and the robot is not inflated again. The coarse grid
    changes the discretized search problem, so its path/cost are not claimed
    equivalent to a finer search grid. The default preserves the mapping grid.
 9. GCOPTER's initial time ratios use path-length / max(0.5 * nominal speed, measured initial
@@ -335,6 +336,48 @@ license; embedded geometry utilities retain their original notices.
     is not a global convergence claim. The exact candidate agrees with an
     independent DOP853 solution within 2.86e-7 rad and satisfies the unchanged
     per-axis rate tolerances. Its original zero-heading diagnostic is retained.
+30. V19 separates coarse search from authoritative fine geometry. On each changed
+    map, contiguous integer X runs are merged along Y only when their X intervals
+    match, then along Z only when the entire XY rectangles match. The resulting
+    boxes have exactly the same occupied union as the inflater's fine bit-grid;
+    they never fill a gap. RISP receives their centers and independent three-axis
+    half widths, including when search and mapping resolutions are equal.
+    The cloud-only coarse list omits already occupied
+    virtual-boundary cells and is therefore not reused as authoritative geometry.
+    `obstacle_boxes()` exposes the fine SFC volumes; `search_obstacle_boxes()`
+    separately exposes the coarsened cloud volumes. Exact physical bounds are
+    `bounds_lower + body_radius` and `bounds_upper - body_radius`; only search
+    retains the previous inward grid rounding and virtual occupancy.
+    The real V18 Dense warm seed was 0.140239 m outside all inflated fine boxes,
+    yet its p2 entered a valid coarse cover cell. That cell had seven fine boxes
+    with positive-volume overlap, so this was not the earlier floating-point bug.
+    The three-point initial seed and the original Euler CTBR model are retained.
+    Fine-free endpoints inside occupied coarse cells connect through a fixed
+    local fine-grid search. `endpoint_connection_radius=1.0` is the half-width
+    in metres of an axis-aligned box about each endpoint, clipped to the exact
+    physical workspace; it is not a Euclidean-ball radius. Six-axis Dijkstra
+    exhausts that finite window, including routes through multiple free coarse
+    components. Virtual endpoint links can have unequal lengths. Each reachable
+    coarse anchor retains a shortest local-grid route, whose turns are simplified
+    only when an analytic closed-fine-AABB slab test validates the replacement.
+    Face, edge and corner contacts remain blocked. Coarse occupancy is unchanged.
+    Multi-anchor DMP performs one weighted search, adding connector lengths in
+    its existing grid-cost units and charging the original start-cell potential.
+    A virtual goal must be popped before success; reaching the first goal anchor
+    is insufficient. Normal coarse-free endpoints still use the original DMP
+    entry point. The chosen two local links and coarse path form the RISP guide.
+    No anchor within the fixed window or an exhausted global OPEN set produces an
+    explicit planning failure. There is no radius expansion, search retry or
+    previous-plan fallback. This finite mixed graph is not claimed complete for
+    every continuous fine-map route, and weighted search is not claimed optimal.
+    RISP's dual-Qhull redundancy removal uses a strict interior point, solving
+    the existing interior LP only when the original seed is on a boundary.
+    Removing redundant faces preserves the convex set, not the sum of soft face
+    penalties at infeasible GCOPTER trial points. Box grouping can also change
+    RISP's separating-plane choices. New corridors and optimized trajectories
+    are therefore checked against the original fine occupancy; numerical
+    equality with the prior coarse corridors is not claimed. No ROI boundary,
+    larger MPC face capacity or extra body clearance is introduced.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online

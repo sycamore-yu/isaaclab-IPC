@@ -76,6 +76,7 @@ class PathCoverNavigation:
 
     def __init__(self, num_envs, ctbr_config, frontend_config, *, device, max_planes=128):
         from .pathcover_native import NativePathCoverFrontend
+        from .rl.ctbr_observation import PackedCTBRObservation
         from .turbompc.quadrotor import CTBRDynamics
 
         self.config = ctbr_config
@@ -84,6 +85,10 @@ class PathCoverNavigation:
         self._dynamics = CTBRDynamics(dt=ctbr_config.dt, mass=ctbr_config.mass, gravity=ctbr_config.gravity)
         self._motion_seed = (torch.compile(self._initial_motion_seed, fullgraph=True, dynamic=False)
                              if self.device.type == "cuda" else self._initial_motion_seed)
+        self._observation_builder = PackedCTBRObservation(
+            num_envs, ctbr_config, self.max_planes, self.device,
+            compile_kernel=self.device.type == "cuda",
+        )
         self.frontends = [NativePathCoverFrontend(frontend_config) for _ in range(num_envs)]
         self._workers = (ThreadPoolExecutor(max_workers=min(4, num_envs), thread_name_prefix="pathcover")
                          if num_envs > 1 else None)
@@ -110,6 +115,7 @@ class PathCoverNavigation:
                 acceleration = state.new_zeros((num_envs, 3))
                 self._motion_seed(state, acceleration, None)
                 self._motion_seed(state, acceleration, state.new_full((num_envs,), ctbr_config.mass * ctbr_config.gravity))
+                self._observation_builder.prewarm()
                 torch.cuda.synchronize(self.device)
 
     def _initial_motion_seed(self, state, acceleration, first_force):
@@ -177,7 +183,6 @@ class PathCoverNavigation:
         Only expected planning failures are collected; programming errors propagate.
         """
         from .pathcover_native import PathCoverPlanningError, PathCoverState
-        from .rl.ctbr_observation import make_ctbr_observation
 
         ids = list(range(len(self.frontends))) if env_ids is None else env_ids
         if isinstance(ids, torch.Tensor):
@@ -259,15 +264,10 @@ class PathCoverNavigation:
                 self.last_reference_metrics[index] = {"planning_failure": str(errors[index])}
             sampled.append(snapshot)
 
-        def tensor(name, dtype=torch.float64):
-            return torch.as_tensor(np.stack([getattr(value, name) for value in sampled]),
-                                   dtype=dtype, device=self.device)
-
-        observations = make_ctbr_observation(
-            ctbr_state[device_ids], body_rates[device_ids], goals[device_ids], tensor("pva"), tensor("yaw"),
-            tensor("planes"), tensor("plane_mask", torch.bool), ctbr_config=self.config,
-            reference_valid=torch.tensor([index not in errors for index in ids], device=self.device),
-            warm_start_controls=None if warm_start_controls is None else warm_start_controls[device_ids],
+        observations = self._observation_builder.build(
+            ctbr_state, body_rates, goals, sampled, ids=ids,
+            valid=[index not in errors for index in ids],
+            warm=warm_start_controls, device_ids=device_ids,
         )
         return (observations, errors) if allow_failures else observations
 

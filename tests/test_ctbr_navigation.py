@@ -136,10 +136,11 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch):
         assert quality["optimizer_quadrature_infeasible_plans"] == 2
         assert quality["optimizer_extrema"]["sfc_max_m"] == .003
         assert quality["optimizer_extrema"]["thrust_min_n"] == -.1
+        limits = instances[0].config.native_options()
         assert quality["maximum_positive_residual"] == pytest.approx({
             "sfc_m": .003, "speed_physical_m_s": 1., "speed_nominal_m_s": 1.,
-            "thrust_lower_n": .1, "thrust_upper_n": 23. - 3. * .75 * 9.81,
-            "tilt_rad": .1, "zero_yaw_body_rate_rad_s": .01,
+            "thrust_lower_n": limits["thrust_min"] + .1, "thrust_upper_n": 23. - limits["thrust_max"],
+            "tilt_rad": 1.3 - limits["tilt_max"], "zero_yaw_body_rate_rad_s": .01,
         })
         assert quality["maximum_mpc_reference_sfc_violation_m"] == 0.
 

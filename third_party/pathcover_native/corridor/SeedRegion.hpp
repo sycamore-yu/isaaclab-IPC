@@ -22,7 +22,8 @@ public:
 template<typename T>
 inline std::pair<Eigen::Matrix<T, 3, 1>, T> seedHullPlane(
     const std::vector<Eigen::Matrix<T, 3, 1>> &points,
-    const Eigen::Matrix<T, 3, 1> &centre, T half, T alpha) {
+    const Eigen::Matrix<T, 3, 1> &centre,
+    const Eigen::Matrix<T, 3, 1> &half, T alpha) {
     using V = Eigen::Matrix<T, 3, 1>;
     if (points.size() != 3) {
         throw std::invalid_argument("Initial seed hull needs three points");
@@ -38,7 +39,7 @@ inline std::pair<Eigen::Matrix<T, 3, 1>, T> seedHullPlane(
     }
     for (const auto &point : points) {
         const V delta = centre - point;
-        axes.push_back((delta.array().sign() * (delta.array().abs() - half).max(T(0))).matrix());
+        axes.push_back((delta.array().sign() * (delta.array().abs() - half.array()).max(T(0))).matrix());
     }
     T best_gap = -std::numeric_limits<T>::infinity();
     T best_support = T(0);
@@ -50,7 +51,7 @@ inline std::pair<Eigen::Matrix<T, 3, 1>, T> seedHullPlane(
             const V normal = candidate * (sign / length);
             T support = -std::numeric_limits<T>::infinity();
             for (const auto &point : points) support = std::max(support, normal.dot(point));
-            const T near = normal.dot(centre) - half * normal.template lpNorm<1>();
+            const T near = normal.dot(centre) - normal.cwiseAbs().dot(half);
             if (near - support > best_gap) {
                 best_gap = near - support;
                 best_support = support;
@@ -62,6 +63,14 @@ inline std::pair<Eigen::Matrix<T, 3, 1>, T> seedHullPlane(
         throw SeedRegionCollision("PathCover initial motion seed intersects an occupied voxel");
     }
     return {best, best_support + (T(1) - alpha) * best_gap};
+}
+
+template<typename T>
+inline std::pair<Eigen::Matrix<T, 3, 1>, T> seedHullPlane(
+    const std::vector<Eigen::Matrix<T, 3, 1>> &points,
+    const Eigen::Matrix<T, 3, 1> &centre, T half, T alpha) {
+    const Eigen::Matrix<T, 3, 1> widths = Eigen::Matrix<T, 3, 1>::Constant(half);
+    return seedHullPlane(points, centre, widths, alpha);
 }
 
 } // namespace PathCover

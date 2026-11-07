@@ -41,6 +41,19 @@ def native_module():
     return pytest.importorskip("isaaclab_ipc._pathcover_native")
 
 
+def assert_corridor_excludes_boxes(corridor, centers, half_extent):
+    """Redundant-face removal can replace one separating face by several faces."""
+    from scipy.optimize import linprog
+
+    minimum_residual = (centers @ corridor[:, :3].T + corridor[:, 3]
+                        - half_extent * np.abs(corridor[:, :3]).sum(axis=1))
+    for center in centers[minimum_residual.max(axis=1) <= 0.0]:
+        intersection = linprog(np.zeros(3), A_ub=corridor[:, :3], b_ub=-corridor[:, 3],
+                               bounds=list(zip(center - half_extent, center + half_extent, strict=True)),
+                               method="highs")
+        assert intersection.status == 2, intersection.message
+
+
 def test_official_reference_defaults_resolve_to_concrete_mass_scaled_values():
     cfg = PathCoverConfig(mass=0.9)
     assert cfg.nominal_velocity == 3.0
@@ -48,6 +61,7 @@ def test_official_reference_defaults_resolve_to_concrete_mass_scaled_values():
     assert cfg.thrust_max == pytest.approx(10.0 / 0.716 * 0.9)
     assert cfg.tilt_max == 0.7854
     assert cfg.penalty_weights == (1e4, 100.0, 1e4, 1e4, 1e4)
+    assert cfg.endpoint_connection_radius == 1.0
     options = cfg.native_options()
     assert options["nominal_velocity"] == cfg.nominal_velocity
     assert options["thrust_min"] == cfg.thrust_min
@@ -151,7 +165,7 @@ def test_cpu_cuda_mapping_and_native_solution_agree():
     assert gpu_plan.metrics["gpu_distance_map"]
 
 
-def test_coarse_search_preserves_fine_map_and_excludes_full_occupied_boxes():
+def test_coarse_search_preserves_fine_map_and_sfc_excludes_fine_occupied_boxes():
     native_module()
     cfg = configuration(resolution=0.1, search_resolution=0.25)
     coarse = NativePathCoverFrontend(cfg)
@@ -160,14 +174,16 @@ def test_coarse_search_preserves_fine_map_and_excludes_full_occupied_boxes():
     fine.update_cloud(wall(), state().position)
     np.testing.assert_array_equal(coarse.inflated_cloud(), fine.inflated_cloud())
     centres, half_extent = coarse.obstacle_boxes()
-    np.testing.assert_allclose(centres / cfg.search_resolution - 0.5,
-                               np.round(centres / cfg.search_resolution - 0.5), atol=1e-10)
+    assert half_extent == 0.5 * cfg.resolution
+    np.testing.assert_allclose(centres / cfg.resolution - 0.5,
+                               np.round(centres / cfg.resolution - 0.5), atol=1e-10)
+    search_centres, search_half_extent = coarse.search_obstacle_boxes()
+    assert search_half_extent == 0.5 * cfg.search_resolution
+    np.testing.assert_allclose(search_centres / cfg.search_resolution - 0.5,
+                               np.round(search_centres / cfg.search_resolution - 0.5), atol=1e-10)
     for corridor in coarse_plan.corridors:
-        # Minimum residual over a box is c.a + d - half*|a|_1. At least one
-        # complete separating face must exclude every occupied voxel volume.
-        minimum_residual = (centres @ corridor[:, :3].T + corridor[:, 3]
-                            - half_extent * np.abs(corridor[:, :3]).sum(axis=1))
-        assert np.all(minimum_residual.max(axis=1) > 0.0)
+        assert_corridor_excludes_boxes(corridor, centres, half_extent)
+    assert 0 < coarse_plan.metrics["geometry_boxes"] <= len(centres)
     metrics = validate_pathcover_plan(coarse_plan, cfg)
     assert metrics["sfc_max_violation_m"] < 0.02
     assert metrics["max_tilt_rad"] < cfg.tilt_max + 0.02
@@ -193,11 +209,43 @@ def test_cross_resolution_shared_faces_do_not_create_occupied_neighbours():
         for sign in (-1.0, 1.0):
             frontend.reset()
             frontend.update_cloud(np.array([[sign * 0.55, 0.15, 1.15]]), state().position)
-            centres, half_extent = frontend.obstacle_boxes()
+            centres, half_extent = frontend.search_obstacle_boxes()
             # Logical fine x faces at +/-0.6 and z=1.2 coincide with coarse
             # faces, including the 6*.1 versus 2*.3 floating-point discrepancy.
             np.testing.assert_allclose(centres, [[sign * 0.45, 0.15, 1.05]], atol=1e-14)
             assert half_extent == 0.15
+
+
+def test_fine_free_start_connects_without_clearing_occupied_search_cell():
+    native_module()
+    cfg = configuration(resolution=0.1, search_resolution=0.25, robot_radius=0.0)
+    frontend = NativePathCoverFrontend(cfg)
+    current = replace(state(), position=np.array([0.21, 0.21, 1.45]))
+    frontend.update_cloud(np.array([[0.05, 0.05, 1.45]]), current.position)
+    search_before, half = frontend.search_obstacle_boxes()
+    assert np.any(np.all(np.abs(search_before - current.position) <= half, axis=1))
+    centers, fine_half = frontend.obstacle_boxes()
+    assert not np.any(np.all(np.abs(centers - current.position) <= fine_half, axis=1))
+    plan = frontend.plan(None, current, np.array([3.0, 1.0, 1.45]))
+    np.testing.assert_array_equal(frontend.search_obstacle_boxes()[0], search_before)
+    np.testing.assert_array_equal(plan.path[0], current.position)
+    assert plan.metrics["endpoint_connection_visited_cells"] > 0
+    assert plan.metrics["start_endpoint_anchors"] > 1
+    assert plan.metrics["geometry_resolution_m"] == 0.1
+    assert plan.metrics["search_resolution_m"] == 0.25
+
+
+def test_equal_resolution_keeps_fine_obstacles_inside_virtual_search_boundary():
+    native_module()
+    cfg = configuration(bounds_lower=(-2.0, -3.0, 0.1), resolution=0.25, robot_radius=0.0)
+    frontend = NativePathCoverFrontend(cfg)
+    frontend.update_cloud(np.array([[0.125, 0.125, 0.125]]), state().position)
+    centers, half = frontend.obstacle_boxes()
+    np.testing.assert_array_equal(centers, [[0.125, 0.125, 0.125]])
+    assert frontend.search_obstacle_boxes()[0].shape == (0, 3)
+    plan = frontend.plan(None, state(), np.array([5.0, 0.0, 1.5]))
+    for corridor in plan.corridors:
+        assert_corridor_excludes_boxes(corridor, centers, half)
 
 
 @pytest.mark.parametrize(("radius", "radius_z"), [(0.0, 0.0), (0.25, 0.0), (0.0, 0.25), (0.25, 0.25)])

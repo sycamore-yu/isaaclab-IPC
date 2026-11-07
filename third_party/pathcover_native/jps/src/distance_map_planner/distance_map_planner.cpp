@@ -462,6 +462,7 @@ bool DMPlanner<Dim>::plan(const Vecf<Dim> &start, const Vecf<Dim> &goal, decimal
   path_.clear();
   raw_path_.clear();
   status_ = 0;
+  selected_start_anchor_ = selected_goal_anchor_ = -1;
 
   /// check if the map exists
   if(cmap_.empty()) {
@@ -560,6 +561,50 @@ bool DMPlanner<Dim>::computeGlobalPath(const Vecf<Dim>& start, const Vecf<Dim>& 
   search_region_.clear();
   prior_path_.clear();
   return plan(start, goal, eps_, cweight_);
+}
+
+template <int Dim>
+bool DMPlanner<Dim>::computeGlobalPath(const EndpointAnchors& starts, const EndpointAnchors& goals) {
+  search_region_.clear(); prior_path_.clear(); path_.clear(); raw_path_.clear();
+  selected_start_anchor_=selected_goal_anchor_=-1;
+  path_cost_=std::numeric_limits<double>::infinity();
+  status_=0;
+  if (cmap_.empty()) { status_=-1; return false; }
+  if (starts.empty()) { status_=1; return false; }
+  if (goals.empty()) { status_=2; return false; }
+  for (const auto& anchor : starts)
+    if (!checkAvailability(anchor.first)) { status_=1; return false; }
+  for (const auto& anchor : goals)
+    if (!checkAvailability(anchor.first)) { status_=2; return false; }
+  const auto dimensions=map_util_->getDim();
+  if constexpr (Dim==3)
+    graph_search_=std::make_shared<DMP::GraphSearch>(cmap_.data(),dimensions(0),dimensions(1),dimensions(2),eps_,cweight_,planner_verbose_);
+  else
+    graph_search_=std::make_shared<DMP::GraphSearch>(cmap_.data(),dimensions(0),dimensions(1),eps_,cweight_,planner_verbose_);
+  auto convert = [&](const EndpointAnchors& anchors) {
+    std::vector<DMP::GridAnchor> result;
+    result.reserve(anchors.size());
+    for (const auto& anchor : anchors) {
+      int z=0;
+      if constexpr (Dim==3) z=anchor.first(2);
+      result.push_back({anchor.first(0),anchor.first(1),z,anchor.second/map_util_->getRes()});
+    }
+    return result;
+  };
+  path_cost_=graph_search_->plan(convert(starts),convert(goals));
+  const auto path=graph_search_->getPath();
+  if (path.empty()) { status_=-1; return false; }
+  selected_start_anchor_=graph_search_->getStartAnchorIndex();
+  selected_goal_anchor_=graph_search_->getGoalAnchorIndex();
+  for (auto it=path.rbegin();it!=path.rend();++it) {
+    Veci<Dim> cell;
+    cell(0)=(*it)->x; cell(1)=(*it)->y;
+    if constexpr (Dim==3) cell(2)=(*it)->z;
+    raw_path_.push_back(map_util_->intToFloat(cell));
+  }
+  // Keep the certified coarse edges; only merge consecutive collinear steps.
+  path_=removeLinePts(raw_path_);
+  return true;
 }
 
 template class DMPlanner<2>;

@@ -2,6 +2,7 @@
 #include <array>
 #include <cstdint>
 #include <algorithm>
+#include <stdexcept>
 #include <distance_map_planner/graph_search.h>
 
 using namespace DMP;
@@ -34,8 +35,8 @@ constexpr auto kRequiredFreeMasks = requiredFreeMasks();
 
 GraphSearch::GraphSearch(const int8_t *cMap, int xDim, int yDim, double eps,
                          double cweight, bool verbose)
-    : cMap_(cMap), xDim_(xDim), yDim_(yDim), eps_(eps), cweight_(cweight),
-      verbose_(verbose) {
+    : cMap_(cMap), xDim_(xDim), yDim_(yDim), zDim_(1), eps_(eps), cweight_(cweight),
+      verbose_(verbose), use_2d_(true) {
   hm_.resize(xDim_ * yDim_);
   seen_.resize(xDim_ * yDim_, false);
 
@@ -51,7 +52,7 @@ GraphSearch::GraphSearch(const int8_t *cMap, int xDim, int yDim, double eps,
 GraphSearch::GraphSearch(const int8_t *cMap, int xDim, int yDim, int zDim,
                          double eps, double cweight, bool verbose)
     : cMap_(cMap), xDim_(xDim), yDim_(yDim), zDim_(zDim), eps_(eps),
-      cweight_(cweight), verbose_(verbose) {
+      cweight_(cweight), verbose_(verbose), use_2d_(false) {
   hm_.resize(xDim_ * yDim_ * zDim_);
   seen_.resize(xDim_ * yDim_ * zDim_, false);
 
@@ -84,12 +85,14 @@ inline bool GraphSearch::isFree(int x, int y, int z) const {
 }
 
 inline double GraphSearch::getHeur(int x, int y) const {
+  if (!goal_anchors_.empty()) return getAnchorHeur(x, y, 0);
   const int dx = std::abs(x - xGoal_), dy = std::abs(y - yGoal_);
   const int lo = std::min(dx, dy), hi = std::max(dx, dy);
   return eps_ * (hi + (std::sqrt(2.0) - 1.0) * lo);
 }
 
 inline double GraphSearch::getHeur(int x, int y, int z) const {
+  if (!goal_anchors_.empty()) return getAnchorHeur(x, y, z);
   // The unweighted 26-neighbour metric is consistent with every legal edge.
   // eps_ scales it for weighted A*; the scaled heuristic need not be consistent.
   const int dx = std::abs(x - xGoal_), dy = std::abs(y - yGoal_), dz = std::abs(z - zGoal_);
@@ -98,15 +101,37 @@ inline double GraphSearch::getHeur(int x, int y, int z) const {
   return eps_ * (hi + (std::sqrt(2.0) - 1.0) * mid + (std::sqrt(3.0) - std::sqrt(2.0)) * lo);
 }
 
-double GraphSearch::plan(int xStart, int yStart, int xGoal, int yGoal,
-                       std::vector<bool> in_region) {
-  use_2d_ = true;
+double GraphSearch::getAnchorHeur(int x, int y, int z) const {
+  double lower_bound = std::numeric_limits<double>::infinity();
+  for (const auto& goal : goal_anchors_) {
+    const int dx = std::abs(x-goal.x), dy = std::abs(y-goal.y);
+    double distance;
+    if (use_2d_) {
+      const int lo = std::min(dx,dy), hi = std::max(dx,dy);
+      distance = hi + (std::sqrt(2.0)-1.0)*lo;
+    } else {
+      const int dz = std::abs(z-goal.z);
+      const int lo = std::min({dx,dy,dz}), hi = std::max({dx,dy,dz});
+      const int mid = dx+dy+dz-lo-hi;
+      distance = hi + (std::sqrt(2.0)-1.0)*mid + (std::sqrt(3.0)-std::sqrt(2.0))*lo;
+    }
+    lower_bound = std::min(lower_bound, distance+goal.connector_cost);
+  }
+  return eps_*lower_bound;
+}
+
+void GraphSearch::resetSearch(std::vector<bool> in_region) {
   pq_.clear();
   path_.clear();
-  hm_.resize(xDim_ * yDim_);
-  seen_.resize(xDim_ * yDim_, false);
-  in_region_ = in_region;
-  if (in_region.empty()) {
+  const int cells = xDim_*yDim_*(use_2d_ ? 1 : zDim_);
+  hm_.assign(cells, nullptr);
+  seen_.assign(cells, false);
+  virtual_goal_id_ = selected_start_anchor_ = selected_goal_anchor_ = -1;
+  goal_anchors_.clear();
+  start_anchor_indices_.clear();
+  goal_anchor_indices_.clear();
+  in_region_ = std::move(in_region);
+  if (in_region_.empty()) {
     global_ = true;
     if (verbose_)
       printf("global planning!\n");
@@ -115,6 +140,12 @@ double GraphSearch::plan(int xStart, int yStart, int xGoal, int yGoal,
     if (verbose_)
       printf("local planning!\n");
   }
+}
+
+double GraphSearch::plan(int xStart, int yStart, int xGoal, int yGoal,
+                       std::vector<bool> in_region) {
+  use_2d_ = true;
+  resetSearch(std::move(in_region));
 
   // Set goal
   int goal_id = coordToId(xGoal, yGoal);
@@ -134,20 +165,7 @@ double GraphSearch::plan(int xStart, int yStart, int xGoal, int yGoal,
 double GraphSearch::plan(int xStart, int yStart, int zStart, int xGoal,
                          int yGoal, int zGoal, std::vector<bool> in_region) {
   use_2d_ = false;
-  pq_.clear();
-  path_.clear();
-  hm_.resize(xDim_ * yDim_ * zDim_);
-  seen_.resize(xDim_ * yDim_ * zDim_, false);
-  in_region_ = in_region;
-  if (in_region.empty()) {
-    global_ = true;
-    if (verbose_)
-      printf("global planning!\n");
-  } else {
-    global_ = false;
-    if (verbose_)
-      printf("local planning!\n");
-  }
+  resetSearch(std::move(in_region));
 
   // Set goal
   int goal_id = coordToId(xGoal, yGoal, zGoal);
@@ -165,6 +183,53 @@ double GraphSearch::plan(int xStart, int yStart, int zStart, int xGoal,
   return plan(currNode_ptr, start_id, goal_id);
 }
 
+double GraphSearch::plan(const std::vector<GridAnchor>& starts,
+                         const std::vector<GridAnchor>& goals) {
+  resetSearch({});
+  if (starts.empty() || goals.empty()) return std::numeric_limits<double>::infinity();
+  auto valid = [&](const GridAnchor& anchor) {
+    const bool free = use_2d_ ? anchor.z == 0 && isFree(anchor.x,anchor.y)
+                             : isFree(anchor.x,anchor.y,anchor.z);
+    return free && std::isfinite(anchor.connector_cost) && anchor.connector_cost >= 0;
+  };
+  for (const auto& anchor : starts)
+    if (!valid(anchor)) throw std::invalid_argument("Invalid DMP start anchor");
+  for (const auto& anchor : goals)
+    if (!valid(anchor)) throw std::invalid_argument("Invalid DMP goal anchor");
+
+  goal_anchors_ = goals;
+  for (int i=0;i<static_cast<int>(goals.size());++i) {
+    const auto& anchor=goals[i];
+    const int id=coordToId(anchor.x,anchor.y,anchor.z);
+    const auto found=goal_anchor_indices_.find(id);
+    if (found==goal_anchor_indices_.end() || anchor.connector_cost < goals[found->second].connector_cost)
+      goal_anchor_indices_[id]=i;
+  }
+  virtual_goal_id_=static_cast<int>(hm_.size());
+  auto virtual_goal=std::make_shared<State>(virtual_goal_id_,0,0,0);
+  virtual_goal->h=0.0;
+  hm_.push_back(virtual_goal);
+  seen_.push_back(true);
+  for (int i=0;i<static_cast<int>(starts.size());++i) {
+    const auto& anchor=starts[i];
+    const int id=coordToId(anchor.x,anchor.y,anchor.z);
+    const double g=anchor.connector_cost+cMap_[id];
+    auto& node=hm_[id];
+    if (!node) {
+      node=std::make_shared<State>(id,anchor.x,anchor.y,anchor.z);
+      node->h=getAnchorHeur(anchor.x,anchor.y,anchor.z);
+      seen_[id]=true;
+    }
+    if (g < node->g) {
+      node->g=g;
+      start_anchor_indices_[id]=i;
+      if (node->opened) pq_.increase(node->heapkey);
+      else { node->heapkey=pq_.push(node); node->opened=true; }
+    }
+  }
+  return search(-1,virtual_goal_id_);
+}
+
 double GraphSearch::plan(StatePtr &currNode_ptr, int start_id, int goal_id) {
   // Insert start node
   currNode_ptr->heapkey = pq_.push(currNode_ptr);
@@ -172,6 +237,11 @@ double GraphSearch::plan(StatePtr &currNode_ptr, int start_id, int goal_id) {
   hm_[currNode_ptr->id] = currNode_ptr;
   seen_[currNode_ptr->id] = true;
 
+  return search(start_id,goal_id);
+}
+
+double GraphSearch::search(int start_id, int goal_id) {
+  StatePtr currNode_ptr;
   int expand_iteration = 0;
   std::vector<int> succ_ids;
   std::vector<double> succ_costs;
@@ -196,6 +266,16 @@ double GraphSearch::plan(StatePtr &currNode_ptr, int start_id, int goal_id) {
     // Get successors
     getSucc(currNode_ptr, succ_ids, succ_costs);
 
+    int goal_anchor=-1;
+    if (virtual_goal_id_ >= 0) {
+      const auto found=goal_anchor_indices_.find(currNode_ptr->id);
+      if (found!=goal_anchor_indices_.end()) {
+        goal_anchor=found->second;
+        succ_ids.push_back(virtual_goal_id_);
+        succ_costs.push_back(goal_anchors_[goal_anchor].connector_cost);
+      }
+    }
+
     // Process successors
     for (int s = 0; s < (int)succ_ids.size(); s++) {
       // see if we can improve the value of succstate
@@ -207,6 +287,7 @@ double GraphSearch::plan(StatePtr &currNode_ptr, int start_id, int goal_id) {
       if (tentative_gval + 1e-12 < child_ptr->g) {
         child_ptr->parentId = currNode_ptr->id; // Assign new parent
         child_ptr->g = tentative_gval;          // Update gval
+        if (child_ptr->id == virtual_goal_id_) selected_goal_anchor_=goal_anchor;
 
         // double fval = child_ptr->g + child_ptr->h;
 
@@ -234,7 +315,13 @@ double GraphSearch::plan(StatePtr &currNode_ptr, int start_id, int goal_id) {
     printf("Expand [%d] nodes!\n", expand_iteration);
   }
 
-  path_ = recoverPath(currNode_ptr, start_id);
+  if (virtual_goal_id_ >= 0) {
+    // The virtual node is an endpoint connector, not a voxel waypoint.
+    path_=recoverPath(hm_[currNode_ptr->parentId],-1);
+    selected_start_anchor_=start_anchor_indices_.at(path_.back()->id);
+  } else {
+    path_ = recoverPath(currNode_ptr, start_id);
+  }
 
   return currNode_ptr->g;
 }
@@ -242,7 +329,7 @@ double GraphSearch::plan(StatePtr &currNode_ptr, int start_id, int goal_id) {
 std::vector<StatePtr> GraphSearch::recoverPath(StatePtr node, int start_id) {
   std::vector<StatePtr> path;
   path.push_back(node);
-  while (node && node->id != start_id) {
+  while (node && node->id != start_id && node->parentId >= 0) {
     node = hm_[node->parentId];
     // printf("waypoint g: %f, h: %f!\n", node->g, node->h);
     path.push_back(node);
@@ -316,7 +403,7 @@ std::vector<StatePtr> GraphSearch::getPath() const { return path_; }
 std::vector<StatePtr> GraphSearch::getOpenSet() const {
   std::vector<StatePtr> ss;
   for (const auto &it : hm_) {
-    if (it && it->opened && !it->closed)
+    if (it && it->id != virtual_goal_id_ && it->opened && !it->closed)
       ss.push_back(it);
   }
   return ss;
@@ -325,7 +412,7 @@ std::vector<StatePtr> GraphSearch::getOpenSet() const {
 std::vector<StatePtr> GraphSearch::getCloseSet() const {
   std::vector<StatePtr> ss;
   for (const auto &it : hm_) {
-    if (it && it->closed)
+    if (it && it->id != virtual_goal_id_ && it->closed)
       ss.push_back(it);
   }
   return ss;
@@ -334,7 +421,7 @@ std::vector<StatePtr> GraphSearch::getCloseSet() const {
 std::vector<StatePtr> GraphSearch::getAllSet() const {
   std::vector<StatePtr> ss;
   for (const auto &it : hm_) {
-    if (it)
+    if (it && it->id != virtual_goal_id_)
       ss.push_back(it);
   }
   return ss;

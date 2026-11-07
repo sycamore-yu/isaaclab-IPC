@@ -21,8 +21,10 @@ class PathCoverConfig:
     bounds_lower: tuple[float, float, float] = (-5.0, -20.0, 0.0)
     bounds_upper: tuple[float, float, float] = (60.0, 20.0, 10.0)
     resolution: float = 0.25
-    # Optional coarser JPS/DMP and RISP voxel geometry; mapping keeps resolution.
+    # Optional coarser DMP grid. RISP and local connections use the fine map.
     search_resolution: float | None = None
+    # Half-width in metres of the finite fine-grid endpoint connection box.
+    endpoint_connection_radius: float = 1.0
     robot_radius: float = 0.25
     robot_radius_z: float | None = None
     # Physical reference speed diagnostic. The cruise-speed penalty can use a
@@ -65,6 +67,8 @@ class PathCoverConfig:
     yaw_low_speed: float = 0.1
 
     def __post_init__(self):
+        if not math.isfinite(self.endpoint_connection_radius) or self.endpoint_connection_radius <= 0:
+            raise ValueError("PathCover endpoint_connection_radius must be finite and positive")
         nominal = min(3.0, self.max_velocity) if self.nominal_velocity is None else self.nominal_velocity
         if (not math.isfinite(self.max_velocity) or not math.isfinite(nominal)
                 or not 0 < nominal <= self.max_velocity):
@@ -252,9 +256,13 @@ class NativePathCoverFrontend:
         return self._native.inflated_cloud()
 
     def obstacle_boxes(self):
-        """Copy search/SFC AABBs as (centres[M,3], scalar half extent), for offline checks."""
+        """Copy authoritative fine SFC AABBs as (centres[M,3], scalar half extent)."""
+        return self._native.obstacle_centers(), 0.5 * self.config.resolution
+
+    def search_obstacle_boxes(self):
+        """Copy the conservatively coarsened DMP AABBs for search diagnostics."""
         resolution = self.config.native_options()["search_resolution"]
-        return self._native.obstacle_centers(), 0.5 * resolution
+        return self._native.search_obstacle_centers(), 0.5 * resolution
 
     def failed_problem(self):
         """Copy failure diagnostics on request; successful plans do not copy this data."""
@@ -333,6 +341,12 @@ class NativePathCoverFrontend:
             "jps_ms": result.jps_ms, "distance_map_ms": result.distance_map_ms,
             "dmp_ms": result.dmp_ms, "dmp_cost": result.dmp_cost,
             "search_backend": "global_dmp", "jps_ran": False,
+            "endpoint_connection_ms": result.endpoint_connection_ms,
+            "endpoint_connection_visited_cells": result.endpoint_connection_visited_cells,
+            "start_endpoint_anchors": result.start_endpoint_anchors,
+            "goal_endpoint_anchors": result.goal_endpoint_anchors,
+            "geometry_resolution_m": self.config.resolution,
+            "search_resolution_m": self.config.native_options()["search_resolution"],
             "trajectory_ms": result.trajectory_ms, "yaw_ms": yaw_ms, "total_ms": (perf_counter() - begin) * 1000,
             "time_initialization_ms": initialization["elapsed_ms"],
             "time_initialization_status": initialization["status"],
@@ -344,6 +358,7 @@ class NativePathCoverFrontend:
             "reference_margin_requested_m": self.config.safety_margin,
             "reference_margin_applied_per_corridor_m": np.asarray(result.applied_reference_margins).tolist(),
             "occupied_voxels": last_map.occupied_voxels, "inflated_voxels": last_map.inflated_voxels,
+            "geometry_boxes": last_map.geometry_boxes,
             "gpu_mapping": last_map.gpu_mapping, "gpu_inflation": last_map.gpu_inflation,
             "gpu_distance_map": result.gpu_distance_map,
             "speed_initial_m_s": result.initial_speed,

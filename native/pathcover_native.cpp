@@ -19,7 +19,9 @@
 #include "occupancy_inflation/point_cloud_inflater.h"
 #include "distance_map_planner/distance_map_planner.h"
 #include "gcopter_solver.hpp"
+#include "pathcover_boxes.h"
 #include "pathcover_grid.h"
+#include "pathcover_endpoint.h"
 #include "pathcover_yaw.h"
 #ifdef OCCUPANCY_INFLATION_WITH_CUDA
 #include "pathcover_distance_map.h"
@@ -61,7 +63,7 @@ struct Options {
     Vec3 lower, upper;
     double resolution, search_resolution, radius, radius_z, max_velocity, nominal_velocity, mass, gravity;
     double thrust_min, thrust_max, body_rate_max, tilt_max;
-    double potential_radius, dmp_heuristic_weight, time_weight, safety_margin;
+    double potential_radius, dmp_heuristic_weight, time_weight, safety_margin, endpoint_connection_radius;
     double relative_tolerance, alpha, position_penalty_smoothing;
     int horizon, pieces_per_polytope, integral_resolution, max_iterations, num_threads;
     std::size_t cuda_min_grid_voxels;
@@ -73,6 +75,7 @@ struct Options {
         upper = values["bounds_upper"].cast<Vec3>();
         resolution = values["resolution"].cast<double>();
         search_resolution = values["search_resolution"].cast<double>();
+        endpoint_connection_radius = values["endpoint_connection_radius"].cast<double>();
         radius = values["robot_radius"].cast<double>();
         radius_z = values["robot_radius_z"].cast<double>();
         max_velocity = values["max_velocity"].cast<double>();
@@ -104,7 +107,7 @@ struct Options {
 
 struct MappingStats {
     double mapping_ms = 0.0, inflation_ms = 0.0, grid_ms = 0.0;
-    std::size_t occupied_voxels = 0, inflated_voxels = 0;
+    std::size_t occupied_voxels = 0, inflated_voxels = 0, geometry_boxes = 0;
     bool gpu_mapping = false, gpu_inflation = false;
 };
 
@@ -119,6 +122,8 @@ struct PlanResult {
     Eigen::Matrix<double, 6, 1> constraint_metrics = Eigen::Matrix<double, 6, 1>::Zero();
     double cost = 0.0, search_ms = 0.0, corridor_ms = 0.0, trajectory_ms = 0.0;
     double jps_ms = 0.0, distance_map_ms = 0.0, dmp_ms = 0.0, dmp_cost = 0.0;
+    double endpoint_connection_ms = 0.0;
+    std::size_t endpoint_connection_visited_cells = 0, start_endpoint_anchors = 0, goal_endpoint_anchors = 0;
     double initial_speed = 0.0, speed_acceptance_limit = 0.0;
     int optimizer_status = 0;
     bool gpu_distance_map = false;
@@ -165,6 +170,7 @@ class NativeFrontend {
     Vec3 center_lower_, center_upper_, grid_origin_;
     std::vector<int> occupied_indices_;
     std::vector<Vec3> obstacle_centers_;
+    std::vector<Vec3> geometry_box_centers_, geometry_box_halfwidths_;
     MappingStats last_update_;
     bool map_dirty_ = true;
     std::optional<OptimizationFailure> failed_problem_;
@@ -179,6 +185,7 @@ class NativeFrontend {
 public:
     explicit NativeFrontend(const py::dict &values) : options_(values) {
         if (options_.resolution <= 0 || options_.search_resolution < options_.resolution
+            || !std::isfinite(options_.endpoint_connection_radius) || options_.endpoint_connection_radius <= 0
             || (options_.upper.array() <= options_.lower.array()).any()
             || options_.horizon < 1 || options_.pieces_per_polytope < 1
             || options_.mass <= 0 || !std::isfinite(options_.max_velocity) || options_.max_velocity <= 0
@@ -193,17 +200,19 @@ public:
             throw std::invalid_argument("Invalid native PathCover configuration");
         }
         const Vec3 clearance(options_.radius, options_.radius, options_.radius_z);
-        // Mapping, search and geometry share a lattice anchored at world zero.
-        // Round the body's usable workspace inward to complete free grid cells.
+        // Both lattices are world-zero anchored. Physical SFC/seed/connector
+        // bounds are exact; only the coarse search rounds inward to free cells.
         grid_origin_index_ = (options_.lower.array() / options_.search_resolution)
             .floor().cast<int>().matrix();
         grid_origin_ = grid_origin_index_.cast<double>() * options_.search_resolution;
         grid_resolution_ratio_ = pathcover_grid::resolutionRatio(options_.resolution, options_.search_resolution);
-        center_lower_ = (((options_.lower + clearance).array() / options_.search_resolution)
+        center_lower_ = options_.lower + clearance;
+        center_upper_ = options_.upper - clearance;
+        const Vec3 search_lower = ((center_lower_.array() / options_.search_resolution)
             .ceil()).matrix() * options_.search_resolution;
-        center_upper_ = (((options_.upper - clearance).array() / options_.search_resolution)
+        const Vec3 search_upper = ((center_upper_.array() / options_.search_resolution)
             .floor()).matrix() * options_.search_resolution;
-        if ((center_upper_.array() <= center_lower_.array()).any()) {
+        if ((search_upper.array() <= search_lower.array()).any()) {
             throw std::invalid_argument("PathCover body clearance leaves no workspace");
         }
         make_map();
@@ -237,8 +246,8 @@ public:
                 for (int x = 0; x < dimensions_.x(); ++x) {
                     const Vec3 center = grid_origin_
                         + (Vec3(x, y, z).array() + 0.5).matrix() * options_.search_resolution;
-                    if ((center.array() < center_lower_.array()).any()
-                        || (center.array() > center_upper_.array()).any()) {
+                    if ((center.array() < search_lower.array()).any()
+                        || (center.array() > search_upper.array()).any()) {
                         empty[x + dimensions_.x() * (y + dimensions_.y() * z)] = 100;
                     }
                 }
@@ -266,6 +275,8 @@ public:
         inflater_.reset();
         VoxelGrid::resetOccupancy(grid_->map_, occupied_indices_);
         obstacle_centers_.clear();
+        geometry_box_centers_.clear();
+        geometry_box_halfwidths_.clear();
         map_dirty_ = true;
         last_update_ = MappingStats{};
     }
@@ -305,8 +316,22 @@ public:
                 obstacle_centers_.push_back(grid_origin_
                     + (Vec3(x, y, z).array() + 0.5).matrix() * options_.search_resolution);
             }
+            // Exact union of inflated fine cells. Integer runs are merged without
+            // filling gaps; no point-cloud serialization or second inflation.
+            const auto boxes = pathcover_boxes::compress(inflater_.outputGrid());
+            geometry_box_centers_.clear();
+            geometry_box_halfwidths_.clear();
+            geometry_box_centers_.reserve(boxes.size());
+            geometry_box_halfwidths_.reserve(boxes.size());
+            for (const auto& box : boxes) {
+                geometry_box_centers_.push_back(
+                    (box.lower.cast<double>() + box.upper.cast<double>()) * (0.5 * options_.resolution));
+                geometry_box_halfwidths_.push_back(
+                    (box.upper - box.lower).cast<double>() * (0.5 * options_.resolution));
+            }
             map_dirty_ = true;
         }
+        last_update_.geometry_boxes = geometry_box_centers_.size();
         last_update_.grid_ms = milliseconds(grid_begin);
         return last_update_;
     }
@@ -322,6 +347,16 @@ public:
     }
 
     Points obstacle_centers() const {
+        // Diagnostics expose the original fine cells, independent of the exact
+        // box partition used by RISP. This copy is outside the planning path.
+        const auto centers = pathcover_endpoint::FineGeometry(
+            inflater_.outputGrid(), options_.resolution, center_lower_, center_upper_).occupiedCenters();
+        Points output(centers.size(), 3);
+        for (std::size_t i = 0; i < centers.size(); ++i) output.row(i) = centers[i];
+        return output;
+    }
+
+    Points search_obstacle_centers() const {
         Points output(obstacle_centers_.size(), 3);
         for (std::size_t i = 0; i < obstacle_centers_.size(); ++i) output.row(i) = obstacle_centers_[i];
         return output;
@@ -413,18 +448,32 @@ public:
             || (goal.array() > center_upper_.array()).any()) {
             throw PathCoverPlanningError("PathCover state or goal violates workspace body clearance");
         }
-        if (grid_->isOccupied(grid_->floatToInt(position))
-            || grid_->isOccupied(grid_->floatToInt(goal))) {
-            throw PathCoverPlanningError("PathCover start or goal lies in inflated occupancy");
-        }
         PlanResult result;
         result.initial_speed = velocity.norm();
         result.speed_acceptance_limit = speedAcceptanceLimit(options_.max_velocity);
         const auto search_begin = Clock::now();
+        const pathcover_endpoint::FineGeometry fine_geometry(
+            inflater_.outputGrid(), options_.resolution, center_lower_, center_upper_);
+        if (!fine_geometry.pointFree(position) || !fine_geometry.pointFree(goal)) {
+            throw PathCoverPlanningError("PathCover start or goal lies in inflated occupancy");
+        }
         std::vector<Vec3> path;
         if ((goal - position).norm() < 1e-8) {
             path.push_back(position);
         } else {
+            const pathcover_endpoint::CoarseGrid coarse{
+                grid_->map_, dimensions_, grid_origin_, options_.search_resolution};
+            const auto start_connections = pathcover_endpoint::connect(
+                position, fine_geometry, coarse, options_.endpoint_connection_radius);
+            const auto goal_connections = pathcover_endpoint::connect(
+                goal, fine_geometry, coarse, options_.endpoint_connection_radius);
+            result.endpoint_connection_visited_cells = start_connections.visited_cells + goal_connections.visited_cells;
+            result.start_endpoint_anchors = start_connections.anchors.size();
+            result.goal_endpoint_anchors = goal_connections.anchors.size();
+            result.endpoint_connection_ms = milliseconds(search_begin);
+            if (start_connections.anchors.empty() || goal_connections.anchors.empty()) {
+                throw PathCoverPlanningError("PathCover endpoint has no fine-grid connection to the coarse graph within endpoint_connection_radius");
+            }
             const auto distance_map_begin = Clock::now();
             if (map_dirty_) {
 #ifdef OCCUPANCY_INFLATION_WITH_CUDA
@@ -440,16 +489,37 @@ public:
             map_dirty_ = false;
             result.distance_map_ms = milliseconds(distance_map_begin);
             const auto dmp_begin = Clock::now();
-            if (!dmp_->computeGlobalPath(position, goal)) {
+            const bool ordinary_endpoints = start_connections.endpoint_in_coarse_free_cell
+                && goal_connections.endpoint_in_coarse_free_cell;
+            bool found;
+            if (ordinary_endpoints) {
+                // Preserve the original single-source/single-goal path and cost.
+                found = dmp_->computeGlobalPath(position, goal);
+            } else {
+                DMPlanner<3>::EndpointAnchors starts, goals;
+                for (const auto& anchor : start_connections.anchors) starts.emplace_back(anchor.coarse_index, anchor.length);
+                for (const auto& anchor : goal_connections.anchors) goals.emplace_back(anchor.coarse_index, anchor.length);
+                found = dmp_->computeGlobalPath(starts, goals);
+            }
+            if (!found) {
                 throw PathCoverPlanningError("PathCover global DMP did not find a path");
             }
             result.dmp_ms = milliseconds(dmp_begin);
             result.dmp_cost = dmp_->getPathCost();
-            path.push_back(position);
-            for (const auto &p : dmp_->getRawPath()) {
-                if ((p - path.back()).norm() > 1e-9) path.push_back(p);
+            auto append_point = [&](const Vec3& point) {
+                if (path.empty() || (point - path.back()).norm() > 1e-9) path.push_back(point);
+            };
+            if (ordinary_endpoints) append_point(position);
+            else {
+                const auto& connection = start_connections.anchors.at(dmp_->getStartAnchorIndex());
+                for (const auto& point : connection.points) append_point(point);
             }
-            if ((goal - path.back()).norm() > 1e-9) path.push_back(goal);
+            for (const auto& point : dmp_->getRawPath()) append_point(point);
+            if (ordinary_endpoints) append_point(goal);
+            else {
+                const auto& connection = goal_connections.anchors.at(dmp_->getGoalAnchorIndex());
+                for (auto it = connection.points.rbegin(); it != connection.points.rend(); ++it) append_point(*it);
+            }
         }
         result.search_ms = milliseconds(search_begin);
         result.path.resize(path.size(), 3);
@@ -467,9 +537,10 @@ public:
         std::vector<Vec3> seeds;
         std::vector<std::vector<int>> decay;
         PathCover::setRandomSeed(options_.random_seed);
+        sdlp::permutation_rng.seed(options_.random_seed);
         try {
-            PathCover::pathCover<double, 3>(obstacle_centers_, path, bounds_A, bounds_b,
-                As, bs, seeds, decay, options_.horizon, options_.alpha, 0.5 * options_.search_resolution, seed_region);
+            PathCover::pathCover<double, 3>(geometry_box_centers_, path, bounds_A, bounds_b,
+                As, bs, seeds, decay, options_.horizon, options_.alpha, geometry_box_halfwidths_, seed_region);
         } catch (const PathCover::SeedRegionCollision &error) {
             throw PathCoverPlanningError(error.what());
         }
@@ -613,6 +684,7 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def_readonly("grid_ms", &MappingStats::grid_ms)
         .def_readonly("occupied_voxels", &MappingStats::occupied_voxels)
         .def_readonly("inflated_voxels", &MappingStats::inflated_voxels)
+        .def_readonly("geometry_boxes", &MappingStats::geometry_boxes)
         .def_readonly("gpu_mapping", &MappingStats::gpu_mapping)
         .def_readonly("gpu_inflation", &MappingStats::gpu_inflation);
     py::class_<PlanResult>(m, "PlanResult")
@@ -638,6 +710,10 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def_readonly("distance_map_ms", &PlanResult::distance_map_ms)
         .def_readonly("dmp_ms", &PlanResult::dmp_ms)
         .def_readonly("dmp_cost", &PlanResult::dmp_cost)
+        .def_readonly("endpoint_connection_ms", &PlanResult::endpoint_connection_ms)
+        .def_readonly("endpoint_connection_visited_cells", &PlanResult::endpoint_connection_visited_cells)
+        .def_readonly("start_endpoint_anchors", &PlanResult::start_endpoint_anchors)
+        .def_readonly("goal_endpoint_anchors", &PlanResult::goal_endpoint_anchors)
         .def_readonly("corridor_ms", &PlanResult::corridor_ms)
         .def_readonly("trajectory_ms", &PlanResult::trajectory_ms);
     py::class_<NativeFrontend>(m, "NativeFrontend")
@@ -647,6 +723,7 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def("plan", &NativeFrontend::plan, py::call_guard<py::gil_scoped_release>())
         .def("inflated_cloud", &NativeFrontend::inflated_cloud, py::call_guard<py::gil_scoped_release>())
         .def("obstacle_centers", &NativeFrontend::obstacle_centers, py::call_guard<py::gil_scoped_release>())
+        .def("search_obstacle_centers", &NativeFrontend::search_obstacle_centers, py::call_guard<py::gil_scoped_release>())
         .def("map_fingerprint", &NativeFrontend::map_fingerprint, py::call_guard<py::gil_scoped_release>())
         .def("potential_map", &NativeFrontend::potential_map, py::call_guard<py::gil_scoped_release>())
         .def("failed_problem", &NativeFrontend::failed_problem)

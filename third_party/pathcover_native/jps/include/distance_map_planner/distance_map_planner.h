@@ -15,6 +15,9 @@ class GraphSearch;
  */
 template <int Dim> class DMPlanner {
 public:
+  /// Coarse integer cell and validated connector polyline length in metres.
+  using EndpointAnchor = std::pair<Veci<Dim>, decimal_t>;
+  using EndpointAnchors = vec_E<EndpointAnchor>;
   /**
    * @brief Simple constructor
    * @param verbose enable debug mode
@@ -100,6 +103,15 @@ public:
   bool computePath(const Vecf<Dim>& start, const Vecf<Dim>& goal, const vec_Vecf<Dim>& path);
   /// Search the complete installed map with the same legal graph and costs, without a prior path.
   bool computeGlobalPath(const Vecf<Dim>& start, const Vecf<Dim>& goal);
+  /// Search between validated endpoint connectors. Raw output contains only the
+  /// selected coarse cell centres, including both anchors; the caller appends
+  /// its fine-grid connector polylines. Path cost keeps the legacy grid units:
+  /// connector lengths are divided by map resolution and the original start
+  /// potential and coarse edge charges are retained.
+  bool computeGlobalPath(const EndpointAnchors& starts, const EndpointAnchors& goals);
+  /// Original input-list indices from the latest multi-anchor search; -1 otherwise.
+  int getStartAnchorIndex() const { return selected_start_anchor_; }
+  int getGoalAnchorIndex() const { return selected_goal_anchor_; }
 protected:
   /// Create the mask for potential distance field
   vec_E<std::pair<Veci<Dim>, int8_t>> createMask(int pow, double resolution);
@@ -134,6 +146,7 @@ protected:
   vec_Vecf<Dim> path_;
   /// Flag indicating the success of planning
   int status_ = 0;
+  int selected_start_anchor_ = -1, selected_goal_anchor_ = -1;
   /// max potential value
   int8_t H_MAX{100};
   /// heuristic weight
