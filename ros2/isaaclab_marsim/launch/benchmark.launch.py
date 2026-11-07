@@ -56,14 +56,18 @@ def start(context):
     else:
         if policy == "acmpc" and not value("checkpoint"):
             raise ValueError("policy:=acmpc requires checkpoint:=/absolute/path/model.pt")
+        native_ctbr = policy in ("fixed-ctbr", "acmpc")
         policy_command = [
-            python, "-m", "isaaclab_ipc.ros_policy", "--ros-args",
-            "-p", f"policy:={'fixed' if policy == 'ipc' else 'acmpc'}",
+            python, "-m", "isaaclab_ipc.ros_ctbr_policy" if native_ctbr else "isaaclab_ipc.ros_policy", "--ros-args",
+            "-p", f"policy:={policy if native_ctbr else 'fixed'}",
             "-p", f"execution:={execution}", "-p", f"benchmark:={benchmark}",
             "-p", f"output_directory:={output}/policy",
             "-p", f"simulated_time:={'true' if simulated else 'false'}",
             "-p", f"use_sim_time:={'true' if simulated else 'false'}",
         ]
+        if native_ctbr:
+            policy_command += ["-p", f"frontend:={value('frontend')}",
+                               "-p", f"reference_speed:={float(value('reference_speed'))}"]
         if value("checkpoint"):
             policy_command += ["-p", f"checkpoint:={value('checkpoint')}"]
         controller = ExecuteProcess(cmd=policy_command, output="screen")
@@ -100,7 +104,10 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("execution", default_value="ideal", choices=["ideal", "dynamic"]),
         DeclareLaunchArgument("time_mode", default_value="wall", choices=["wall", "sim"]),
-        DeclareLaunchArgument("policy", default_value="super", choices=["super", "ipc", "acmpc"]),
+        DeclareLaunchArgument("policy", default_value="fixed-ctbr", choices=["super", "ipc", "fixed-ctbr", "acmpc"]),
+        DeclareLaunchArgument("frontend", default_value="pathcover", choices=["pathcover", "none"]),
+        DeclareLaunchArgument("reference_speed", default_value="6.0",
+                              description="Native PathCover maximum reference speed in m/s"),
         DeclareLaunchArgument("benchmark", default_value="high_speed", choices=["high_speed", "dense"]),
         DeclareLaunchArgument("checkpoint", default_value=""),
         DeclareLaunchArgument("executor_parameters", default_value="", description="Optional Flightmare ROS parameter YAML"),

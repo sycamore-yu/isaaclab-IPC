@@ -1,5 +1,11 @@
 # TurboMPC 原生 PyTorch 求解器
 
+新 AC-MPC 主线遵循 [ADR-0008](adr/0008-native-acmpc-pathcover.md)。
+它采用 28N 成本、默认 N=5，并复用本文的原生求解器。
+当前 Actor 不启用 CTBRPolisher，也不使用恢复控制。
+下文关于旧 CTBR Actor 默认修正与恢复的描述属于历史实现。
+当前配置、IR2 构建和实测数据见 [原生 AC-MPC 验证](acmpc-native-validation.md)。
+
 本目录实现结构化多重打靶 MPC。原生求解路径只使用 PyTorch、CUDA 和 cuDSS；
 JAX 仅用于独立对照。
 

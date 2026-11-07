@@ -173,7 +173,10 @@ class _ImplicitTrajectory(torch.autograd.Function):
         x0, d, e, q, g, lower, upper, z, lambda0, lambda_dyn, y, status = ctx.saved_tensors[:12]
         active_mask = ctx.saved_tensors[12] if ctx.has_active_mask else None
         non_parameter_gradients = (None,) * (len(ctx.needs_input_grad) - 7)
-        inputs = MPCInputs(x0, d, e, q, g, lower, upper)
+        # The implicit derivative is returned explicitly below. Saved cost
+        # tensors need no nested autograd graph here. Detach both all-good and
+        # mixed-status paths so they share compiled requires_grad metadata.
+        inputs = MPCInputs(*(value.detach() for value in (x0, d, e, q, g, lower, upper)))
         good = status == 0
         if good.all():
             safe_inputs, z_safe, ld_safe, y_safe = inputs, z, lambda_dyn, y

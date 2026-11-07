@@ -13,24 +13,22 @@ def advance_scene(env, env_ids):
         p = pose[:, :3] - env.scene.env_origins
         near = torch.abs(p[:, 0] - 6.9) <= env.cfg.obstacle_distance
         end = torch.round(env.elapsed * 1000).long()
-        for offset in range(-9, 1):
-            tick = end + offset
-            valid = tick >= 0
-            periodic = valid & (tick % 101 == 0)
-            activate = periodic & near & ~env.obstacle_active
-            env.target_y.copy_(torch.where(activate, p[:, 1], env.target_y))
-            env.obstacle_y.copy_(torch.where(activate, p[:, 1] + 1.0, env.obstacle_y))
-            env.obstacle_active |= activate
-            env.obstacle_y.copy_(
-                torch.where(
-                    periodic & env.obstacle_active,
-                    torch.maximum(env.obstacle_y - 1.0, env.target_y),
-                    env.obstacle_y,
-                )
-            )
-            first = valid & near & ~env.triggered
-            env.obstacle_y.copy_(torch.where(first, torch.maximum(env.obstacle_y - 1.0, env.target_y), env.obstacle_y))
-            env.triggered |= first
+        start = (torch.round((env.elapsed - env.step_dt) * 1000).long() + 1).clamp_min(0)
+        # Count the original 101 ms events over this control interval. This
+        # preserves their discrete semantics at both 100 Hz and 10 Hz without
+        # launching a Python/Torch loop for every elapsed millisecond.
+        periodic_count = (torch.div(end, 101, rounding_mode="floor")
+                          - torch.div(start - 1, 101, rounding_mode="floor")).clamp_min(0)
+        first = (end >= start) & near & ~env.triggered
+        activate = (periodic_count > 0) & near & ~env.obstacle_active
+        decrement = periodic_count * env.obstacle_active + first
+        moved = torch.where(decrement > 0, torch.maximum(env.obstacle_y - decrement, env.target_y), env.obstacle_y)
+        # Activation starts one metre away and consumes its first periodic
+        # one-metre movement in the same tick, ending at the sampled target.
+        env.target_y.copy_(torch.where(activate, p[:, 1], env.target_y))
+        env.obstacle_y.copy_(torch.where(activate, p[:, 1], moved))
+        env.obstacle_active |= activate
+        env.triggered |= first
         obs = env.scene["obstacle"]
         obstacle_pose = obs.data.default_root_pose.torch.clone()
         obstacle_pose[:, :3] += env.scene.env_origins

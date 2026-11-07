@@ -36,7 +36,14 @@ class AutoDiffDynamics:
     def __init__(self, step: Callable[[torch.Tensor], torch.Tensor], *, nx: int):
         self.nx = nx
         self._step = torch.vmap(step)
-        self._jacobian = torch.vmap(torch.func.jacrev(step))
+
+        def value_with_auxiliary(z):
+            value = step(z)
+            return value, value
+
+        # jacrev already evaluates the step. Return that value as auxiliary data
+        # instead of launching the nonlinear dynamics a second time per node.
+        self._value_and_jacobian = torch.vmap(torch.func.jacrev(value_with_auxiliary, has_aux=True))
         # Reverse-over-reverse avoids forward-AD inference-tensor failures in
         # Torch 2.11 compiled backward, while retaining the exact Hessian.
         gradient = torch.func.jacrev(lambda z, lam: (step(z) * lam).sum(), argnums=0)
@@ -47,9 +54,8 @@ class AutoDiffDynamics:
 
     def linearize(self, z):
         flat = z.reshape(-1, z.shape[-1])
-        value = self._step(flat).reshape(*z.shape[:-1], self.nx)
-        jacobian = self._jacobian(flat).reshape(*z.shape[:-1], self.nx, z.shape[-1])
-        return value, jacobian
+        jacobian, value = self._value_and_jacobian(flat)
+        return value.reshape(*z.shape[:-1], self.nx), jacobian.reshape(*z.shape[:-1], self.nx, z.shape[-1])
 
     def lagrangian_hessian(self, z, multipliers):
         return self._hessian(z.reshape(-1, z.shape[-1]), multipliers.reshape(-1, self.nx)).reshape(

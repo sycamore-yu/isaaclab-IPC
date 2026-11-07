@@ -88,8 +88,11 @@ struct SparseKktWorkspace {
         cudss_allocator = allocator;
         CUDSS_CHECK(turbompc::SetCudssDeviceMemory(handle, cudss_allocator));
         CUDSS_CHECK(cudssConfigCreate(&config));
-        // Keep cuDSS's default iterative-refinement configuration, matching
-        // the unmodified upstream KKT solver (IR_N_STEPS defaults to zero).
+        // Two native residual corrections reuse the factorization. The default
+        // IR0 solve loses cost-gradient accuracy for small batched RHS values.
+        int ir_steps = 2;
+        CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_IR_N_STEPS,
+                                   &ir_steps, sizeof(ir_steps)));
         CUDSS_CHECK(cudssDataCreate(handle, &data));
         cudssReorderingAlg_t reorder_alg = CUDSS_REORDERING_ALG_DEFAULT;
         CUDSS_CHECK(cudssConfigSet(config, CUDSS_CONFIG_REORDERING_ALG,

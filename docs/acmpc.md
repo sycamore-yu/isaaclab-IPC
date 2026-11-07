@@ -1,4 +1,9 @@
-# 用学习成本驱动 IPC
+# 历史学习成本 IPC
+
+2026-11-07 的新主线使用完整原生 PathCover、28N 成本与 10D CTBR。
+当前接口见 [ADR-0008](adr/0008-native-acmpc-pathcover.md) 和 [统一入口](../README.md)。
+下文保留此前 9D jerk / 7 参数实现的历史记录。
+其检查点、特征维度和恢复规则不适用于新主线。
 
 默认走廊已改为 PathCover/RISP，见 [走廊说明](pathcover.md)。
 本页已完成的训练、场景结果及 RRD 均来自切换前的走廊版本。

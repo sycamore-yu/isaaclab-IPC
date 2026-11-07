@@ -1,5 +1,7 @@
 # MARSIM ROS 2 评测
 
+新 AC-MPC 分支按 [ADR-0008](adr/0008-native-acmpc-pathcover.md) 使用 `--policy fixed-ctbr` 或 `--policy acmpc`，直接执行 4D CTBR。`--frontend none` 选择 A0；默认 `pathcover` 选择完整原生前端。以下历史记录中的 124D jerk 检查点和二重轨迹验收不属于新 CTBR 路径。
+
 **当前状态：SUPER 的 ideal high_speed、ideal dense 和 dynamic high_speed 已完成完整往返。动态基本动作及实际 LiDAR 验证通过。AC-MPC 和固定 IPC 已实测约 100 Hz CTBR 输出。dynamic dense 仍碰撞，最新 Python 策略任务均超时，不能认定全部导航验收完成。最新证据见第 11 节。**
 
 MARSIM 负责正式评测，提供 `ideal` 和 `dynamic` 两种执行模式。Isaac Lab/Newton 继续使用原训练入口。ROS 节点复用项目的 Planner、PathCover/RISP、MPCActor 和 QP，不启动 Isaac Lab 仿真进程。本文记录当前实现、复现方法和实际成功／失败结果。

@@ -22,7 +22,6 @@ from isaaclab_tasks.utils.hydra import resolve_task_config
 from tensordict import TensorDict
 
 import isaaclab_ipc.tasks  # noqa: F401
-from isaaclab_ipc.planner import Planner
 
 
 def _audit_snapshot(value):
@@ -78,6 +77,7 @@ class TrainingAudit:
         "planner_context",
         "planner_update_cloud",
         "planner_consume_recovery",
+        "native_frontend_plan",
     )
 
     def __init__(self, algorithm, env, actor, planner_type, output):
@@ -273,6 +273,7 @@ class TrainingAudit:
                     costs=costs,
                     result=result,
                     native_result=native,
+                    solver_config=module.solver_metadata(),
                 )
             )
             with path.open("xb") as handle:
@@ -336,8 +337,13 @@ class TrainingAudit:
             self._patch(self.env.unwrapped, "record_mpc_result", self._guard("record_mpc_result"))
             self._patch(self.env, "step", self._guard("env_step"))
             self._patch(self.env.unwrapped, "_reset_idx", self._guard("reset"))
-            for name in ("context", "update_cloud", "consume_recovery"):
-                self._patch(self.planner_type, name, self._guard("planner_" + name))
+            if self.planner_type is not None:
+                for name in ("context", "update_cloud", "consume_recovery"):
+                    self._patch(self.planner_type, name, self._guard("planner_" + name))
+            if getattr(self.env.unwrapped, "navigation", None) is not None:
+                from isaaclab_ipc.pathcover_native import NativePathCoverFrontend
+
+                self._patch(NativePathCoverFrontend, "plan", self._guard("native_frontend_plan"))
             self._patch(self.algorithm, "update", self._update)
             hook = self.actor.register_forward_pre_hook(self._actor_forward, with_kwargs=True)
             self._stack.callback(hook.remove)
@@ -414,7 +420,7 @@ def verify_checkpoint(runner, env, actor, checkpoint, device, audit=None):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("mode", choices=("train", "evaluate"))
-    parser.add_argument("--task", default="Isaac-IPC-Avoid-ACMPC-Direct")
+    parser.add_argument("--task", default="Isaac-ACMPC-CTBR-Direct")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--num-envs", type=int)
     parser.add_argument("--iterations", type=int)
@@ -449,6 +455,13 @@ def main():
     if args.record and (env_cfg.scene.num_envs != 1 or env_cfg.scenario != "forest"):
         parser.error("--record requires one forest environment")
     runner_config = handle_deprecated_rsl_rl_cfg(agent_cfg, version("rsl-rl-lib"))
+    if getattr(env_cfg, "ctbr_model", None) is not None:
+        from isaaclab_ipc.rl.ctbr_observation import ctbr_feature_size
+
+        runner_config.actor.model_config = dict(env_cfg.ctbr_model)
+        runner_config.actor.cost_nodes = env_cfg.ctbr_model["cost_nodes"]
+        runner_config.actor.prediction_dt = env_cfg.ctbr_model["dt"]
+        env_cfg.observation_space = ctbr_feature_size(env_cfg.ctbr_model["cost_nodes"])
     agent_cfg = runner_config.to_dict()
     env_cfg.seed = agent_cfg["seed"]
     device = env_cfg.sim.device
@@ -489,7 +502,12 @@ def main():
         start = perf_counter()
         if args.mode == "train":
             if args.audit_training:
-                audit = TrainingAudit(runner.alg, env, actor, Planner, args.output / "training-audit.json")
+                planner_type = None
+                if hasattr(env.unwrapped, "planners"):
+                    from isaaclab_ipc.planner import Planner
+
+                    planner_type = Planner
+                audit = TrainingAudit(runner.alg, env, actor, planner_type, args.output / "training-audit.json")
             with audit if audit is not None else nullcontext():
                 runner.learn(agent_cfg["max_iterations"])
                 runner.save(
@@ -540,6 +558,7 @@ def main():
                             torch.save(
                                 dict(
                                     observation=obs.cpu(),
+                                    solver_config=actor.solver_metadata(),
                                     problem_rows=unsolved.nonzero().flatten().cpu(),
                                     problem={name: value.detach().cpu() for name, value in problem.items()},
                                     result={
@@ -567,7 +586,7 @@ def main():
                                 dict(
                                     evaluation_seed=seed,
                                     steps=step_index + 1,
-                                    position=obs["mpc_state"][:, :3].cpu().tolist(),
+                                    position=obs["ctbr_state" if "ctbr_state" in obs else "mpc_state"][:, :3].cpu().tolist(),
                                     solved=actor.last_result["solved"].cpu().tolist(),
                                     braking=actor.last_result["braking"].cpu().tolist(),
                                 )
@@ -607,7 +626,16 @@ def main():
         if hasattr(env.unwrapped, "ctbr_runtime_contract"):
             metrics["physical_model_contract"] = env.unwrapped.ctbr_runtime_contract
         metrics["wall_s"] = perf_counter() - start
-        metrics["frontend_mean_ms"] = float(np.mean(env.unwrapped.frontend_times))
+        metrics["frontend_mean_ms"] = float(np.mean(env.unwrapped.frontend_times)) if env.unwrapped.frontend_times else 0.0
+        navigation = getattr(env.unwrapped, "navigation", None)
+        if navigation is not None:
+            batches = navigation.frontend_batch_times_ms
+            metrics["frontend_batch_time_ms"] = {
+                "count": len(batches),
+                "mean": float(np.mean(batches)) if batches else None,
+                "p95": float(np.percentile(batches, 95)) if batches else None,
+                "scope": "All environments: native plans and reference/SFC sampling",
+            }
         (args.output / "records.json").write_text(json.dumps(env.unwrapped.records, indent=2))
         (args.output / "metrics.json").write_text(json.dumps(metrics, indent=2))
         print(json.dumps(metrics), flush=True)

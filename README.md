@@ -1,67 +1,63 @@
 # Isaac Lab IPC
 
-本项目维护两条无人机导航路径：**固定成本 IPC** 和 **学习成本 AC-MPC**。两者共用 IPC 前端、PathCover/RISP 安全飞行走廊和原生 TurboMPC 求解器；区别只有 MPC 成本是否由策略网络学习。
+本分支建立原生 **AC-MPC + PathCover** 导航主线。Isaac Lab / Newton 负责物理、LiDAR 和 PPO 训练；MARSIM / Flightmare 负责正式评测。架构决策见 [ADR-0008](docs/adr/0008-native-acmpc-pathcover.md)。
 
-| 路径 | 成本 | 求解器 | 输出 |
+| 配置 | 前端 | 成本 | 输出 |
 | --- | --- | --- | --- |
-| IPC | 原 IPC 固定二次成本 | TurboMPC CUDA | 15 步 jerk → 4D CTBR |
-| AC-MPC | 124 维观测 → 7 个学习成本参数 | 同一个 TurboMPC CUDA | 15 步 jerk → 4D CTBR |
+| A0 | 目标观测，无几何前端 | 逐节点学习成本 | TurboMPC → 4D CTBR |
+| A1 | 完整原生 PathCover | 固定二次成本 | 同一 TurboMPC → 4D CTBR |
+| A2 | 与 A1 相同 | 逐节点学习成本 | 同一 TurboMPC → 4D CTBR |
 
-```text
-Mid-360 点云 + 状态 + 目标
-            ↓
-A* → PathCover/RISP → SFC + 参考轨迹
-            ↓
-       固定成本 / 学习成本
-            ↓
-          TurboMPC
-            ↓
-    jerk → 总比推力、机体角速度
-            ↓
-   Newton 训练 / MARSIM 闭环评测
-```
+PathCover 原生前端依次执行 NanoVoxMap、JPS/DMP、RISP 和 GCOPTER/MINCO。它输出连续 PVA/yaw、轨迹段时间及有序 SFC。Actor 读取冻结的观测，用逐节点成本构造非线性 MPC；PyTorch 原生 TurboMPC 复用 CUDA/cuDSS 求解与反向传播。
 
-- **训练**：Isaac Lab 3 / Newton (MJWarp)，真实电机力、接触和 LiDAR。AC-MPC 使用标准 RSL-RL PPO，只训练成本网络。
+- **训练**：Isaac Lab 3 / Newton (MJWarp)，真实电机力、接触和 LiDAR。使用标准 RSL-RL PPO；Actor 学习成本，Critic 估计长期价值。
 - **正式闭环评测**：MARSIM + Flightmare，控制频率 100 Hz 仿真时间，MPC 以 10 Hz 仿真时间重规划。也保留可选墙钟模式，用于计算延迟测试。
 - **外部对照**：原版 [SUPER](https://github.com/hku-mars/SUPER) 独立运行；其代码不属于上述两条路径。
-- **非线性模型研究**：CTBR 属于 AC-MPC 的可选动力学模型，使用独立 127 维观测和检查点；不另建算法 pipeline。
+- **预测模型**：10D CTBR，状态为位置、WXYZ 四元数和世界速度。优化控制为总推力 N 与机体角速度，执行时将总推力除以质量。
+- **成本节点**：默认 N=5，含当前节点，共 4 段 0.1 s 转移。Actor 输入 69 维特征，输出 140 个成本参数。旧 7 参数检查点不适用于该契约。
 
 ## 依赖与构建
 
-Linux、Python 3.12、CUDA 13、Isaac Lab 3、Newton、Warp 和原生 TurboMPC CUDA 扩展。使用项目锁定的 `uv.lock`；参考源码保持只读。
+Linux、Python 3.12、CUDA 13、Isaac Lab 3、Newton、Warp 和原生 TurboMPC CUDA 扩展。原生前端还需要 Eigen3、Boost 头文件和 Qhull。使用项目锁定的 `uv.lock`；参考源码保持只读。
 
 ```bash
 uv sync
 uv run python scripts/prepare_mid360.py
-uv run python scripts/build_native.py --upstream /home/tong/tongworkspace/reference_repos/IPC/hku-mars
+uv run python scripts/build_pathcover_native.py
 # 原生 CUDA 扩展的版本、编译方法与数值检查见 docs/turbompc-native.md。
 ```
 
-两条路径使用相同的 MPC 约束：9D 状态 `(p,v,a)`、3D jerk、预测步长 0.1 s、15 步预测、固定速度／加速度／jerk 界和原始 SFC 半空间。
+若 CUDA 工具链不在默认构建目录，给前端构建命令添加 `--cuda-home <toolkit目录>`。RTX 4090 使用默认 `--cuda-arch 89`，其他 GPU 应指定其计算能力。独立 worktree 可以共享现有运行环境，但应使用当前 worktree 的 `src` 和扩展构建目录。
+
+A1 和 A2 使用相同的动力学、输入界、速度界与 SFC 硬约束。安全距离只在前端处理一次。历史 IPC 的 jerk 模型、源文件和验证数据继续保留，其入口仍为 `scripts/evaluate_native.py` 和 MARSIM `--policy ipc`。
 
 ## 统一入口
 
 ### Isaac Lab / Newton
 
 ```bash
-# 学习成本 AC-MPC
-.venv/bin/python scripts/acmpc.py train --task Isaac-IPC-Avoid-ACMPC-Direct \
+export PYTHONPATH="$PWD/src${PYTHONPATH:+:$PYTHONPATH}"
+
+# A0：独立 AC-MPC 基线
+.venv/bin/python scripts/acmpc.py train --task Isaac-ACMPC-CTBR-Direct \
   --num-envs 4 --iterations 32 --output results/my-acmpc
 
-# 相同环境、相同 TurboMPC：固定成本 IPC
-.venv/bin/python scripts/acmpc.py evaluate --task Isaac-IPC-Avoid-ACMPC-Direct \
-  --fixed-cost --num-envs 1 --output results/my-ipc
+# A1：PathCover + 固定成本 CTBR
+.venv/bin/python scripts/acmpc.py evaluate --task Isaac-ACMPC-PathCover-Forest-Direct \
+  --fixed-cost --num-envs 1 --output results/my-pathcover-fixed
 
-# 已训练的 AC-MPC
-.venv/bin/python scripts/acmpc.py evaluate --task Isaac-IPC-Avoid-ACMPC-Direct \
-  --checkpoint results/my-acmpc/checkpoint.pt --num-envs 1 --output results/my-acmpc-eval
+# A2：PathCover + 学习成本 CTBR
+.venv/bin/python scripts/acmpc.py train --task Isaac-ACMPC-PathCover-Forest-Direct \
+  --num-envs 4 --iterations 32 --output results/my-pathcover-acmpc
 
 # IPC 的 Newton 独立回归；使用同一原生 TurboMPC
 .venv/bin/python scripts/evaluate_native.py --num-envs 1 --stride 10 \
   --distance 1 --output results/my-native-check
 ```
 
-森林场景对应 `Isaac-IPC-Forest-ACMPC-Direct`，需先生成 `build/forest`。CTBR 模型可通过 `Isaac-IPC-Avoid-ACMPC-CTBR-Direct` 或森林变体运行，检查点不得与 jerk 模型互换。
+森林任务需先生成 `build/forest`。A0 与 A2 比较训练结果时，应使用同一 Forest 任务；A0 添加 `env.frontend=none env.max_planes=0`。`Isaac-ACMPC-CTBR-Direct` 用于独立数值与性能基线。
+
+Newton 的策略周期为 0.1 s，电机反馈和物理周期为 1/300 s。训练与 MARSIM 使用相同的 CTBR 观测和检查点语义。Avoid 任务保留突发移动障碍压力测试，其结果独立记录。
 
 ### MARSIM
 
@@ -69,26 +65,34 @@ uv run python scripts/build_native.py --upstream /home/tong/tongworkspace/refere
 source scripts/marsim_ros2_env.sh
 export DISPLAY=:11
 
-# 固定成本 IPC
+# A1：原生 PathCover + 固定成本 CTBR
 .venv/bin/python scripts/run_marsim_ros2.py --mode dynamic --time-mode sim \
-  --benchmark high_speed --policy ipc --timeout 120 --domain 130 \
-  --render-prefix 'vglrun -d egl0' --output results/my-marsim-ipc
+  --benchmark high_speed --policy fixed-ctbr --timeout 120 --domain 130 \
+  --render-prefix 'vglrun -d egl0' --output results/my-marsim-fixed
 
 # 学习成本 AC-MPC；检查点必须使用当前原生 Actor 格式
 .venv/bin/python scripts/run_marsim_ros2.py --mode dynamic --time-mode sim \
-  --benchmark high_speed --policy acmpc --checkpoint results/my-acmpc/checkpoint.pt \
+  --benchmark high_speed --policy acmpc --checkpoint results/my-pathcover-acmpc/checkpoint.pt \
   --timeout 120 --domain 131 --render-prefix 'vglrun -d egl0' \
   --output results/my-marsim-acmpc
 ```
 
-`dense` 场景只修改 `--benchmark dense` 与输出目录。详细评测协议、真实失败记录、时钟及 LiDAR 验收见 [MARSIM 评测](docs/marsim-ros2.md)。
+`dense` 场景修改 `--benchmark dense` 与输出目录。A0 使用 `--frontend none`。原 SUPER 的 `ideal/dynamic` 双执行模式继续保留。完整任务、实际失败和时钟证据见 [MARSIM 评测](docs/marsim-ros2.md)。
+
+原生 PathCover 默认名义参考速度为 6 m/s，与 Newton 训练一致。
+使用 `--reference-speed` 可显式调整，最终值仍受场景和 CTBR 速度界限制。
+优化器保留真实初始 PVA。若初速已超出名义值，速度验收界限为
+`max(名义速度, 初速) + 0.001 × 名义速度`；日志保留相对名义值的实际超额。
+控制周期与原始任务点保持独立配置。
 
 ## 验证
+
+当前分支的配置、实测值与未通过项见 [原生 AC-MPC 验证](docs/acmpc-native-validation.md)。历史文档的通过结论不代替新主线验收。
 
 原生 TurboMPC 的 SFC、隐式梯度、线性／CTBR 模型与 CUDA 后端共享同一套数值测试。
 
 ```bash
-env -u PYTHONPATH PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 uv run pytest -q
+PYTHONPATH="$PWD/src" PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -q
 uv run ruff check src scripts tests
 ```
 

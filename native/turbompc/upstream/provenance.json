@@ -1,6 +1,10 @@
 {
   "repository": "https://github.com/ToyotaResearchInstitute/turbompc",
   "commit": "7050a4f367d08504ecb6f5820d9161e704df5816",
+  "local_configuration": {
+    "cudss_kkt_ir_steps": 2,
+    "description": "Native iterative refinement for cost-gradient accuracy; upstream file hashes below are unchanged."
+  },
   "files": {
     "admm/admm_cudss.cu": {
       "upstream": "turbompc/solvers/admm/csrc/admm_cudss.cu",

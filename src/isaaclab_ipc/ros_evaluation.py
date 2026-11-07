@@ -150,9 +150,20 @@ class MissionRecorder:
         cumulative_qp_failures = []
         reanchor_rejections = []
         cumulative_reanchor_rejections = []
+        predicted_sfc_violations = []
+        reference_sfc_violations = []
+        actual_sfc_violations = []
+        computational_failures = []
         for entry in self.stats:
             data = entry["data"]
             event = data.get("event")
+            if event == "failure":
+                computational_failures.append(data)
+                if data.get("planning_ms") is not None:
+                    planning_durations.append(float(data["planning_ms"]))
+            if event in (None, "control", "failure"):
+                if data.get("actual_sfc_violation_m") is not None:
+                    actual_sfc_violations.append(float(data["actual_sfc_violation_m"]))
             if event in (None, "control"):
                 value = data.get("control_ms", data.get("command_ms"))
                 if value is not None:
@@ -165,6 +176,10 @@ class MissionRecorder:
                     if data.get(name) is not None:
                         values.append(1000 * float(data[name]))
             if event in (None, "solve"):
+                if "predicted_sfc_violation_m" in data:
+                    predicted_sfc_violations.append(float(data["predicted_sfc_violation_m"]))
+                if "reference_sfc_violation_m" in data:
+                    reference_sfc_violations.append(float(data["reference_sfc_violation_m"]))
                 if "solve_ms" in data:
                     solve_durations.append(float(data["solve_ms"]))
                     if "stamp" in data:
@@ -237,6 +252,14 @@ class MissionRecorder:
             "frontend_time_ms": duration_summary(frontend_durations),
             "observation_time_ms": duration_summary(observation_durations),
             "planning_time_ms": duration_summary(planning_durations),
+            "planning_time_samples": len(planning_durations),
+            "planning_time_scope": "completed and failed planning attempts; excludes diagnostic serialization",
+            "planning_p95_under_100ms": bool(np.percentile(planning_durations, 95) < 100)
+            if planning_durations else None,
+            "maximum_predicted_sfc_violation_m": max(predicted_sfc_violations, default=None),
+            "maximum_reference_sfc_violation_m": max(reference_sfc_violations, default=None),
+            "maximum_actual_sfc_violation_m": max(actual_sfc_violations, default=None),
+            "computational_failures": computational_failures,
             "plan_acceptance_time_ms": duration_summary(acceptance_durations),
             "policy_control_timing": timing_summary(control_stamps),
             "policy_solve_timing": timing_summary(solve_stamps),
@@ -279,7 +302,7 @@ class MissionRecorder:
                 ],
             },
             "topics": topics,
-            "mode_outcomes": {mode: {name: int(self.status == name) for name in ("success", "collision", "timeout")}},
+            "mode_outcomes": {mode: {name: int(self.status == name) for name in ("success", "collision", "timeout", "failure")}},
         }
         with targets[1].open("xb") as stream:
             np.savez_compressed(
@@ -312,7 +335,7 @@ def parser():
     result.add_argument("--mode", choices=("ideal", "dynamic"), required=True)
     result.add_argument("--time-mode", choices=("wall", "sim"), default="wall")
     result.add_argument("--benchmark", choices=("high_speed", "dense"), required=True)
-    result.add_argument("--policy", choices=("super", "ipc", "acmpc"), required=True)
+    result.add_argument("--policy", choices=("super", "ipc", "fixed-ctbr", "acmpc"), required=True)
     result.add_argument("--output", type=Path, required=True)
     result.add_argument("--timeout", type=float, default=120.0)
     result.add_argument("--super-root", type=Path, default=Path("/home/tong/tongworkspace/reference_repos/SUPER"))
@@ -405,7 +428,10 @@ def main(argv=None):
             )
 
         def statistics(self, message):
-            recorder.stats.append({"elapsed_s": recorder.elapsed(), "data": json.loads(message.data)})
+            data = json.loads(message.data)
+            recorder.stats.append({"elapsed_s": recorder.elapsed(), "data": data})
+            if data.get("event") == "failure":
+                recorder.finish("failure", data["error"])
 
         def position_command(self, message):
             recorder.position_commands.append(
@@ -457,4 +483,4 @@ def main(argv=None):
         if rclpy.ok():
             rclpy.shutdown()
     print(json.dumps(metrics, indent=2, allow_nan=False), flush=True)
-    return {"success": 0, "collision": 2, "timeout": 3}[recorder.status]
+    return {"success": 0, "collision": 2, "timeout": 3, "failure": 4}[recorder.status]

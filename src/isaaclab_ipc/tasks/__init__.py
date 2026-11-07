@@ -32,7 +32,18 @@ for scenario in ("Avoid", "Forest"):
         entry_point="isaaclab_ipc.tasks.ctbr_env:CTBRMPCEnv",
         disable_env_checker=True,
         kwargs={
-            "env_cfg_entry_point": f"isaaclab_ipc.tasks.ctbr_env:make_{'forest_' if scenario == 'Forest' else ''}ctbr_cfg",
+            "env_cfg_entry_point": f"isaaclab_ipc.tasks.ctbr_env:make_{'forest_' if scenario == 'Forest' else 'avoid_'}ctbr_cfg",
+            "rsl_rl_cfg_entry_point": "isaaclab_ipc.rl.config:CTBRTrainCfg",
+        },
+    )
+
+for name, factory in (("CTBR", "make_ctbr_cfg"), ("PathCover-Avoid", "make_avoid_ctbr_cfg"), ("PathCover-Forest", "make_forest_ctbr_cfg")):
+    gym.register(
+        id=f"Isaac-ACMPC-{name}-Direct",
+        entry_point="isaaclab_ipc.tasks.ctbr_env:CTBRMPCEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": f"isaaclab_ipc.tasks.ctbr_env:{factory}",
             "rsl_rl_cfg_entry_point": "isaaclab_ipc.rl.config:CTBRTrainCfg",
         },
     )

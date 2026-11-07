@@ -1,5 +1,22 @@
 # 源码来源与算法差异
 
+## 原生 AC-MPC 主线
+
+本节对应 [ADR-0008](adr/0008-native-acmpc-pathcover.md)。下文 IPC 算法差异保留为历史来源。
+
+- 完整 PathCover 固定于 `8723a05d1993bf0199a453b47dc6ee167d493c23`。
+  原生源码、许可和修改记录位于 `third_party/pathcover_native/`。
+  NanoVoxMap、JPS/DMP、RISP 与 GCOPTER/MINCO 不依赖 ROS 运行时。
+- TurboMPC 固定来源与补丁位于 `native/turbompc/upstream/`。
+  新分支构建启用 2 次 cuDSS 迭代精化，复用原生 ADMM 与隐式梯度。
+- 原版 CTBR 离散模型的固定输入见 `tests/data/` 与 `tests/test_turbompc_ctbr.py`。
+  逐节点二次成本保留原版语义，成本尺度由当前配置显式给出。
+
+原生前端的建图、体素膨胀和 DMP 势场支持 CUDA。
+JPS/DMP 图搜索、RISP 与 MINCO 仍在 CPU。
+CTBR 动力学、雅可比、热启动积分与 SQP 张量计算在 GPU，支持 `torch.compile`。
+新前端每次求解重置线程本地随机数状态，可并发处理独立地图。
+
 ## IPC 源码基准
 
 四旋翼 IPC 位于参考目录的 `hku-mars` 子目录。
@@ -68,7 +85,7 @@ Newton articulation 适配保留物理状态、四电机和力矩分配。
 未复制 AME-2 的传感器类或 `_update_buffers_impl`；射线查询由官方 MultiMesh 承担。
 实现与验收见 [官方组件迁移](official-components.md)。
 
-## GPU 范围
+## 历史 IPC 路径的 GPU 范围
 
 Newton/MJWarp、力矩计算、碰撞检查和射线查询在 GPU。
 QP 使用 Torch 批量矩阵和 CUDA graph。

@@ -1,4 +1,9 @@
-# 默认走廊：PathCover/RISP
+# 历史 IPC 走廊：PathCover/RISP
+
+本文记录旧 IPC 的单多面体替换。新 AC-MPC 主线使用完整原生 PathCover，
+包括 NanoVoxMap、JPS/DMP、RISP 和 GCOPTER/MINCO。
+当前接口与验收见 [ADR-0008](adr/0008-native-acmpc-pathcover.md) 和
+[原生 AC-MPC 验证](acmpc-native-validation.md)。下文保留原始范围与结果。
 
 用户在审阅现有 7 次测试和剩余验证缺口后，明确指定采用该默认设计。
 EMVP 已从运行代码和构建输入移除；历史来源、失败记录和录制保留。

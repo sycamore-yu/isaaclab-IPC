@@ -1,5 +1,7 @@
 # TurboMPC 的 AC-MPC CTBR 模型与接口
 
+当前主线采用 [ADR-0008](adr/0008-native-acmpc-pathcover.md) 的逐节点 `28N` 成本和原生 PathCover。下文保留旧七参数 CTBR、精修器和 IPC 前端的历史证据。旧接口、默认界和旧验收状态不适用于新主线。
+
 ## 范围与已完成验证
 
 本阶段在已披露的统一 IR2 配置 M4、IPC SFC 独立数值检查和真实低速闭环之后开始。最近一次通过的前置为提交 `403fc2ddb19e753ec959771cd1a4fa593328ce72` 的 [M4 final-v8 汇总](../results/turbompc-port/m4-ir2-accepted-final-v8.json)：同 CUDA12、H15、float64、B=1/16/64/256 的400组成对测量及数值/梯度检查通过，`m4_gate_passed=true`。其 A 端明确是上游 `7050a4f` 加三行 `IR_N_STEPS=2` 配置，B 端也使用 IR2；未修正原版 A0 的 `original_baseline_passed=false` 与全部原始失败记录继续保留。前置 SFC 结果见 [turbompc-sfc.md](turbompc-sfc.md)。本页四旋翼模型、成本头和结果消费者使用独立 CTBR 契约。

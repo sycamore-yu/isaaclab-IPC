@@ -51,15 +51,24 @@ class MPCTrainCfg(RslRlOnPolicyRunnerCfg):
 
 
 @configclass
-class CTBRActorCfg(MPCActorCfg):
+class CTBRActorCfg(RslRlMLPModelCfg):
     class_name = "isaaclab_ipc.rl.ctbr_actor:CTBRMPCActor"
-    qp_iterations = 32768
-    sqp_iterations = 60
-    sqp_tolerance = 1e-7
-    admm_tolerance = 1e-8
+    hidden_dims = [64, 64]
+    activation = "elu"
+    obs_normalization = False
+    distribution_cfg = None
+    cost_nodes = 5
+    prediction_dt = 0.1
+    model_config = None
+    compile_kernels = True
+    qp_iterations = 4096
+    sqp_iterations = 25
+    sqp_tolerance = 1e-4
+    sqp_linesearch = "none"
+    admm_tolerance = 1e-5
 
 
 @configclass
 class CTBRTrainCfg(MPCTrainCfg):
-    experiment_name = "ipc_acmpc_ctbr"
+    experiment_name = "acmpc_native_ctbr"
     actor = CTBRActorCfg()

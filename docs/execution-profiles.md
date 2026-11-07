@@ -1,5 +1,7 @@
 # 理想配置、真实配置与长森林测试
 
+本分支的 AC-MPC 主线已按 [ADR-0008](adr/0008-native-acmpc-pathcover.md) 改为 10D CTBR 与完整原生 PathCover。下文记录历史 IPC 执行配置，不定义新 AC-MPC 的恢复行为。新路径不运行 jerk 制动、参考治理或重复执行轨迹验收。
+
 正式评测现采用 MARSIM 的 `ideal/dynamic` 双执行模式，见 [ADR-0007](adr/0007-marsim-formal-evaluation.md)
 和 [MARSIM ROS 2 评测](marsim-ros2.md)。Isaac Lab/Newton 继续用于训练。
 下文保留 IPC 历史复现配置与 Newton 回归证据；其 `real` 命名不改为 `dynamic`。

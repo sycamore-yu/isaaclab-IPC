@@ -31,3 +31,11 @@ def test_scan_event_uses_per_environment_reset_clock(monkeypatch):
     monkeypatch.setattr("isaaclab_ipc.mid360.update_mid360_directions", lambda env, ids: calls.append(ids.tolist()))
     advance_scan(SimpleNamespace(elapsed=torch.tensor([0.09, 0.1, 0.2])), None)
     assert calls == [[1, 2]]
+
+
+def test_ctbr_ten_hertz_has_one_scan_window_per_control_step(monkeypatch):
+    calls = []
+    monkeypatch.setattr("isaaclab_ipc.mid360.update_mid360_directions", lambda env, ids: calls.append(ids.tolist()))
+    for step in range(1, 11):
+        advance_scan(SimpleNamespace(elapsed=torch.tensor([step * 0.1])), None)
+    assert calls == [[0]] * 10

@@ -30,7 +30,10 @@ def main():
     parser.add_argument("--mode", choices=("ideal", "dynamic"), required=True)
     parser.add_argument("--time-mode", choices=("wall", "sim"), default="wall")
     parser.add_argument("--benchmark", choices=("high_speed", "dense"), required=True)
-    parser.add_argument("--policy", choices=("super", "ipc", "acmpc"), default="super")
+    parser.add_argument("--policy", choices=("super", "ipc", "fixed-ctbr", "acmpc"), default="fixed-ctbr")
+    parser.add_argument("--frontend", choices=("pathcover", "none"), default="pathcover")
+    parser.add_argument("--reference-speed", type=float, default=6.0,
+                        help="Native PathCover maximum speed in m/s, capped by the case and CTBR limits")
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--executor-parameters", type=Path)
     parser.add_argument("--output", type=Path, required=True)
@@ -45,6 +48,10 @@ def main():
         parser.error("--time-mode sim requires the unified dynamic Flightmare executor")
     if args.policy == "acmpc" and args.checkpoint is None:
         parser.error("--policy acmpc requires --checkpoint")
+    if args.policy in ("fixed-ctbr", "acmpc") and args.mode != "dynamic":
+        parser.error("The native CTBR route requires --mode dynamic")
+    if not 0 < args.reference_speed < float("inf"):
+        parser.error("--reference-speed must be finite and positive")
     if args.executor_parameters and args.mode != "dynamic":
         parser.error("--executor-parameters applies to the dynamic executor")
     output = args.output.absolute()
@@ -56,8 +63,10 @@ def main():
         command = shlex.split(args.render_prefix) + [
             "ros2", "launch", "mission_planner", f"benchmark_{args.benchmark}.launch.py"]
     else:
-        command = ["ros2", "launch", "isaaclab_marsim", "benchmark.launch.py",
+        command = ["ros2", "launch", str(ROOT / "ros2/isaaclab_marsim/launch/benchmark.launch.py"),
                    f"execution:={args.mode}", f"benchmark:={args.benchmark}", f"policy:={args.policy}",
+                   f"frontend:={args.frontend}",
+                   f"reference_speed:={args.reference_speed}",
                    f"time_mode:={args.time_mode}",
                    f"output:={output}", "record:=false", f"render_prefix:={args.render_prefix}"]
         if args.checkpoint:
@@ -68,17 +77,25 @@ def main():
                        "--mode", args.mode, "--benchmark", args.benchmark, "--policy", args.policy,
                        "--output", str(output), "--timeout", str(args.timeout)]
     monitor_command += ["--time-mode", args.time_mode]
-    binaries = [ROOT / "build/marsim_ros2/install" / package / "lib" / package / executable
+    runtime = Path(environment.get("IPC_MARSIM_RUNTIME", ROOT / "build/marsim_ros2")).resolve()
+    binaries = [runtime / "install" / package / "lib" / package / executable
                 for package, executable in (("isaaclab_marsim", "flightmare_node"),
                                             ("isaaclab_marsim", "marsim_lidar_node"),
                                             ("perfect_drone_sim", "perfect_drone_node"),
                                             ("super_planner", "fsm_node"))]
+    native_binaries = list((ROOT / "src/isaaclab_ipc").glob("_pathcover_native*.so"))
+    native_binaries.extend(Path(environment.get("TURBOMPC_NATIVE_BUILD_DIR",
+        ROOT / "build/turbompc/native/cu130")).glob("_turbompc_native*.so"))
     (output / "run.json").write_text(json.dumps({
         "launch": command, "monitor": monitor_command, "ros_domain_id": args.domain,
-        "time_mode": args.time_mode,
+        "time_mode": args.time_mode, "frontend": args.frontend,
+        "reference_speed_m_s": args.reference_speed,
         "git_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
-        "executable_sha256": {str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+        "marsim_runtime": str(runtime),
+        "executable_sha256": {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
                               for path in binaries if path.exists()},
+        "native_library_sha256": {str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest()
+                                  for path in native_binaries},
         "executor_parameters_sha256": hashlib.sha256(args.executor_parameters.read_bytes()).hexdigest()
         if args.executor_parameters else None,
         "middleware_environment": {name: environment.get(name) for name in (
@@ -88,7 +105,7 @@ def main():
             str(path.relative_to(ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
             for directory in ("ros2/isaaclab_marsim", "src/isaaclab_ipc", "scripts")
             for path in sorted((ROOT / directory).rglob("*"))
-            if path.is_file() and path.suffix in (".py", ".sh", ".cpp", ".hpp", ".xml", ".txt")
+            if path.is_file() and path.suffix in (".py", ".sh", ".cpp", ".hpp", ".xml", ".txt", ".yaml", ".yml", ".json")
         },
     }, indent=2) + "\n")
     launcher = monitor = None
@@ -108,7 +125,7 @@ def main():
     finally:
         stop(monitor)
         stop(launcher)
-        super_timing = ROOT / "build/marsim_ros2/src/SUPER/super_planner/log/time_consuming.csv"
+        super_timing = runtime / "src/SUPER/super_planner/log/time_consuming.csv"
         if args.policy == "super" and super_timing.exists() and super_timing.stat().st_mtime >= started_wall:
             shutil.copy2(super_timing, output / "super_time_consuming.csv")
         if (output / "metrics.json").exists():

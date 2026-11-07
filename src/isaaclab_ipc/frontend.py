@@ -6,8 +6,6 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from .planner import InvalidCorridorError, SafeClimbPending
-
 
 def batch_clouds_to_host(hits, positions, blind=0.3, maximum=float("inf")):
     distance = (hits - positions[:, None, :]).norm(dim=-1)
@@ -27,6 +25,8 @@ class PlanningContext:
 
 
 def _prepare_context(item):
+    from .planner import InvalidCorridorError, SafeClimbPending
+
     planner, state, cloud = item
     if cloud is not None:
         planner.update_cloud(cloud, state[:3])

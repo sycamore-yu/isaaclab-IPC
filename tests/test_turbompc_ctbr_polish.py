@@ -16,7 +16,7 @@ import pytest
 import torch
 
 from isaaclab_ipc.turbompc import ADMMConfig, LinearDynamics, MPCInputs, SQPConfig, TorchMPC
-from isaaclab_ipc.turbompc.ctbr import CTBRQPBuilder
+from isaaclab_ipc.turbompc.ctbr import CTBRConfig, CTBRQPBuilder
 from isaaclab_ipc.turbompc.ctbr_polish import POLISH_ERROR_NAMES, CTBRPolisher
 from isaaclab_ipc.turbompc.native import ADMMResult
 
@@ -127,7 +127,7 @@ def problem():
         expected = {
             name: torch.from_numpy(data[name].copy())[None] for name in data.files if name.startswith("reference_")
         }
-    builder = CTBRQPBuilder()
+    builder = CTBRQPBuilder(CTBRConfig(cost_nodes=z.shape[1]))
     solver = TorchMPC(
         builder.dynamics(),
         SQPConfig(tolerance=1e-7),
