@@ -46,7 +46,7 @@ class PathCoverConfig:
     potential_radius: float = 1.0
     search_radius: float = 2.0
     # Weighted A*: >1 trades shortest-path optimality for fewer expansions.
-    dmp_heuristic_weight: float = 1.1
+    dmp_heuristic_weight: float = 1.5
     risp_alpha: float = 0.01
     random_seed: int = 0
     num_threads: int = 1

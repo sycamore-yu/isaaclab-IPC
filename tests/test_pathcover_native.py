@@ -224,6 +224,15 @@ def test_positive_optimizer_status_does_not_accept_speed_above_effective_limit()
     assert speed["effective_limit_m_s"] == 2.002
     assert speed["peak_speed_m_s"] == problem["constraint_metrics"][1]
     assert speed["nominal_excess_m_s"] == speed["peak_speed_m_s"] - 2.0
+    candidate = problem["candidate"]
+    assert np.isfinite(candidate["objective"]) and candidate["objective"] > 0.0
+    trajectory = PathCoverTrajectory(np.stack(candidate["coefficients"]), np.asarray(candidate["durations"]))
+    np.testing.assert_array_equal(candidate["durations"], problem["trial_durations"])
+    np.testing.assert_array_equal(candidate["corridor_indices"], [0])
+    np.testing.assert_allclose(trajectory.sample(0.0).pva, problem["initial_pva"].T.ravel(), atol=1e-9)
+    np.testing.assert_allclose(trajectory.sample(trajectory.duration).pva, problem["terminal_pva"].T.ravel(), atol=1e-9)
+    samples = trajectory.sample(np.linspace(0.0, trajectory.duration, frontend.config.integral_resolution + 1))
+    assert np.linalg.norm(samples.velocity, axis=1).max() == pytest.approx(speed["peak_speed_m_s"], abs=1e-10)
 
 
 def test_fixed_initial_overspeed_preserves_nominal_bound_and_real_excess():

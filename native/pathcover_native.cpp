@@ -129,6 +129,10 @@ struct OptimizationFailure {
     Eigen::VectorXd trial_durations;
     Eigen::Matrix<double, 6, 1> constraint_metrics = Eigen::Matrix<double, 6, 1>::Constant(NAN);
     bool constraint_finite = false;
+    std::vector<Coefficients> coefficients;
+    Eigen::VectorXd durations;
+    Eigen::VectorXi corridor_indices;
+    double cost = NAN;
 };
 
 class NativeFrontend {
@@ -368,6 +372,14 @@ public:
         speed["peak_speed_m_s"] = peak_speed;
         speed["nominal_excess_m_s"] = std::max(peak_speed - options_.max_velocity, 0.0);
         value["speed_feasibility"] = std::move(speed);
+        if (!failed_problem_->coefficients.empty()) {
+            py::dict candidate;
+            candidate["coefficients"] = py::cast(failed_problem_->coefficients);
+            candidate["durations"] = py::cast(failed_problem_->durations);
+            candidate["corridor_indices"] = py::cast(failed_problem_->corridor_indices);
+            candidate["objective"] = failed_problem_->cost;
+            value["candidate"] = std::move(candidate);
+        }
         return value;
     }
 
@@ -527,6 +539,14 @@ public:
                 failed_problem_ = OptimizationFailure{
                     initial, terminal, result.corridors, result.optimizer_status, "feasibility", solver.getTrialDurations(),
                     result.constraint_metrics, quality.finite};
+                // Copy the existing rejected polynomial only on failure. This
+                // enables exact offline replay without another optimization.
+                failed_problem_->durations = trajectory.getDurations();
+                failed_problem_->corridor_indices = solver.getPiecePolytopeIndices();
+                failed_problem_->cost = result.cost;
+                for (int i = 0; i < trajectory.getPieceNum(); ++i) {
+                    failed_problem_->coefficients.push_back(trajectory[i].getCoeffMat());
+                }
                 throw PathCoverPlanningError("PathCover GCOPTER constraints violated at optimizer quadrature nodes");
             }
             result.durations = trajectory.getDurations();

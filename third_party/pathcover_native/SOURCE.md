@@ -54,15 +54,17 @@ license; embedded geometry utilities retain their original notices.
    mask remains the default of the separately reusable upstream inflater.
 6. DMP uses the exact obstacle-free 26-neighbour grid metric, rather than
    upstream's zero heuristic (Dijkstra). At weight 1 this metric is admissible
-   and consistent. The current default weight 1.1 explicitly trades shortest-path
-   optimality for fewer expansions; four frozen graphs measured path-cost
-   increases of at most 1.77%. It retains the same nonnegative distance-potential
+   and consistent. The current default weight 1.5 explicitly trades shortest-path
+   optimality for fewer expansions. Closed nodes retain their settled cost and
+   parent rather than being reopened under the weighted heuristic. Four frozen
+   graphs measured cost increases of 0.085% to 8.94% against the prior weight-1.1
+   reopening search. It retains the same nonnegative distance-potential
    edge costs and search region. Set `dmp_heuristic_weight=0` for Dijkstra or 1
    for admissible A*. The binding caches
    JPS occupancy and DMP potential maps until occupancy changes.
    The DMP heap uses strict cost ordering instead of a nontransitive epsilon
-   comparator. Relaxations ignore differences below 1e-12 cost units; genuinely
-   improved closed nodes are reopened. Successor buffers are reused per query.
+   comparator. Relaxations ignore differences below 1e-12 cost units and update
+   only open nodes. Successor buffers are reused per query.
    DMP additionally requires every nonempty axis-subset neighbour of a diagonal
    move to be physically free. This removes corner/edge contacts with occupied
    voxel AABBs that otherwise collapse RISP progress at a grid corner. It changes
@@ -70,6 +72,13 @@ license; embedded geometry utilities retain their original notices.
    A constexpr direction mask reuses 26 occupancy probes per expanded 3D node;
    target search-region restrictions remain unchanged. The heap comparator takes
    shared pointers by const reference rather than copying them on comparisons.
+   The closed-list search removed a measured 150,000-reopening tail. Two slow
+   diagnostic maps had DMP p95 16.44 ms over 20 paired runs; Dense p95 increased
+   from 9.19 to 9.51 ms. Those slow cases combine historical PVA with the final
+   captured map and are not exact online-frame replays. Complete MINCO checks
+   passed all four candidate and four baseline problems, but one final-frame
+   MINCO execution rose from 35.46 to 72.78 ms. End-to-end timing is measured
+   separately; search speed alone does not establish the online latency budget.
 7. A persistent CUDA workspace computes DMP's integer max-dilation with the
    upstream-generated mask. Integer atomic max preserves the CPU potential field
    exactly. One bulk upload/download replaces the CPU obstacle-by-mask loop;
@@ -115,7 +124,9 @@ license; embedded geometry utilities retain their original notices.
     valid simple 2 m/s cases retain measured speeds of 2.001714 and 2.001320 m/s;
     an absolute 1e-3 m/s gate rejected them. The CTBR hard bounds are unchanged.
     Failure snapshots retain the actual extrema, bounds, allowed errors and
-    initial PVA. This does not reintegrate controls or resample a
+    initial PVA. A rejected finite candidate also retains its existing polynomial
+    coefficients, durations, piece-to-SFC indices and objective for exact offline
+    replay. That copy occurs only on rejection. This does not reintegrate controls or resample a
     second execution trajectory, and is not a continuous-time certificate.
     The former 1e-6 m SFC gate rejected a High-speed trajectory with an exact
     polynomial maximum of 7.557e-6 m (quadrature maximum 7.173e-6 m), with all

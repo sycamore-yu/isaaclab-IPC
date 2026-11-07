@@ -90,7 +90,8 @@ inline double GraphSearch::getHeur(int x, int y) const {
 }
 
 inline double GraphSearch::getHeur(int x, int y, int z) const {
-  // Exact obstacle-free 26-neighbour grid cost, consistent with every DMP edge.
+  // The unweighted 26-neighbour metric is consistent with every legal edge.
+  // eps_ scales it for weighted A*; the scaled heuristic need not be consistent.
   const int dx = std::abs(x - xGoal_), dy = std::abs(y - yGoal_), dz = std::abs(z - zGoal_);
   const int lo = std::min({dx, dy, dz}), hi = std::max({dx, dy, dz});
   const int mid = dx + dy + dz - lo - hi;
@@ -199,6 +200,8 @@ double GraphSearch::plan(StatePtr &currNode_ptr, int start_id, int goal_id) {
     for (int s = 0; s < (int)succ_ids.size(); s++) {
       // see if we can improve the value of succstate
       StatePtr &child_ptr = hm_[succ_ids[s]];
+      // Weighted A* uses a closed list: keep closed g/parent immutable.
+      if (child_ptr->closed) continue;
       double tentative_gval = currNode_ptr->g + succ_costs[s];
 
       if (tentative_gval + 1e-12 < child_ptr->g) {
@@ -210,12 +213,7 @@ double GraphSearch::plan(StatePtr &currNode_ptr, int start_id, int goal_id) {
         // if currently in OPEN, update
         if (child_ptr->opened && !child_ptr->closed)
           pq_.increase(child_ptr->heapkey); // update heap
-        // if currently in CLOSED
-        else if (child_ptr->opened && child_ptr->closed) {
-          // Reopen an improved node instead of silently leaving a stale closed path.
-          child_ptr->closed = false;
-          child_ptr->heapkey = pq_.push(child_ptr);
-        } else // new node, add to heap
+        else // new node, add to heap
         {
           // printf("add to open set: %d, %d\n", child_ptr->x, child_ptr->y);
           child_ptr->heapkey = pq_.push(child_ptr);
