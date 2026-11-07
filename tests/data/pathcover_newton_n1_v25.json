@@ -1,0 +1,216 @@
+{
+  "schema": "Frozen native GCOPTER N1 problem; PVA rows are XYZ and columns are position/velocity/acceleration.",
+  "provenance": {
+    "source": "results/p2-newton-forest-fixed-v25/failed-frontend-call.pt",
+    "source_sha256": "0efa8063e1c5ab137a4bcb4533e6782d9a8459d0b938908297cd4792147787d3",
+    "extracted_problem": "build/pathcover_native/reference-newton-v25/problem.json",
+    "extracted_problem_sha256": "bc8c35fa71050df3f856d122c9c38954fc1b3daebbaab64d7f283bb8898c86dd",
+    "oracle_report": "build/pathcover_native/reference-newton-v25/high-precision-report.json",
+    "oracle_report_sha256": "f4f2e10dcb5ef054d567692f2d6eb454877827e05c353b290c6a902fbe57bedf",
+    "source_release": "V25",
+    "source_git": "835b5096f5256452b57bab4648073d0d481b241a",
+    "scope": "Exact saved PVA, original ordered SFC and config. No map, corridor or optimizer rerun generated this fixture."
+  },
+  "problem": {
+    "initial_pva": [
+      [
+        7.45521879196167,
+        1.6868678331375122,
+        -2.469325304031372
+      ],
+      [
+        0.0956740602850914,
+        -0.26161685585975647,
+        0.28899240493774414
+      ],
+      [
+        1.1405413150787354,
+        -1.0080890655517578,
+        1.0788888931274414
+      ]
+    ],
+    "terminal_pva": [
+      [
+        8.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.0,
+        0.0
+      ],
+      [
+        1.0,
+        0.0,
+        0.0
+      ]
+    ],
+    "corridors": [
+      [
+        [
+          -0.032305208281344554,
+          0.0,
+          -0.9994780505433318,
+          0.7547304226228548
+        ],
+        [
+          -0.9484174826145836,
+          -0.17625869851107193,
+          -0.26350929750238256,
+          4.042317718120412
+        ],
+        [
+          -0.17665083128212003,
+          0.6137415261341537,
+          -0.7694906256127206,
+          1.4095643204324377
+        ],
+        [
+          0.6618988108870839,
+          -0.404741256415172,
+          -0.6309314380356493,
+          -5.2390565423466064
+        ],
+        [
+          -0.5631611977938398,
+          -0.4444188741073213,
+          0.6966644311550495,
+          0.4487733018559643
+        ],
+        [
+          0.9963685492175991,
+          -0.0,
+          -0.08514525312674114,
+          -10.123977562123416
+        ],
+        [
+          0.9007875878302017,
+          -0.331552784849449,
+          -0.2804540469838538,
+          -8.34134836668156
+        ],
+        [
+          -0.0,
+          -0.14495823768713692,
+          0.9894377743580642,
+          -3.4754253111500955
+        ],
+        [
+          -0.38521612966132196,
+          0.7652604518985842,
+          0.5157373112435502,
+          1.0405293918739942
+        ],
+        [
+          0.7238366024279881,
+          0.0,
+          -0.6899714291081238,
+          -5.61996508145686
+        ],
+        [
+          0.3411990253213524,
+          0.6581347780856814,
+          -0.6711496397926995,
+          -2.7161956692860003
+        ],
+        [
+          -0.526761417925509,
+          -0.8490892234295764,
+          0.03962195402635071,
+          1.2282160787785061
+        ],
+        [
+          -0.571441660991043,
+          -0.6185101030021387,
+          0.5393511662804503,
+          0.7500218084811112
+        ],
+        [
+          -0.9023039445811771,
+          -0.3345373375601272,
+          -0.27190505948111676,
+          3.8265585993784064
+        ],
+        [
+          0.0,
+          -0.8648749834729645,
+          -0.5019873135475034,
+          -0.38845195241370356
+        ],
+        [
+          0.0,
+          -0.7634891716841015,
+          -0.6458206289064516,
+          -0.051674979151446705
+        ]
+      ]
+    ],
+    "config": {
+      "bounds_lower": [
+        -5.0,
+        -20.0,
+        0.0
+      ],
+      "bounds_upper": [
+        60.0,
+        20.0,
+        10.0
+      ],
+      "resolution": 0.25,
+      "search_resolution": 0.25,
+      "endpoint_connection_radius": 1.0,
+      "robot_radius": 0.25,
+      "robot_radius_z": 0.25,
+      "max_velocity": 10.0,
+      "nominal_velocity": 3.0,
+      "mass": 0.75,
+      "gravity": 9.81,
+      "thrust_min": 2.094972067039106,
+      "thrust_max": 22.072499999999998,
+      "body_rate_max": 3.0,
+      "reference_body_rate_margin": 0.01,
+      "tilt_max": 0.7854,
+      "max_corridors": 6,
+      "pieces_per_polytope": 1,
+      "integral_resolution": 64,
+      "max_iterations": 1000,
+      "relative_tolerance": 0.0001,
+      "time_weight": 100.0,
+      "safety_margin": 0.15,
+      "penalty_weights": [
+        100000.0,
+        100.0,
+        10000.0,
+        10000.0,
+        10000.0
+      ],
+      "position_penalty_smoothing_m": 1e-06,
+      "potential_radius": 1.0,
+      "search_radius": 2.0,
+      "dmp_heuristic_weight": 1.5,
+      "dmp_xy_heuristic": true,
+      "risp_alpha": 0.01,
+      "random_seed": 0,
+      "num_threads": 1,
+      "use_cuda": true,
+      "cuda_min_grid_voxels": 1048576,
+      "body_yaw_rate_max": 1.5,
+      "yaw_sample_dt": 0.02,
+      "yaw_low_speed": 0.1
+    }
+  },
+  "observed_failure": {
+    "stage": "optimize",
+    "optimizer_status": -1009,
+    "trial_durations": [
+      1.1746518388057663
+    ]
+  },
+  "oracle": {
+    "method": "Closed-form quintic from exact binary64 initial/terminal PVA, analytical jerk-square integral, 100-digit mpmath differentiation/root. No MINCO coefficient solver, analytic gradient code, or double-precision objective is reused.",
+    "precision_decimal_digits": 100,
+    "optimum_time_s_decimal": "1.17465193206248528156294859684719396023305794613849231854871458211342901817286896909660687",
+    "optimum_objective_decimal": "168.409255235348727805505274813295616539568991260163413310754787074005291913633335877307052"
+  }
+}

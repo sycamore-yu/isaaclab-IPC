@@ -129,8 +129,8 @@ An independently solved one-piece failure was already within 19.4 ns of the
 optimal duration; approximately 1e-12 native cost noise defeated its line search.
 Retain the failed run and the high-precision comparison as evidence.
 
-Use a history length of 32 in the 3D main solve. Keep the short-path, vertex and
-one-dimensional time initializers unchanged. The prior 256-entry history gave
+Use a history length of 32 in the 3D main solve. Keep the short-path and vertex
+solves and other L-BFGS history lengths unchanged. The prior 256-entry history gave
 973 objective evaluations on a measured slow input; 32 gave 486. The objective,
 constraints, quadrature and stopping criteria remain the same, but the changed
 search direction can select a different nonconvex solution. All 600 frozen V24
@@ -138,6 +138,27 @@ Dense references passed the original full-curve quality tolerances with this
 configuration. Preserve objective regressions, including the 15.4674% maximum,
 and validate complete task and latency separately. This is an explicit speed
 and local-solution tradeoff, not a bitwise-equivalent optimization.
+
+Initialize the common duration scale by a bracketed derivative root, using the
+existing MINCO energy/time value and gradient. With fixed spatial points and
+duration ratios, write `T_i = exp(ell) * base_T_i` and
+`g = d log(energy + rho * sum(T_i)) / d ell`. Start at `ell = 0`, search in fixed
+log-scale steps for negative/positive derivative endpoints, then bisect. Count
+every actual objective/gradient evaluation against a total budget of 64. Success
+requires finite values and `abs(g) < 1e-8`; a small interval or an exhausted budget
+is not convergence. Require finite positive time weight and base durations. Zero
+jerk energy remains valid when the total energy/time cost is positive.
+
+This finds a stationary initialization, not a certified minimum: the scalar
+objective can have multiple stationary points. Main optimization still owns all
+spatial variables, individual durations and penalties. For one piece with no
+active penalties, the existing positive-time transformation satisfies
+`abs(dT/dtau)/T <= 1`; thus this scalar gradient bound is stricter than the main
+objective-relative gradient threshold. Derivative evaluation resolves the known
+cases even when remaining cost decrease is below double-precision cost noise.
+Do not relabel a failed line search as success or add an optimizer fallback.
+Retain the rejected uniform L-BFGS tolerance change and its 19 failures among
+472 completed archive inputs as counterevidence.
 
 Batch position-plane projections while preserving the original three-term dot
 order and face-order cost/gradient accumulation. Reuse one buffer per piece;

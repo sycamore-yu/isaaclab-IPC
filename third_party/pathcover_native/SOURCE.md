@@ -633,6 +633,51 @@ license; embedded geometry utilities retain their original notices.
     tradeoffs remain explicit in `pathcover-gcopter-work-history32-v25-study.json`.
     Frozen-input checks do not establish behavior on states induced by the new
     references or an end-to-end planning latency guarantee.
+49. Uniformly tightening the former L-BFGS scalar initializer from `1e-5` to
+    `1e-8` was rejected before the derivative-root change below. A V25 Forest failure had no
+    accepted main step and 64 line-search trials, all with inactive penalties.
+    A 100-digit boundary-quintic oracle placed its initial duration 93.293 ns
+    from a strict local minimum: remaining objective decrease was 1.00816e-12,
+    while native cost rounding reached 1.50010e-12 and rejected four truly
+    Wolfe-admissible trials. The tighter initializer fixed that input and passed
+    nine frozen complete-reference checks, but the broader Dense archive found
+    four new initializer line-search failures among the first 100 inputs
+    (sequences 64, 71, 92 and 97). Their prior history32 baseline succeeded.
+    This counterevidence stopped the broader study early; completed records and
+    its actual coverage remain archived. The candidate also changed nonconvex
+    solutions, with up to +1.1271% objective in the small panel. Neither failed
+    initialization nor failed main optimization is relabeled as success. The
+    original failure and the rejected candidate remain in
+    `pathcover-newton-v25-initialization-study.json`; no additional epsilon sweep
+    was used to rescue that rejected L-BFGS candidate.
+50. Scalar time initialization now seeks a stationary uniform scale using the
+    existing analytic `energyTimeScale` derivative. From `logScale=0`, unit steps
+    seek a negative-to-positive derivative bracket; bisection then refines it.
+    The initial point or any evaluated point may terminate only when the
+    absolute dimensionless `|d log(J)/d logScale| < 1e-8`. There are at most 64
+    total objective/gradient evaluations. An exhausted budget, a nonrepresentable
+    interior midpoint, or a nonfinite cost/gradient remains a negative status.
+    Finite positive time weight and base durations define the input domain.
+    There is no Wolfe cost-decrease test, retry, previous-solution fallback or
+    post-failure relabeling. Fixed waypoint positions and time ratios, the main
+    optimizer, all penalties/bounds and main stopping rules are unchanged.
+    This is stationary initialization, not a guarantee of a local or global
+    minimum: even a one-piece positive energy/time objective can have multiple
+    stationary times. For one piece with inactive penalties, the existing
+    time map satisfies `|dT/dtau|/T <= 1`, so the scalar `1e-8` bound also bounds
+    the main objective-relative gradient below its existing `1e-7` threshold.
+    That implication does not extend to all time/waypoint gradients of a
+    multi-piece problem. A 100-digit independent six-piece quadratic oracle
+    measured scalar-gradient error at most 3.96e-14 on the first rejected-input
+    counterexample while log-cost rounding exceeded the attainable decrease.
+    The derivative-root candidate passed 28 frozen solves and full original-SFC
+    and saved-yaw physical checks, including all 19 failed initializer inputs
+    observed before the earlier archive study stopped. Initialization needed
+    23--31 evaluations. The new scale can alter nonconvex main optimization:
+    one main solve increased from 573 to 1,093 evaluations while reducing the
+    raw objective by 5.0448%; the panel's largest objective increase was 1.7609%.
+    These tradeoffs are retained in `pathcover-newton-v25-initialization-study.json`
+    and are not an end-to-end latency or physical-navigation claim.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online

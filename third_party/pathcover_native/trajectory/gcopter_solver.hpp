@@ -1300,24 +1300,85 @@ namespace trajectory_server
 
         inline int initializeTimeScale()
         {
-            // Preserve waypoints and duration ratios. The scalar objective uses
-            // log(MINCO energy + existing time weight), without flatness or
-            // constraint penalties. This preserves the positive objective's
-            // minima and gives the scalar gradient a relative stopping scale.
-            // It precedes one full-variable solve.
+            // Stationary uniform-scale initialization only. Multiple stationary
+            // points can exist; this does not certify a local or global minimum.
             const Eigen::VectorXd baseTimes = times;
             TimeScaleContext context{this, &baseTimes};
             Eigen::VectorXd logScale = Eigen::VectorXd::Zero(1);
-            lbfgs::lbfgs_parameter_t parameters;
-            parameters.mem_size = 8;
-            parameters.past = 0;
-            parameters.g_epsilon = 1e-5;
-            parameters.max_iterations = 64;
-            parameters.min_step = 1e-32;
+            Eigen::VectorXd gradient(1);
+            constexpr int evaluationBudget = 64;
+            constexpr double gradientTolerance = 1e-8;
             const auto begin = std::chrono::steady_clock::now();
-            double cost;
-            timeInitialization.status = lbfgs::lbfgs_optimize(logScale, cost, &GcopterSolver::energyTimeScale,
-                nullptr, nullptr, &context, parameters);
+            double cost = INFINITY;
+            int status = lbfgs::LBFGSERR_MAXIMUMITERATION;
+            const auto evaluate = [&](double value) {
+                logScale(0) = value;
+                cost = energyTimeScale(&context, logScale, gradient);
+                return std::isfinite(cost) && gradient.allFinite();
+            };
+            if (!std::isfinite(rho) || rho <= 0.0 || baseTimes.size() == 0 ||
+                !baseTimes.allFinite() || baseTimes.minCoeff() <= 0.0)
+            {
+                status = lbfgs::LBFGSERR_INVALID_FUNCVAL;
+            }
+            else if (!evaluate(0.0))
+            {
+                status = lbfgs::LBFGSERR_INVALID_FUNCVAL;
+            }
+            else if (std::abs(gradient(0)) < gradientTolerance)
+            {
+                status = lbfgs::LBFGS_CONVERGENCE;
+            }
+            else
+            {
+                const double direction = gradient(0) < 0.0 ? 1.0 : -1.0;
+                double previous = 0.0, lower = 0.0, upper = 0.0;
+                bool bracketed = false;
+                while (context.evaluations < evaluationBudget && !bracketed)
+                {
+                    const double trial = previous + direction;
+                    if (!evaluate(trial))
+                    {
+                        status = lbfgs::LBFGSERR_INVALID_FUNCVAL;
+                        break;
+                    }
+                    if (std::abs(gradient(0)) < gradientTolerance)
+                    {
+                        status = lbfgs::LBFGS_CONVERGENCE;
+                        break;
+                    }
+                    if (gradient(0) * direction > 0.0)
+                    {
+                        lower = direction > 0.0 ? previous : trial;
+                        upper = direction > 0.0 ? trial : previous;
+                        bracketed = true;
+                    }
+                    previous = trial;
+                }
+                while (bracketed && status == lbfgs::LBFGSERR_MAXIMUMITERATION &&
+                       context.evaluations < evaluationBudget)
+                {
+                    const double middle = lower + 0.5 * (upper - lower);
+                    if (middle == lower || middle == upper)
+                    {
+                        status = lbfgs::LBFGSERR_WIDTHTOOSMALL;
+                        break;
+                    }
+                    if (!evaluate(middle))
+                    {
+                        status = lbfgs::LBFGSERR_INVALID_FUNCVAL;
+                        break;
+                    }
+                    if (std::abs(gradient(0)) < gradientTolerance)
+                    {
+                        status = lbfgs::LBFGS_CONVERGENCE;
+                        break;
+                    }
+                    if (gradient(0) < 0.0) lower = middle;
+                    else upper = middle;
+                }
+            }
+            timeInitialization.status = status;
             timeInitialization.elapsedMs = std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - begin).count();
             timeInitialization.evaluations = context.evaluations;
@@ -2427,9 +2488,8 @@ namespace trajectory_server
 
         // maxIterations bounds the solve so one bad corridor cannot stall a
         // receding-horizon replan; 0 leaves L-BFGS uncapped. Hitting the cap
-        // returns LBFGSERR_MAXIMUMITERATION (negative), so the partial iterate
-        // is discarded and the caller keeps its previous trajectory -- the same
-        // way traj_opt treats its earlyExit cancellation as a failed solve.
+        // returns LBFGSERR_MAXIMUMITERATION (negative). The incomplete iterate
+        // is discarded and the caller receives an explicit planning failure.
         inline double optimize(Trajectory<Degree> &traj,
                                const double &relCostTol,
                                const int &maxIterations)
