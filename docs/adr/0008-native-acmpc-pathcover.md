@@ -36,9 +36,13 @@ code and evidence remain available; this branch develops the new AC-MPC route.
   constraint satisfaction; record sampled violations during validation.
 - Request the official YAML's 0.15 m reference position margin in GCOPTER's penalty copy.
   It shifts the unit-normal position residual only, with the existing caps from
-  polytope/intersection inscribed radii. Original SFCs, waypoint parameterization,
-  map inflation and vehicle radius stay identical. Record both requested and
-  applied margins. This remains a soft objective, not guaranteed clearance.
+  polytope/intersection inscribed radii. In the first and last corridor, additionally
+  cap each face's margin by the fixed endpoint's nonnegative original clearance.
+  A fixed point on an original SFC face must not be required to move 0.15 m inward.
+  Original SFCs, endpoint PVA, waypoint parameterization, map inflation and vehicle
+  radius stay identical. Record requested margin, geometric caps and actual
+  per-face margins separately. The per-corridor applied value is the minimum
+  actual face margin. This remains a soft objective, not guaranteed clearance.
 - Match the official frontend's reference acceptance semantics: optimization must
   produce a finite cost and a nonempty numerical trajectory. Interface conditions
   such as positive durations and a defined attitude/yaw remain necessary.
@@ -60,10 +64,16 @@ code and evidence remain available; this branch develops the new AC-MPC route.
   1e4 to 1e5 after an exactly reproduced SFC violation. Weights are
   `(1e5, 100, 1e4, 1e4, 1e4)`; increasing the rate weight as well reintroduced
   a 16.762 mm SFC violation and was rejected.
-  Scale upstream thrust bounds `(2, 10) N` by `mass / 0.716 kg` and intersect them
-  with the CTBR physical force range. This defines the reference optimization
-  limits; the MPC retains its physical input constraints. Preserve measured
-  initial PVA even when it exceeds a reference limit. Prior 6 m/s runs remain
+  Standalone PathCover retains the upstream thrust defaults `(2, 10) N` scaled by
+  `mass / 0.716 kg`. The CTBR Newton and MARSIM factories use the physical CTBR
+  upper force bound for reference optimization: `mass * specific_thrust_limits[1]`,
+  currently 22.0725 N. Their lower reference bound still intersects the upstream
+  lower bound with CTBR's lower force bound. This V24 change removes the earlier
+  10.474860335 N reference upper bound; it does not change the MPC or executor
+  limits. Preserve the old-model failures. A demonstrated feasible full curve for
+  a saved descending state peaks at 13.59695 N; this is a witness under the
+  actual force range, not proof that every old-model
+  solution was infeasible. Preserve measured initial PVA. Prior 6 m/s runs remain
   separate stress results; do not combine them with the new matched baseline.
 - Keep the physical roll/pitch rate bound separate from the reference target.
   `reference_body_rate_margin=0.01 rad/s` lowers only GCOPTER's zero-heading
@@ -155,6 +165,22 @@ staging and host finishing count inside the existing grid stage. The incremental
 inflater's scratch window is not a reusable copy of the accumulated map.
 Limit NanoVoxMap's host merge workers using the existing frontend `num_threads`;
 leave its CUDA update algorithm and public hardware-selected default unchanged.
+
+Pass Nano's complete integer occupied-block snapshot directly to the inflater.
+Replace the seed bit-grid on each update, including miss-cleared and empty maps;
+do not accumulate a union of historical obstacles. Preserve the existing
+inflation kernel, output clipping, index range and CPU/CUDA selection. Keep the
+public point-cloud input for independent users. For coarse projection, precompute
+integer axis endpoint ranges within the actual fine window, preserving box and
+occupied-index order.
+
+In the 3D GCOPTER objective, specialize the exact zero-drag, zero-yaw flatness
+case while retaining the generic implementation. Preserve the surviving
+arithmetic and reduction order. Compute snap only for a nonzero jerk adjoint.
+Objective, quadrature, bounds and stopping rules do not change as part of this
+performance optimization. Existing finite-cost and finite-quality rejection
+remains. Finite-domain equality does not assert identical NaN payloads or signed
+zeros outside that domain.
 
 Strengthen 3D DMP's heuristic with exact reverse costs on a relaxed XY graph.
 Each column uses its minimum free-cell potential; every actual 3D edge remains

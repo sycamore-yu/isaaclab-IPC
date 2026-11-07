@@ -67,7 +67,7 @@ def benchmark_frontend_config(case, config, reference_speed=3.0):
         max_velocity=physical_speed, nominal_velocity=min(reference_speed, physical_speed),
         mass=config.mass, gravity=config.gravity,
         thrust_min=max(reference.thrust_min, config.mass * config.specific_thrust_limits[0]),
-        thrust_max=min(reference.thrust_max, config.mass * config.specific_thrust_limits[1]),
+        thrust_max=config.mass * config.specific_thrust_limits[1],
         body_rate_max=min(config.body_rate_limits[:2]), body_yaw_rate_max=config.body_rate_limits[2],
         use_cuda=True,
     )

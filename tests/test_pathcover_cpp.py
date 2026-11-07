@@ -105,6 +105,36 @@ int main() {
     if (std::abs(trajectory[0].getDuration() - 1.4983553795894553) > 1e-7
         || std::abs(minco_cost - 185.8492727009114) > 1e-8) return 13;
 
+    // Dense V23: a fixed local endpoint can lie on an SFC exit face. An inward
+    // penalty must retain that endpoint without shrinking unrelated faces.
+    // One polytope exercises both endpoint caps on the same set of faces.
+    Eigen::Matrix3d head = Eigen::Matrix3d::Zero(), tail = head;
+    head.col(0) << -2.0, 0.0, 1.0;
+    tail.col(0) << 2.0, 2.95, 0.0;
+    trajectory_server::GcopterSolver<3> endpoints;
+    if (!endpoints.setup(100.0, head, tail, {h}, 0.15, 2.0, 1, 0.01,
+                         64, dynamic_limits, penalty_weights, physics)) return 15;
+    const auto face_margins = endpoints.getAppliedFaceMargins();
+    Eigen::VectorXd expected(6); expected << 0.0, 0.0, 0.05, 0.15, 0.15, 0.15;
+    if (face_margins.size() != 1 || (face_margins[0] - expected).cwiseAbs().maxCoeff() > 1e-12) return 16;
+    if (std::abs(endpoints.getMarginCaps()[0] - 0.15) > 1e-12
+        || std::abs(endpoints.getAppliedMargins()[0]) > 1e-12) return 17;
+    Eigen::MatrixX4d inner = h; inner.col(3) += face_margins[0];
+    if ((inner.leftCols<3>() * head.col(0) + inner.col(3)).maxCoeff() > 1e-12
+        || (inner.leftCols<3>() * tail.col(0) + inner.col(3)).maxCoeff() > 1e-12) return 18;
+
+    // With three overlapping boxes, only the first/last endpoints affect caps;
+    // the middle penalty domain retains all six original 0.15 m offsets.
+    Eigen::MatrixX4d left = h, right = h;
+    left.col(3) += 2.0 * h.col(0); right.col(3) -= 2.0 * h.col(0);
+    head.col(0) << -4.0, 0.0, 0.0; tail.col(0) << 4.0, 2.95, 0.0;
+    if (!endpoints.setup(100.0, head, tail, {left, h, right}, 0.15, 2.0, 1, 0.01,
+                         64, dynamic_limits, penalty_weights, physics)) return 19;
+    const auto three = endpoints.getAppliedFaceMargins();
+    if (three.size() != 3 || (three[1].array() - 0.15).abs().maxCoeff() > 1e-12
+        || std::abs(three[0][1]) > 1e-12 || std::abs(three[2][0]) > 1e-12
+        || std::abs(three[2][2] - 0.05) > 1e-12) return 20;
+
     // The V16 zero-work branch uses this exact chain-rule identity. Exercise
     // nonzero position/velocity derivatives and nonzero drag, including a tiny
     // position derivative that must not be treated as approximately zero.
@@ -227,7 +257,7 @@ int main() {
             pathcover_grid::coarsenOccupiedVolumes(bits,
                 pathcover_grid::resolutionRatio(lengths.first / 20.0, lengths.second / 20.0),
                 start, size, actual, indices);
-            pathcover_grid::coarsenOccupiedBoxes(pathcover_boxes::compress(bits),
+            pathcover_grid::coarsenOccupiedBoxes(pathcover_boxes::compress(bits), bits.window(),
                 pathcover_grid::resolutionRatio(lengths.first / 20.0, lengths.second / 20.0),
                 start, size, boxed, box_indices);
             for (int z=0;z<size.z();++z) for (int y=0;y<size.y();++y)

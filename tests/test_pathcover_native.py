@@ -380,6 +380,37 @@ def test_finite_soft_speed_violation_returns_reference_and_false_diagnostic():
     assert np.linalg.norm(samples.velocity, axis=1).max() == pytest.approx(peak, abs=1e-10)
 
 
+def test_reference_margin_metadata_preserves_face_offsets_and_hold_shape():
+    native_module()
+    frontend = NativePathCoverFrontend(configuration())
+    initial = replace(state(), position=np.array([-1.75, 0.0, 1.5]))
+    plan = frontend.plan(None, initial, np.array([5.0, 0.0, 1.5]))
+    assert len(plan.corridors) == 1
+    caps = plan.metrics["reference_margin_cap_per_corridor_m"]
+    minima = plan.metrics["reference_margin_applied_per_corridor_m"]
+    faces = plan.metrics["reference_margin_applied_per_face_m"]
+    assert caps == pytest.approx([0.15])
+    assert minima == pytest.approx([0.05])
+    assert len(faces) == len(plan.corridors)
+    for corridor, values, cap, minimum in zip(plan.corridors, faces, caps, minima, strict=True):
+        values = np.asarray(values)
+        assert values.shape == (len(corridor),)
+        assert minimum == values.min()
+        assert values.max() == pytest.approx(cap)
+        assert np.all(values >= 0.0) and np.all(values <= cap + 1e-14)
+        # Both original fixed endpoints remain inside the penalty copy.
+        penalty_offsets = corridor[:, 3] + values
+        assert np.max(corridor[:, :3] @ initial.position + penalty_offsets) <= 1e-14
+        assert np.max(corridor[:, :3] @ plan.local_goal + penalty_offsets) <= 1e-14
+    assert "minimum actual face offset" in plan.metrics["reference_margin_semantics"]
+
+    hold = frontend.plan(None, initial, initial.position)
+    assert hold.metrics["reference_margin_cap_per_corridor_m"] == [0.0] * len(hold.corridors)
+    assert hold.metrics["reference_margin_applied_per_corridor_m"] == [0.0] * len(hold.corridors)
+    for corridor, values in zip(hold.corridors, hold.metrics["reference_margin_applied_per_face_m"], strict=True):
+        np.testing.assert_array_equal(values, np.zeros(len(corridor)))
+
+
 def test_nonfinite_optimizer_objective_is_still_a_planning_error():
     native_module()
     # Finite input values can still overflow the energy/time objective.

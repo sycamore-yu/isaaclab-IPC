@@ -376,6 +376,16 @@ class NativePathCoverFrontend:
             "body_rate_physical_limit_rad_s": self.config.body_rate_max,
             "reference_margin_requested_m": self.config.safety_margin,
             "reference_margin_applied_per_corridor_m": np.asarray(result.applied_reference_margins).tolist(),
+            "reference_margin_cap_per_corridor_m": np.asarray(result.reference_margin_caps).tolist(),
+            "reference_margin_applied_per_face_m": [
+                np.asarray(margins).tolist() for margins in result.applied_reference_face_margins
+            ],
+            "reference_margin_semantics": (
+                "penalty-only inward offsets in original corridor/face order; "
+                "applied_per_corridor is the minimum actual face offset; "
+                "cap_per_corridor is the geometric cap before endpoint reductions; "
+                "all offsets and caps are zero for an unoptimized hold"
+            ),
             "occupied_voxels": last_map.occupied_voxels, "inflated_voxels": last_map.inflated_voxels,
             "geometry_boxes": last_map.geometry_boxes,
             "gpu_mapping": last_map.gpu_mapping, "gpu_inflation": last_map.gpu_inflation,

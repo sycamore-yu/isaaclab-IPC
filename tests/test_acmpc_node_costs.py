@@ -197,7 +197,7 @@ def test_frontend_and_ctbr_share_physical_parameters():
     model = CTBRConfig(mass=0.9, gravity=9.7)
     frontend = pathcover_config_for_ctbr(model, {"max_velocity": 4.0, "body_rate_max": 2.0})
     assert frontend.mass == model.mass and frontend.gravity == model.gravity
-    assert frontend.thrust_max == pytest.approx(10.0 / 0.716 * model.mass)
+    assert frontend.thrust_max == pytest.approx(model.mass * model.specific_thrust_limits[1])
     assert frontend.thrust_min == pytest.approx(2.0 / 0.716 * model.mass)
     assert frontend.body_yaw_rate_max == model.body_rate_limits[2]
     assert frontend.max_velocity == 4.0 and frontend.body_rate_max == 2.0
@@ -219,6 +219,8 @@ def test_frontend_and_ctbr_share_physical_parameters():
     })
     assert stress.nominal_velocity == 6.0 and stress.thrust_min == 0.0
     assert stress.thrust_max == model.mass * model.specific_thrust_limits[1]
+    conservative = pathcover_config_for_ctbr(model, {"thrust_max": 10.0 / 0.716 * model.mass})
+    assert conservative.thrust_max == pytest.approx(10.0 / 0.716 * model.mass)
     with pytest.raises(ValueError, match="mass"):
         pathcover_config_for_ctbr(model, {"mass": 0.75})
     with pytest.raises(ValueError, match="body_yaw_rate_max"):
@@ -235,7 +237,7 @@ def test_marsim_keeps_cruise_target_distinct_from_physical_speed(benchmark, phys
     assert frontend.max_velocity == physical_speed
     assert frontend.nominal_velocity == 3.0
     assert frontend.thrust_min == pytest.approx(2.0 / 0.716 * model.mass)
-    assert frontend.thrust_max == pytest.approx(10.0 / 0.716 * model.mass)
+    assert frontend.thrust_max == pytest.approx(model.mass * model.specific_thrust_limits[1])
     assert frontend.tilt_max == 0.7854
     assert frontend.penalty_weights == (1e5, 100.0, 1e4, 1e4, 1e4)
     assert frontend.body_rate_max == 3.0 and frontend.reference_body_rate_margin == 0.01

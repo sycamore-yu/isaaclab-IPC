@@ -124,7 +124,10 @@ struct PlanResult {
     std::vector<HPoly> corridors;
     std::vector<Coefficients> coefficients;
     Eigen::VectorXd durations;
+    // The legacy scalar is the minimum actual face offset per corridor.
     Eigen::VectorXd applied_reference_margins;
+    Eigen::VectorXd reference_margin_caps;
+    std::vector<Eigen::VectorXd> applied_reference_face_margins;
     Eigen::VectorXi corridor_indices;
     Eigen::Matrix<double, 6, 1> constraint_metrics = Eigen::Matrix<double, 6, 1>::Zero();
     double cost = 0.0, search_ms = 0.0, corridor_ms = 0.0, trajectory_ms = 0.0;
@@ -138,15 +141,6 @@ struct PlanResult {
     bool dmp_xy_heuristic = false, dmp_xy_cache_hit = false;
     bool optimizer_quadrature_feasible = false;
     TimeInitialization time_initialization;
-};
-
-struct CloudReader {
-    const std::vector<Vec3> &points;
-    std::size_t size() const { return points.size(); }
-    bool point(std::size_t i, float &x, float &y, float &z) const {
-        x = points[i].x(); y = points[i].y(); z = points[i].z();
-        return true;
-    }
 };
 
 struct OptimizationFailure {
@@ -301,13 +295,12 @@ public:
             if (points.row(i).allFinite()) endpoints.emplace_back(points.row(i));
         }
         map_->insertPointCloud(sensor_origin, endpoints);
-        auto occupied = map_->getOccupiedVoxels();
         last_update_.mapping_ms = milliseconds(begin);
-        last_update_.occupied_voxels = occupied.size();
+        last_update_.occupied_voxels = map_->numOccupied();
         last_update_.gpu_mapping = map_->activeBackend() == NanoVoxMap::Backend::kCuda;
         const auto inflate_begin = Clock::now();
         occupancy_inflation::InflationStats stats;
-        inflater_.inflate(CloudReader{occupied}, &stats);
+        inflater_.inflateOccupancySnapshot(*map_, &stats);
         if (!stats.ok) throw std::runtime_error("PathCover occupancy inflation failed");
         last_update_.inflation_ms = milliseconds(inflate_begin);
         last_update_.gpu_inflation = stats.gpu_dilation;
@@ -331,7 +324,7 @@ public:
             }
             VoxelGrid::resetOccupancy(grid_->map_, occupied_indices_);
             pathcover_grid::coarsenOccupiedBoxes(
-                boxes, grid_resolution_ratio_, grid_origin_index_, dimensions_,
+                boxes, fine_grid.window(), grid_resolution_ratio_, grid_origin_index_, dimensions_,
                 grid_->map_, occupied_indices_);
             geometry_box_centers_.clear();
             geometry_box_halfwidths_.clear();
@@ -595,6 +588,10 @@ public:
             result.durations = Eigen::VectorXd::Constant(1, 0.1);
             result.corridor_indices = Eigen::VectorXi::Zero(1);
             result.applied_reference_margins = Eigen::VectorXd::Zero(result.corridors.size());
+            result.reference_margin_caps = Eigen::VectorXd::Zero(result.corridors.size());
+            for (const auto &corridor : result.corridors) {
+                result.applied_reference_face_margins.push_back(Eigen::VectorXd::Zero(corridor.rows()));
+            }
             result.constraint_metrics <<
                 (result.corridors.front().leftCols<3>() * position + result.corridors.front().col(3)).maxCoeff(),
                 0.0, options_.mass * options_.gravity, options_.mass * options_.gravity, 0.0, 0.0;
@@ -619,6 +616,8 @@ public:
             }
             solver.setPositionPenaltySmoothing(options_.position_penalty_smoothing);
             result.applied_reference_margins = solver.getAppliedMargins();
+            result.reference_margin_caps = solver.getMarginCaps();
+            result.applied_reference_face_margins = solver.getAppliedFaceMargins();
             Trajectory<5> trajectory;
             result.cost = solver.optimize(trajectory, options_.relative_tolerance, options_.max_iterations);
             result.optimizer_status = solver.getStatus();
@@ -727,6 +726,8 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def_readonly("coefficients", &PlanResult::coefficients)
         .def_readonly("durations", &PlanResult::durations)
         .def_readonly("applied_reference_margins", &PlanResult::applied_reference_margins)
+        .def_readonly("reference_margin_caps", &PlanResult::reference_margin_caps)
+        .def_readonly("applied_reference_face_margins", &PlanResult::applied_reference_face_margins)
         .def_readonly("corridor_indices", &PlanResult::corridor_indices)
         .def_readonly("constraint_metrics", &PlanResult::constraint_metrics)
         .def_readonly("optimizer_quadrature_feasible", &PlanResult::optimizer_quadrature_feasible)

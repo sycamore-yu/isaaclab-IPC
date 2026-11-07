@@ -97,7 +97,7 @@ def pathcover_config_for_ctbr(model, overrides):
     if options.get("thrust_min") is None:
         options["thrust_min"] = max(reference.thrust_min, floor)
     if options.get("thrust_max") is None:
-        options["thrust_max"] = min(reference.thrust_max, cap)
+        options["thrust_max"] = cap
     if options["thrust_min"] < floor:
         raise ValueError("PathCover thrust_min is below the CTBR minimum")
     if options["thrust_max"] > cap:

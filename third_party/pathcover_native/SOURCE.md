@@ -513,6 +513,71 @@ license; embedded geometry utilities retain their original notices.
     case. This is an objective-scaled stationarity criterion, not a feasibility
     or objective-error certificate; adding a constant to J changes its scale.
 
+42. Native mapping passes a complete integer occupancy snapshot from NanoVoxMap
+    to the inflater. A read-only visitor exposes each occupied 8x8x8 block's
+    eight uint64 masks and global integer base. The inflater finds the exact
+    occupied extent, clears/resizes its existing current grid, and writes each
+    nonzero eight-bit X row directly into the corresponding packed word. It
+    then calls the unchanged `finishOneShot`: misses, shrinking windows, cleared
+    maps and equal-count occupancy moves replace the full seed set; they are
+    not accumulated by union. The original float point-cloud entry remains.
+    Both components use the same world-zero lattice in NativeFrontend. Input
+    filtering is disabled for this complete-map entry; the original supported
+    index range, snapped windows, output clipping and inflation kernel remain.
+    Seeds outside output bounds can still inflate into the retained volume.
+    CPU/CUDA outputs, seed/output windows and words, change flags, ordered boxes,
+    coarse occupancy and DMP results match the original centre-export pipeline.
+    `mapping_ms` now ends after map insertion; integer snapshot construction is
+    included in `inflation_ms`. Comparisons therefore include the complete old
+    centre export plus inflation and the complete new snapshot fill plus
+    inflation, rather than comparing a moved timing boundary. The isolated
+    study distinguishes one frozen real scan from a large synthetic seed set
+    made from previously inflated voxels; the latter is not a Nano map-history
+    replay or an end-to-end latency result. Numerical and paired timing records
+    are in `pathcover-nanovox-integer-snapshot-v24-study.json`.
+43. Fine-box projection precomputes the original rational integer endpoint
+    mapping once along each axis of the current fine-grid window. Each box then
+    looks up its lower/upper endpoint rather than repeating six signed divisions.
+    These per-call tables retain the same floor/ceil rules, negative-index
+    semantics, clipping, box traversal and occupied-index insertion order.
+    They neither quantize coordinates nor cache a previous map's window.
+    Virtual occupancy and positive-volume overlap remain unchanged. The
+    isolated correctness and complete projection timings are recorded in
+    `pathcover-projection-axis-v24-study.json`.
+44. The 3D penalty loop selects a specialized flatness calculation when its
+    drag coefficients and the supplied heading/rate are exactly zero. Other
+    parameters retain the original general calculation. The same loop evaluates
+    polynomial snap only when the propagated jerk adjoint is nonzero, since
+    otherwise its chain-rule contribution is exactly zero. These changes retain
+    the objective, constraints, 64-subdivision quadrature and optimizer stopping
+    rules; they introduce no trajectory acceptance gate. Finite/nonfinite caller
+    contracts and six complete optimizer traces preserve objectives, gradients,
+    accepted steps, coefficients and durations, including the previously recorded
+    infeasible reference. The separate isolated timing evidence is recorded in
+    `pathcover-flatness-compute-v24-study.json`; independent stage savings are
+    not added to predict an end-to-end latency result.
+45. The 3D penalty-copy construction caps each first/last corridor face's
+    inward offset by the corresponding fixed endpoint's nonnegative original
+    face clearance. A single corridor applies both endpoint caps. Other faces
+    retain the existing requested/polytope/overlap-radius cap. This makes the
+    penalty domain include feasible fixed endpoints without changing their PVA,
+    the returned SFC, its intersections, the occupancy map or body inflation.
+    `getMarginCaps` reports the geometric caps; `getAppliedFaceMargins` reports
+    actual offsets in original face order. The preserved `getAppliedMargins`,
+    native `applied_reference_margins` and Python
+    `reference_margin_applied_per_corridor_m` now explicitly report each
+    corridor's minimum actual face offset, not a uniform offset on all faces.
+    `reference_margin_cap_per_corridor_m` and
+    `reference_margin_applied_per_face_m` expose the distinct complete values.
+    An unoptimized constant hold reports zero caps and zero face offsets.
+    The CTBR-specific Newton/ROS factories also use the controller's physical
+    maximum collective thrust as the reference maximum; the reference minimum
+    retains the mass-scaled upstream value intersected with the physical bound.
+    Standalone PathCover retains the upstream mass-scaled maximum. The default
+    CTBR physical force range and all MPC hard constraints are unchanged. These
+    are reference-objective changes supported by the frozen five-problem panel,
+    not a new acceptance gate or a proof of continuous feasibility.
+
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online
 execution-trajectory reintegration or recovery state machine is added.

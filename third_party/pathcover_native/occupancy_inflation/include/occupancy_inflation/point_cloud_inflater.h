@@ -22,10 +22,13 @@
 #define OCCUPANCY_INFLATION_POINT_CLOUD_INFLATER_H_
 
 #include <Eigen/Core>
+#include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -193,6 +196,17 @@ class PointCloudInflater {
    */
   template <typename Reader>
   void inflate(const Reader &reader, InflationStats *stats);
+
+  /** Replace the seed set with a complete occupied-block snapshot.
+   * Source exposes numOccupied() and forEachOccupiedBlock(visitor), where
+   * visitor receives an integer base aligned to 8 and eight uint64 z planes.
+   * The indices already use this inflater's configured lattice. Input filtering
+   * is unsupported; output clipping and the existing dilation are unchanged.
+   * This entry always replaces the complete set, including removals and empty
+   * snapshots, regardless of the point-cloud API's incremental setting.
+   */
+  template <typename BlockSource>
+  void inflateOccupancySnapshot(const BlockSource &source, InflationStats *stats);
 
   /**
    * @brief Voxels serialize() will write.
@@ -497,6 +511,105 @@ void PointCloudInflater::inflate(const Reader &reader, InflationStats *stats) {
 
   params_.incremental ? finishIncremental(&local) : finishOneShot(&local);
   done(stats);
+}
+
+template <typename BlockSource>
+void PointCloudInflater::inflateOccupancySnapshot(
+    const BlockSource &source, InflationStats *stats) {
+  const auto t_start = std::chrono::steady_clock::now();
+  InflationStats local;
+  local.input_points = source.numOccupied();
+  local.seed_voxels = seed_count_;
+  local.inflated_voxels = occupied_count_;
+  const auto done = [&]() {
+    local.output_voxels = occupiedCount();
+    local.duration_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - t_start).count();
+    if (stats != nullptr) *stats = local;
+  };
+  if (!configured_) {
+    local.ok = false;
+    local.error = InflationError::kNotConfigured;
+    done();
+    return;
+  }
+  if (params_.input_filter_enable) {
+    throw std::invalid_argument(
+        "inflateOccupancySnapshot requires an unfiltered integer seed snapshot");
+  }
+  local.filtered_points = local.input_points;
+
+  Eigen::Vector3i lower = Eigen::Vector3i::Constant(std::numeric_limits<int>::max());
+  Eigen::Vector3i upper = Eigen::Vector3i::Constant(std::numeric_limits<int>::min());
+  bool occupied = false;
+  source.forEachOccupiedBlock([&](const Eigen::Vector3i &base,
+                                 const std::array<uint64_t, 8> &words) {
+    uint64_t xy = 0;
+    int first_z = 8, last_z = -1;
+    for (int z = 0; z != 8; ++z) {
+      if (words[z] == 0) continue;
+      xy |= words[z];
+      first_z = std::min(first_z, z);
+      last_z = z;
+    }
+    if (xy == 0) return;
+    uint64_t x_bits = xy | (xy >> 32);
+    x_bits |= x_bits >> 16;
+    x_bits |= x_bits >> 8;
+    x_bits &= 0xff;
+    const Eigen::Vector3i lo(__builtin_ctzll(x_bits), __builtin_ctzll(xy) / 8, first_z);
+    const Eigen::Vector3i hi(63 - __builtin_clzll(x_bits),
+                             (63 - __builtin_clzll(xy)) / 8, last_z);
+    lower = lower.cwiseMin(base + lo);
+    upper = upper.cwiseMax(base + hi);
+    occupied = true;
+  });
+  if (!occupied) {
+    cur_.release();
+    finishOneShot(&local);
+    done();
+    return;
+  }
+
+  // Preserve the old float point entry's supported lattice range. A valid
+  // centre i+0.5 must lie strictly between -(2^20-1) and +(2^20-1).
+  if ((lower.array() < -kIndexBiasInt + 1).any() ||
+      (upper.array() > kIndexBiasInt - 2).any()) {
+    local.ok = false;
+    local.error = InflationError::kOutOfRange;
+    done();
+    return;
+  }
+  const VoxelWindow win = snapWindow(lower, upper);
+  if (!cur_.reset(win, maxWords())) {
+    local.ok = false;
+    local.error = InflationError::kGridTooLarge;
+    done();
+    return;
+  }
+
+  uint64_t *destination = cur_.data();
+  source.forEachOccupiedBlock([&](const Eigen::Vector3i &base,
+                                 const std::array<uint64_t, 8> &words) {
+    const int lx = base.x() - win.base.x();
+    const std::size_t word_x = static_cast<std::size_t>(lx) / kWordBits;
+    const unsigned shift = static_cast<unsigned>(lx) % kWordBits;
+    // The block x base is a multiple of 8 and the window x base a multiple
+    // of 64. Thus each 8-bit row fits in one destination word, even at x<0.
+    for (int z = 0; z != 8; ++z) {
+      uint64_t rows = words[z];
+      while (rows != 0) {
+        const int y = __builtin_ctzll(rows) / 8;
+        const uint64_t row = (rows >> (8 * y)) & 0xff;
+        rows &= ~(uint64_t{0xff} << (8 * y));
+        const std::size_t offset = win.rowOffset(
+            base.y() + y - win.base.y(), base.z() + z - win.base.z()) + word_x;
+        destination[offset] |= row << shift;
+      }
+    }
+  });
+  finishOneShot(&local);
+  done();
 }
 
 }  // namespace occupancy_inflation

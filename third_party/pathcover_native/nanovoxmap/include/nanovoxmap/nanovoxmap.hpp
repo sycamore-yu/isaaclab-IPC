@@ -221,6 +221,22 @@ public:
 
     size_t numOccupied() const { return occupied_count_.load(std::memory_order_relaxed); }
 
+    /** Read the current complete occupied set without materializing world centres.
+     * Each mask contains eight z planes; byte y holds the eight x bits.
+     * The integer base is the world-zero lattice index of the 8x8x8 block.
+     * References remain valid only during this read-only traversal. As for all
+     * map access, the caller serializes mutations of the same instance.
+     */
+    template <typename Visitor>
+    void forEachOccupiedBlock(Visitor&& visit) const {
+        for (const auto& item : blocks_) {
+            const VoxelBlock& block = blockAt(item.second);
+            if (block.occupied_count == 0) continue;
+            const GridIndex base = blockLocalToGrid(item.first, 0, 0, 0);
+            visit(Eigen::Vector3i(base.x, base.y, base.z), block.occupied_mask);
+        }
+    }
+
     Backend requestedBackend() const { return requested_backend_; }
     Backend activeBackend() const {
 #ifdef NANOVOXMAP_WITH_CUDA

@@ -1240,10 +1240,8 @@ namespace trajectory_server
         // than it would on the raw corridor, so containment in the true
         // corridor is enforced at least as hard.
         PolyhedraH penaltyPolytopes;
-        // Inward offset actually applied to each penalty polytope: the
-        // requested margin wherever the corridor could afford it, less where
-        // buildPenaltyPolytopes() had to cap it. Kept for diagnostics.
-        Eigen::VectorXd appliedMargins;
+        // Geometric upper caps before fixed-endpoint per-face reductions.
+        Eigen::VectorXd marginCaps;
         Eigen::Matrix3Xd shortPath;
 
         Eigen::VectorXi pieceIdx;
@@ -1570,6 +1568,7 @@ namespace trajectory_server
         // k-th time derivative: beta_k(idx) = falling_factorial(idx, k) *
         // s^(idx-k) for idx >= k, else 0. This generalizes the original
         // gcopter.hpp's hardcoded 6-term (degree-5) unrolling to any degree.
+        template <bool WithSnap = true>
         static inline void fillDerivativeBasis(double s,
                                                 Eigen::Matrix<double, CoeffRows, 1> &beta0,
                                                 Eigen::Matrix<double, CoeffRows, 1> &beta1,
@@ -1581,7 +1580,10 @@ namespace trajectory_server
             beta1.setZero();
             beta2.setZero();
             beta3.setZero();
-            beta4.setZero();
+            if constexpr (WithSnap)
+            {
+                beta4.setZero();
+            }
 
             double sPow[CoeffRows];
             sPow[0] = 1.0;
@@ -1605,13 +1607,34 @@ namespace trajectory_server
                 {
                     beta3(idx) = idx * (idx - 1) * (idx - 2) * sPow[idx - 3];
                 }
-                if (idx >= 4)
+                if constexpr (WithSnap)
                 {
-                    beta4(idx) = idx * (idx - 1) * (idx - 2) * (idx - 3) * sPow[idx - 4];
+                    if (idx >= 4)
+                    {
+                        beta4(idx) = idx * (idx - 1) * (idx - 2) * (idx - 3) * sPow[idx - 4];
+                    }
                 }
             }
         }
 
+        // Same monomial powers and multiplication order as the original basis.
+        static inline void fillSnapBasis(double s,
+                                         Eigen::Matrix<double, CoeffRows, 1> &beta4)
+        {
+            beta4.setZero();
+            double sPow[CoeffRows];
+            sPow[0] = 1.0;
+            for (int p = 1; p <= Degree - 4; p++)
+            {
+                sPow[p] = sPow[p - 1] * s;
+            }
+            for (int idx = 4; idx <= Degree; idx++)
+            {
+                beta4(idx) = idx * (idx - 1) * (idx - 2) * (idx - 3) * sPow[idx - 4];
+            }
+        }
+
+        template <bool ZeroDragZeroYaw>
         static inline void attachPenaltyFunctional(const Eigen::VectorXd &T,
                                                     const Eigen::MatrixX3d &coeffs,
                                                     const Eigen::VectorXi &hIdx,
@@ -1623,7 +1646,7 @@ namespace trajectory_server
                                                     flatness::FlatnessMap &flatMap,
                                                     ConstraintMetrics &metrics,
                                                     const double positionSmoothFactor,
-                                                    const Eigen::VectorXd &appliedMargins,
+                                                    const PolyhedraH &originalHPolys,
                                                     double &cost,
                                                     Eigen::VectorXd &gradT,
                                                     Eigen::MatrixX3d &gradC)
@@ -1669,14 +1692,20 @@ namespace trajectory_server
                 step = T(i) * integralFrac;
                 for (int j = 0; j <= integralResolution; j++)
                 {
-                    fillDerivativeBasis(j * step, beta0, beta1, beta2, beta3, beta4);
+                    fillDerivativeBasis<false>(j * step, beta0, beta1, beta2, beta3, beta4);
                     pos = c.transpose() * beta0;
                     vel = c.transpose() * beta1;
                     acc = c.transpose() * beta2;
                     jer = c.transpose() * beta3;
-                    sna = c.transpose() * beta4;
 
-                    flatMap.forward(vel, acc, jer, 0.0, 0.0, thr, quat, omg);
+                    if constexpr (ZeroDragZeroYaw)
+                    {
+                        flatMap.forwardZeroDragZeroYaw(acc, jer, thr, quat, omg);
+                    }
+                    else
+                    {
+                        flatMap.forward(vel, acc, jer, 0.0, 0.0, thr, quat, omg);
+                    }
 
                     const double velSquared = vel.squaredNorm(), rateSquared = omg.squaredNorm();
                     violaVel = velSquared - velSqrMax;
@@ -1706,8 +1735,9 @@ namespace trajectory_server
                     for (int k = 0; k < K; k++)
                     {
                         outerNormal = hPolys[L].block<1, 3>(k, 0);
-                        violaPos = outerNormal.dot(pos) + hPolys[L](k, 3);
-                        metrics.sfc = std::max(metrics.sfc, violaPos - appliedMargins(L));
+                        const double projectedPosition = outerNormal.dot(pos);
+                        violaPos = projectedPosition + hPolys[L](k, 3);
+                        metrics.sfc = std::max(metrics.sfc, projectedPosition + originalHPolys[L](k, 3));
                         if (smoothedL1(violaPos, positionSmoothFactor, violaPosPena, violaPosPenaD))
                         {
                             gradPos += weightPos * violaPosPenaD * outerNormal;
@@ -1762,9 +1792,29 @@ namespace trajectory_server
                     }
                     else
                     {
-                        flatMap.backward(gradPos, gradVel, gradThr, gradQuat, gradOmg,
-                                         totalGradPos, totalGradVel, totalGradAcc, totalGradJer,
-                                         totalGradPsi, totalGradPsiD);
+                        if constexpr (ZeroDragZeroYaw)
+                        {
+                            flatMap.backwardZeroDragZeroYaw(gradPos, gradVel, gradThr, gradQuat, gradOmg,
+                                                          totalGradPos, totalGradVel, totalGradAcc, totalGradJer);
+                        }
+                        else
+                        {
+                            flatMap.backward(gradPos, gradVel, gradThr, gradQuat, gradOmg,
+                                             totalGradPos, totalGradVel, totalGradAcc, totalGradJer,
+                                             totalGradPsi, totalGradPsiD);
+                        }
+                    }
+
+                    // flatGradientZero already guarantees an exact zero jerk
+                    // adjoint and finite forward values. On that branch the
+                    // snap product contributes zero; retain the original path
+                    // for every active dynamic derivative or nonfinite node.
+                    double snapGrad = 0.0;
+                    if (!flatGradientZero)
+                    {
+                        fillSnapBasis(j * step, beta4);
+                        sna = c.transpose() * beta4;
+                        snapGrad = totalGradJer.dot(sna);
                     }
 
                     node = (j == 0 || j == integralResolution) ? 0.5 : 1.0;
@@ -1777,7 +1827,7 @@ namespace trajectory_server
                     gradT(i) += (totalGradPos.dot(vel) +
                                  totalGradVel.dot(acc) +
                                  totalGradAcc.dot(jer) +
-                                 totalGradJer.dot(sna)) *
+                                 snapGrad) *
                                     alpha * node * step +
                                 node * integralFrac * pena;
                     cost += node * step * pena;
@@ -1809,12 +1859,25 @@ namespace trajectory_server
             obj.minco.getEnergyPartialGradByCoeffs(obj.partialGradByCoeffs);
             obj.minco.getEnergyPartialGradByTimes(obj.partialGradByTimes);
 
-            attachPenaltyFunctional(obj.times, obj.minco.getCoeffs(),
-                                    obj.hPolyIdx, obj.penaltyPolytopes,
-                                    obj.smoothEps, obj.integralRes,
-                                    obj.magnitudeBd, obj.penaltyWt, obj.flatmap, obj.constraintMetrics,
-                                    obj.positionSmoothEps, obj.appliedMargins,
-                                    cost, obj.partialGradByTimes, obj.partialGradByCoeffs);
+            // Select once per objective evaluation, outside the quadrature loops.
+            if (obj.flatmap.supportsZeroDragZeroYaw())
+            {
+                attachPenaltyFunctional<true>(obj.times, obj.minco.getCoeffs(),
+                                        obj.hPolyIdx, obj.penaltyPolytopes,
+                                        obj.smoothEps, obj.integralRes,
+                                        obj.magnitudeBd, obj.penaltyWt, obj.flatmap, obj.constraintMetrics,
+                                        obj.positionSmoothEps, obj.hPolytopes,
+                                        cost, obj.partialGradByTimes, obj.partialGradByCoeffs);
+            }
+            else
+            {
+                attachPenaltyFunctional<false>(obj.times, obj.minco.getCoeffs(),
+                                        obj.hPolyIdx, obj.penaltyPolytopes,
+                                        obj.smoothEps, obj.integralRes,
+                                        obj.magnitudeBd, obj.penaltyWt, obj.flatmap, obj.constraintMetrics,
+                                        obj.positionSmoothEps, obj.hPolytopes,
+                                        cost, obj.partialGradByTimes, obj.partialGradByCoeffs);
+            }
 
             obj.minco.propogateGrad(obj.partialGradByCoeffs, obj.partialGradByTimes,
                                     obj.gradByPoints, obj.gradByTimes);
@@ -1991,6 +2054,8 @@ namespace trajectory_server
         // negligible beside the L-BFGS solve that follows.
         static inline void buildPenaltyPolytopes(const PolyhedraH &hPs,
                                                  const double &safetyMargin,
+                                                 const Eigen::Vector3d &initialPosition,
+                                                 const Eigen::Vector3d &terminalPosition,
                                                  PolyhedraH &penaltyPs,
                                                  Eigen::VectorXd &margins)
         {
@@ -2024,7 +2089,25 @@ namespace trajectory_server
 
             for (int i = 0; i < n; i++)
             {
-                penaltyPs[i].rightCols<1>().array() += margins(i);
+                for (Eigen::Index k = 0; k < hPs[i].rows(); ++k)
+                {
+                    double offset = margins(i);
+                    const Eigen::Vector3d normal = hPs[i].row(k).head<3>();
+                    // Fixed endpoint positions must also belong to the soft
+                    // penalty domain. Only reduce the affected face offsets;
+                    // the original corridor and all PVA conditions stay fixed.
+                    if (i == 0)
+                    {
+                        const double clearance = -(normal.dot(initialPosition) + hPs[i](k, 3));
+                        offset = std::min(offset, std::max(0.0, clearance));
+                    }
+                    if (i + 1 == n)
+                    {
+                        const double clearance = -(normal.dot(terminalPosition) + hPs[i](k, 3));
+                        offset = std::min(offset, std::max(0.0, clearance));
+                    }
+                    penaltyPs[i](k, 3) = hPs[i](k, 3) + offset;
+                }
             }
         }
 
@@ -2218,7 +2301,8 @@ namespace trajectory_server
             // after processCorridor() has done its work, so the margin cannot
             // influence the decomposition.
             buildPenaltyPolytopes(hPolytopes, safetyMargin,
-                                  penaltyPolytopes, appliedMargins);
+                                  headState.col(0), tailState.col(0),
+                                  penaltyPolytopes, marginCaps);
 
             polyN = hPolytopes.size();
             smoothEps = smoothingFactor;
@@ -2304,14 +2388,35 @@ namespace trajectory_server
         // separate from the upstream dynamic residual smoothing.
         inline void setPositionPenaltySmoothing(double metres) { positionSmoothEps = metres; }
 
-        // Inward offset actually applied to each polytope's penalty copy, in
-        // corridor order. Equal to the requested safety margin wherever the
-        // corridor was wide enough to give it up, smaller where the polytope
-        // or one of its overlaps was too narrow. Valid after setup() returns
-        // true; empty before that.
-        inline const Eigen::VectorXd &getAppliedMargins() const
+        // Original polytope/overlap geometric caps, before endpoint reductions.
+        inline const Eigen::VectorXd &getMarginCaps() const
         {
-            return appliedMargins;
+            return marginCaps;
+        }
+
+        // Actual inward offsets, in original corridor and face order. Compute
+        // metadata only when requested; quadrature reads the raw planes directly.
+        inline std::vector<Eigen::VectorXd> getAppliedFaceMargins() const
+        {
+            std::vector<Eigen::VectorXd> result;
+            result.reserve(hPolytopes.size());
+            for (std::size_t i = 0; i < hPolytopes.size(); ++i)
+            {
+                result.push_back(penaltyPolytopes[i].col(3) - hPolytopes[i].col(3));
+            }
+            return result;
+        }
+
+        // Per-polytope minimum actual offset. A zero minimum does not imply
+        // that every face has zero offset; use getAppliedFaceMargins for that.
+        inline Eigen::VectorXd getAppliedMargins() const
+        {
+            Eigen::VectorXd result(hPolytopes.size());
+            for (std::size_t i = 0; i < hPolytopes.size(); ++i)
+            {
+                result(i) = (penaltyPolytopes[i].col(3) - hPolytopes[i].col(3)).minCoeff();
+            }
+            return result;
         }
 
         // maxIterations bounds the solve so one bad corridor cannot stall a

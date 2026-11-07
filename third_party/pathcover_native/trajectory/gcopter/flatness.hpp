@@ -259,6 +259,172 @@ namespace flatness
             return;
         }
 
+        // Exact-zero specialization used only by the 3D objective.
+        // Preconditions: dh == dv == cp == 0, psi == dpsi == 0, and
+        // finite original intermediates with nonzero normalization and
+        // tilt denominators. The generic public path remains unchanged.
+        // Preserve all surviving arithmetic and its reduction order.
+        inline bool supportsZeroDragZeroYaw() const
+        {
+            return dh == 0.0 && dv == 0.0 && cp == 0.0
+                && mass > 0.0 && std::isfinite(mass)
+                && veps > 0.0 && std::isfinite(veps);
+        }
+
+        inline void forwardZeroDragZeroYaw(const Eigen::Vector3d &acc,
+                            const Eigen::Vector3d &jer,
+                            double &thr,
+                            Eigen::Vector4d &quat,
+                            Eigen::Vector3d &omg)
+        {
+            a0 = acc(0);
+            a1 = acc(1);
+            a2 = acc(2);
+            zu0 = a0;
+            zu1 = a1;
+            zu2 = a2 + grav;
+            zu_sqr0 = zu0 * zu0;
+            zu_sqr1 = zu1 * zu1;
+            zu_sqr2 = zu2 * zu2;
+            zu01 = zu0 * zu1;
+            zu12 = zu1 * zu2;
+            zu02 = zu0 * zu2;
+            zu_sqr_norm = zu_sqr0 + zu_sqr1 + zu_sqr2;
+            zu_norm = sqrt(zu_sqr_norm);
+            z0 = zu0 / zu_norm;
+            z1 = zu1 / zu_norm;
+            z2 = zu2 / zu_norm;
+            ng_den = zu_sqr_norm * zu_norm;
+            ng00 = (zu_sqr1 + zu_sqr2) / ng_den;
+            ng01 = -zu01 / ng_den;
+            ng02 = -zu02 / ng_den;
+            ng11 = (zu_sqr0 + zu_sqr2) / ng_den;
+            ng12 = -zu12 / ng_den;
+            ng22 = (zu_sqr0 + zu_sqr1) / ng_den;
+            dz_term0 = jer(0);
+            dz_term1 = jer(1);
+            dz_term2 = jer(2);
+            dz0 = ng00 * dz_term0 + ng01 * dz_term1 + ng02 * dz_term2;
+            dz1 = ng01 * dz_term0 + ng11 * dz_term1 + ng12 * dz_term2;
+            dz2 = ng02 * dz_term0 + ng12 * dz_term1 + ng22 * dz_term2;
+            f_term0 = mass * a0;
+            f_term1 = mass * a1;
+            f_term2 = mass * (a2 + grav);
+            thr = z0 * f_term0 + z1 * f_term1 + z2 * f_term2;
+            tilt_den = sqrt(2.0 * (1.0 + z2));
+            tilt0 = 0.5 * tilt_den;
+            tilt1 = -z1 / tilt_den;
+            tilt2 = z0 / tilt_den;
+            quat(0) = tilt0;
+            quat(1) = tilt1;
+            quat(2) = tilt2;
+            quat(3) = 0.0;
+            omg_den = z2 + 1.0;
+            omg_term = dz2 / omg_den;
+            omg(0) = -dz1 - (-z1) * omg_term;
+            omg(1) = dz0 - z0 * omg_term;
+            omg(2) = (z1 * dz0 - z0 * dz1) / omg_den;
+
+            return;
+        }
+
+        inline void backwardZeroDragZeroYaw(const Eigen::Vector3d &pos_grad,
+                             const Eigen::Vector3d &vel_grad,
+                             const double &thr_grad,
+                             const Eigen::Vector4d &quat_grad,
+                             const Eigen::Vector3d &omg_grad,
+                             Eigen::Vector3d &pos_total_grad,
+                             Eigen::Vector3d &vel_total_grad,
+                             Eigen::Vector3d &acc_total_grad,
+                             Eigen::Vector3d &jer_total_grad) const
+        {
+            double z0b, z1b, z2b, dz0b, dz1b, dz2b;
+            double zu_sqr_normb, zu_normb, zu0b, zu1b, zu2b;
+            double zu_sqr0b, zu_sqr1b, zu_sqr2b, zu01b, zu12b, zu02b;
+            double ng00b, ng01b, ng02b, ng11b, ng12b, ng22b, ng_denb;
+            double dz_term0b, dz_term1b, dz_term2b, f_term0b, f_term1b, f_term2b;
+            double tilt_denb, tilt0b, tilt1b, tilt2b;
+            double omg_denb, omg_termb;
+            double tempb, tilt_den_sqr;
+
+            tilt0b = quat_grad(0);
+            tilt2b = quat_grad(2);
+            tilt1b = quat_grad(1);
+            tilt_den_sqr = tilt_den * tilt_den;
+            tilt_denb = (z1 * tilt1b - z0 * tilt2b) / tilt_den_sqr + 0.5 * tilt0b;
+            omg_termb = -(z0 * (omg_grad(1))) -
+                        (-z1) * (omg_grad(0));
+            tempb = omg_grad(2) / omg_den;
+            z1b = dz0 * tempb;
+            dz0b = z1 * tempb + omg_grad(1);
+            z0b = -(dz1 * tempb);
+            dz1b = -(z0 * tempb) - omg_grad(0);
+            omg_denb = -((z1 * dz0 - z0 * dz1) * tempb / omg_den) -
+                       dz2 * omg_termb / (omg_den * omg_den);
+            tempb = -(omg_term * (omg_grad(1)));
+            z0b += tempb;
+            tempb = -(omg_term * (omg_grad(0)));
+            z0b += tilt2b / tilt_den + f_term0 * (thr_grad);
+            z1b += -tempb - tilt1b / tilt_den + f_term1 * (thr_grad);
+            dz2b = omg_termb / omg_den;
+            z2b = omg_denb + tilt_denb / tilt_den + f_term2 * (thr_grad);
+            f_term0b = z0 * (thr_grad);
+            f_term1b = z1 * (thr_grad);
+            f_term2b = z2 * (thr_grad);
+            ng02b = dz_term0 * dz2b + dz_term2 * dz0b;
+            dz_term0b = ng02 * dz2b + ng01 * dz1b + ng00 * dz0b;
+            ng12b = dz_term1 * dz2b + dz_term2 * dz1b;
+            dz_term1b = ng12 * dz2b + ng11 * dz1b + ng01 * dz0b;
+            ng22b = dz_term2 * dz2b;
+            dz_term2b = ng22 * dz2b + ng12 * dz1b + ng02 * dz0b;
+            ng01b = dz_term0 * dz1b + dz_term1 * dz0b;
+            ng11b = dz_term1 * dz1b;
+            ng00b = dz_term0 * dz0b;
+            jer_total_grad(2) = dz_term2b;
+            jer_total_grad(1) = dz_term1b;
+            jer_total_grad(0) = dz_term0b;
+            acc_total_grad(2) = mass * f_term2b;
+            acc_total_grad(1) = mass * f_term1b;
+            acc_total_grad(0) = mass * f_term0b;
+            tempb = ng22b / ng_den;
+            zu_sqr0b = tempb;
+            zu_sqr1b = tempb;
+            ng_denb = -((zu_sqr0 + zu_sqr1) * tempb / ng_den);
+            zu12b = -(ng12b / ng_den);
+            tempb = ng11b / ng_den;
+            ng_denb += zu12 * ng12b / (ng_den * ng_den) -
+                       (zu_sqr0 + zu_sqr2) * tempb / ng_den;
+            zu_sqr0b += tempb;
+            zu_sqr2b = tempb;
+            zu02b = -(ng02b / ng_den);
+            zu01b = -(ng01b / ng_den);
+            tempb = ng00b / ng_den;
+            ng_denb += zu02 * ng02b / (ng_den * ng_den) +
+                       zu01 * ng01b / (ng_den * ng_den) -
+                       (zu_sqr1 + zu_sqr2) * tempb / ng_den;
+            zu_normb = zu_sqr_norm * ng_denb -
+                       (zu2 * z2b + zu1 * z1b + zu0 * z0b) / zu_sqr_norm;
+            zu_sqr_normb = zu_norm * ng_denb + zu_normb / (2.0 * zu_norm);
+            tempb += zu_sqr_normb;
+            zu_sqr1b += tempb;
+            zu_sqr2b += tempb;
+            zu2b = z2b / zu_norm + zu0 * zu02b + zu1 * zu12b + 2 * zu2 * zu_sqr2b;
+            zu1b = z1b / zu_norm + zu2 * zu12b + zu0 * zu01b + 2 * zu1 * zu_sqr1b;
+            zu_sqr0b += zu_sqr_normb;
+            zu0b = z0b / zu_norm + zu2 * zu02b + zu1 * zu01b + 2 * zu0 * zu_sqr0b;
+            acc_total_grad(2) += zu2b;
+            acc_total_grad(1) += zu1b;
+            acc_total_grad(0) += zu0b;
+            vel_total_grad(2) = vel_grad(2);
+            vel_total_grad(1) = vel_grad(1);
+            vel_total_grad(0) = vel_grad(0);
+            pos_total_grad(2) = pos_grad(2);
+            pos_total_grad(1) = pos_grad(1);
+            pos_total_grad(0) = pos_grad(0);
+
+            return;
+        }
+
     private:
         double mass, grav, dh, dv, cp, veps;
 
