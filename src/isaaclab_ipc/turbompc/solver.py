@@ -57,6 +57,9 @@ class MPCResult:
     # Pre-refinement SQP diagnostics; None when no polisher is configured.
     sqp_status: torch.Tensor | None = None
     sqp_errors: torch.Tensor | None = None
+    # Actual QP work per batch row, including executed calls after that row
+    # finished and rejected candidates; independent of accepted ADMM buffers.
+    qp_iterations_total: torch.Tensor | None = None
 
     @property
     def states(self):
@@ -371,13 +374,14 @@ class TorchMPC:
         selected = torch.where(largest >= 0, largest, fallback)
         return current + alphas[selected, None, None] * delta
 
-    def _advance(self, inputs, z, admm, candidate, status, iterations, errors, normal_cone):
+    def _advance(self, inputs, z, admm, candidate, status, iterations, qp_iterations_total, errors, normal_cone):
         """Accept one QP and check the real problem in one tensor-only region.
 
         The CUDA solve and host termination decision stay outside compilation.
         Keeping selection, residuals and status together avoids launching each
         batch mask separately while retaining the upstream warm-start buffers.
         """
+        qp_iterations_total = qp_iterations_total + candidate.iterations.to(torch.int32)
         running = status == -1
         fatal = candidate.status >= 2
         next_z = self._line_search(inputs, z, candidate.x)
@@ -403,7 +407,7 @@ class TorchMPC:
         status = torch.where(solved, 0, status)
         status = torch.where(running & fatal, 2, status)
         status = torch.where(running & (~finite | (candidate.status == 4)), 3, status)
-        return z, admm, qp, status, iterations, errors, normal_cone, (status != -1).all()
+        return z, admm, qp, status, iterations, qp_iterations_total, errors, normal_cone, (status != -1).all()
 
     def _adjoint_data(self, inputs, z, lambda_dyn, y, good, upstream, active_mask=None):
         """Assemble exact curvature and active rows before the native KKT solve."""
@@ -485,13 +489,14 @@ class TorchMPC:
                 raise ValueError("Initial trajectory shape does not match q")
             status = torch.full((b,), -1, dtype=torch.int32, device=z.device)
             iterations = torch.zeros_like(status)
+            qp_iterations_total = torch.zeros_like(status)
             errors = z.new_full((b, 3), torch.inf)
             normal_cone = z.new_full((b,), torch.inf) if self.constraints is not None else None
             qp = self._qp(forward_inputs, z)
             for _ in range(self.config.max_iter):
                 candidate = self.admm.solve(qp, admm)
-                z, admm, qp, status, iterations, errors, normal_cone, done = self._advance(
-                    forward_inputs, z, admm, candidate, status, iterations, errors, normal_cone
+                z, admm, qp, status, iterations, qp_iterations_total, errors, normal_cone, done = self._advance(
+                    forward_inputs, z, admm, candidate, status, iterations, qp_iterations_total, errors, normal_cone
                 )
                 if done:
                     break
@@ -546,6 +551,7 @@ class TorchMPC:
             polished,
             sqp_status,
             sqp_errors,
+            qp_iterations_total=qp_iterations_total,
         )
 
     def close(self):

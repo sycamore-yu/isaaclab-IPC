@@ -148,6 +148,8 @@ class CTBRController:
         metrics = dict(
             qp_ok=bool(result["solved"][0]), qp_failed=not bool(result["solved"][0]),
             sfc_valid=bool(result["sfc_valid"][0]), qp_iterations=int(result["iterations"]),
+            sqp_iterations=int(result["sqp_iterations"][0]),
+            qp_iterations_total=int(result["qp_iterations_total"][0]),
             primal_residual=float(result["primal"][0]), dual_residual=float(result["dual"][0]),
             sqp_status=int(result["sqp_status"][0]), raw_qp_status=int(result["raw_qp_status"][0]),
             predicted_sfc_violation_m=violation,

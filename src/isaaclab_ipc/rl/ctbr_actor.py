@@ -127,6 +127,8 @@ class CTBRMPCActor(MLPModel):
             raw_qp_status=result.admm.status,
             sqp_status=result.status,
             iterations=result.admm.iterations.max(),
+            sqp_iterations=result.iterations,
+            qp_iterations_total=result.qp_iterations_total,
             mean=mean.detach(),
             sfc_valid=valid,
         )

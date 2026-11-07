@@ -103,6 +103,12 @@ def test_public_solve_freezes_finished_rows_and_preserves_failure_diagnostics(mo
         assert len(candidates) == 2
         torch.testing.assert_close(result.status, torch.tensor([0, 2, 3, 2, 0, 3, 3], dtype=torch.int32))
         torch.testing.assert_close(result.iterations, torch.tensor([1, 1, 1, 2, 2, 1, 1], dtype=torch.int32))
+        # Both candidate calls executed every row, including finished/fatal
+        # rows whose accepted trajectory and last ADMM result remain frozen.
+        torch.testing.assert_close(
+            result.qp_iterations_total, torch.tensor([30, 32, 34, 36, 38, 40, 42], dtype=torch.int32)
+        )
+        assert not result.qp_iterations_total.requires_grad
         expected_trajectory = torch.zeros_like(q)
         expected_trajectory[[0, 4], :, 1] = 1
         expected_trajectory[3, :, 1] = 0.25
