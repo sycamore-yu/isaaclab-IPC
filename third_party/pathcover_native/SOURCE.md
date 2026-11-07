@@ -327,6 +327,14 @@ license; embedded geometry utilities retain their original notices.
     getter copies its candidate coefficients and corridor ownership. The old
     near-freefall reference remains dynamically invalid despite this heading
     repair: the isolated study measured body-p/q peaks of 161.76/33.61 rad/s.
+29. V18 replaces the shortest-angle heading feedback by `sin(heading-yaw)`.
+    The exact V17 Dense failure crossed the plus/minus-pi branch inside a
+    smooth polynomial segment. Sine feedback removes this right-hand-side
+    jump while retaining the small-error gain, low-speed fade, body-r clipping
+    and integration tolerances. The antipodal equilibrium is unstable; this
+    is not a global convergence claim. The exact candidate agrees with an
+    independent DOP853 solution within 2.86e-7 rad and satisfies the unchanged
+    per-axis rate tolerances. Its original zero-heading diagnostic is retained.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online

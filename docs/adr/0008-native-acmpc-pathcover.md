@@ -98,6 +98,9 @@ float centres. Packed points remain a diagnostic representation.
 Construct heading with a native scalar ODE that bounds body yaw rate pointwise.
 Use adaptive RK4 and cubic Hermite interpolation, and return the derivative of
 the same interpolant. Fade heading feedback continuously below 0.1 m/s.
+Use sine angular error to avoid a shortest-angle branch jump at plus/minus pi;
+the antipodal heading remains an unstable equilibrium, not a global convergence
+guarantee.
 Local integration tolerances do not certify the full trajectory's roll, pitch,
 thrust or corridor constraints. Preserve true undefined thrust-frame failures.
 On a heading failure retain the existing native candidate; serialize it only

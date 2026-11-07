@@ -56,6 +56,26 @@ def test_native_yaw_distinguishes_domain_failure_from_invalid_input():
         native.bounded_body_yaw_profile(np.zeros((1, 3, 5)), *args)
 
 
+def test_continuous_heading_feedback_crosses_antipodal_direction():
+    native_module()
+    coefficients = np.zeros((1, 3, 6))
+    coefficients[0, 0, 4] = -1.0
+    coefficients[0, 1, 3:5] = (-1.5, 0.1)
+    # v=(-1, .1-3t, 0), a=(0, -3, 0), j=0: finite constant thrust axis.
+    # The former shortest-angle feedback jumps at pi on this physical curve.
+    trajectory = PathCoverTrajectory(coefficients, np.array([0.2]), body_yaw_rate_max=1.5)
+    sample = trajectory.sample(np.linspace(0.0, 0.2, 4001))
+    heading = np.arctan2(sample.velocity[:, 1], sample.velocity[:, 0])
+    wrapped = np.arctan2(np.sin(heading - sample.yaw), np.cos(heading - sample.yaw))
+    assert np.count_nonzero(np.abs(np.diff(wrapped)) > np.pi) == 1
+    assert np.isfinite(sample.yaw).all()
+    z = np.array([0.0, -3.0, 9.81])
+    z /= np.linalg.norm(z)
+    c = z[0] * np.cos(sample.yaw) + z[1] * np.sin(sample.yaw)
+    body_r = z[2] * sample.yaw_rate / (1.0 - c * c)
+    assert np.max(np.abs(body_r)) <= 1.5 + 1e-4
+
+
 def test_yaw_failure_retains_native_candidate_and_serializes_only_on_request():
     native_module()
     coefficients = np.zeros((1, 3, 6))

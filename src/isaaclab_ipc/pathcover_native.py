@@ -123,7 +123,9 @@ class PathCoverSegment:
 def _bounded_body_yaw_profile(trajectory):
     """Integrate pointwise bounded body-r with native RK4 and Hermite interpolation.
 
-    Heading feedback fades continuously by min(horizontal_speed / yaw_low_speed, 1).
+    Heading feedback uses sin(heading - yaw) / yaw_sample_dt and fades by
+    min(horizontal_speed / yaw_low_speed, 1). Its antipodal equilibrium is unstable;
+    it does not claim global convergence.
     Native local tolerances are 1e-7 rad for RK4 step doubling and 1e-4 rad/s
     for the Hermite body-r defect; these are not a global trajectory certificate.
     """

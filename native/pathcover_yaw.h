@@ -66,7 +66,10 @@ inline std::array<double, 2> rateGain(const Geometry& g, double yaw, const Setti
         throw ProfileError("PathCover heading frame is singular or non-finite");
     }
     const double offset = c * (g.t1 * sine + g.t2 * cosine);
-    const double error = std::atan2(std::sin(g.heading - yaw), std::cos(g.heading - yaw));
+    // Periodic feedback avoids a rate jump when the shortest angle crosses pi.
+    // The small-error gain is unchanged; the antipodal equilibrium is unstable,
+    // so this does not assert global heading convergence.
+    const double error = std::sin(g.heading - yaw);
     // Continuous fading avoids the old derivative jump at the low-speed cutoff.
     const double nominal = error / settings.base_dt * std::min(g.speed / settings.low_speed, 1.0);
     const double body_r = std::clamp((g.zz * nominal + offset) / s2,
