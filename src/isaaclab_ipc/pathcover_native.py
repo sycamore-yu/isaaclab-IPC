@@ -38,6 +38,9 @@ class PathCoverConfig:
     thrust_min: float | None = None
     thrust_max: float | None = None
     body_rate_max: float = 3.0
+    # Inward offset for the optimizer's zero-yaw rate proxy only. The physical
+    # rate limit and offline numerical tolerance retain body_rate_max.
+    reference_body_rate_margin: float = 0.01
     tilt_max: float = 0.7854
     max_corridors: int = 6
     pieces_per_polytope: int = 1
@@ -47,7 +50,8 @@ class PathCoverConfig:
     time_weight: float = 100.0
     # Metre-valued inward offset of the reference position-penalty copy only.
     safety_margin: float = 0.15
-    penalty_weights: tuple[float, ...] = (1e4, 100.0, 1e4, 1e4, 1e4)
+    # Position weight differs from the upstream 1e4 after a frozen SFC residual study.
+    penalty_weights: tuple[float, ...] = (1e5, 100.0, 1e4, 1e4, 1e4)
     # Width in metres of the smoothed L1 position penalty. Dynamic smoothing
     # retains the upstream 0.01 in each corresponding constraint's units.
     position_penalty_smoothing_m: float = 1e-6
@@ -56,6 +60,8 @@ class PathCoverConfig:
     search_radius: float = 2.0
     # Weighted A*: >1 trades shortest-path optimality for fewer expansions.
     dmp_heuristic_weight: float = 1.5
+    # Exact reverse distance on the relaxed XY graph strengthens the 3D heuristic.
+    dmp_xy_heuristic: bool = True
     risp_alpha: float = 0.01
     random_seed: int = 0
     num_threads: int = 1
@@ -67,6 +73,10 @@ class PathCoverConfig:
     yaw_low_speed: float = 0.1
 
     def __post_init__(self):
+        if (not math.isfinite(self.body_rate_max)
+                or not math.isfinite(self.reference_body_rate_margin)
+                or not 0 <= self.reference_body_rate_margin < self.body_rate_max):
+            raise ValueError("PathCover rate limits require finite 0 <= reference_body_rate_margin < body_rate_max")
         if not math.isfinite(self.endpoint_connection_radius) or self.endpoint_connection_radius <= 0:
             raise ValueError("PathCover endpoint_connection_radius must be finite and positive")
         nominal = min(3.0, self.max_velocity) if self.nominal_velocity is None else self.nominal_velocity
@@ -280,6 +290,9 @@ class NativePathCoverFrontend:
                 "constraint_metrics_order": ("sfc_max_m", "speed_max_m_s", "thrust_min_n",
                                              "thrust_max_n", "tilt_max_rad", "rate_max_rad_s"),
                 "constraint_finite": bool(np.isfinite(constraint_metrics).all()),
+                "reference_body_rate_margin_rad_s": self.config.reference_body_rate_margin,
+                "optimizer_body_rate_target_rad_s": self.config.body_rate_max - self.config.reference_body_rate_margin,
+                "body_rate_physical_limit_rad_s": self.config.body_rate_max,
                 "time_initialization": result.time_initialization,
                 "candidate": {
                     "coefficients": np.stack(result.coefficients),
@@ -340,6 +353,9 @@ class NativePathCoverFrontend:
             "search_ms": result.search_ms, "corridor_ms": result.corridor_ms,
             "jps_ms": result.jps_ms, "distance_map_ms": result.distance_map_ms,
             "dmp_ms": result.dmp_ms, "dmp_cost": result.dmp_cost,
+            "dmp_xy_heuristic": result.dmp_xy_heuristic,
+            "dmp_xy_cache_hit": result.dmp_xy_cache_hit,
+            "dmp_xy_preprocessing_ms": result.dmp_xy_preprocessing_ms,  # Already in dmp_ms.
             "search_backend": "global_dmp", "jps_ran": False,
             "endpoint_connection_ms": result.endpoint_connection_ms,
             "endpoint_connection_visited_cells": result.endpoint_connection_visited_cells,
@@ -355,11 +371,15 @@ class NativePathCoverFrontend:
             "optimizer_status": result.optimizer_status, "objective": result.cost,
             "optimizer_quadrature_feasible": result.optimizer_quadrature_feasible,
             "constraint_metrics_semantics": "optimizer quadrature diagnostics; not continuous-time feasibility",
+            "reference_body_rate_margin_rad_s": self.config.reference_body_rate_margin,
+            "optimizer_body_rate_target_rad_s": self.config.body_rate_max - self.config.reference_body_rate_margin,
+            "body_rate_physical_limit_rad_s": self.config.body_rate_max,
             "reference_margin_requested_m": self.config.safety_margin,
             "reference_margin_applied_per_corridor_m": np.asarray(result.applied_reference_margins).tolist(),
             "occupied_voxels": last_map.occupied_voxels, "inflated_voxels": last_map.inflated_voxels,
             "geometry_boxes": last_map.geometry_boxes,
             "gpu_mapping": last_map.gpu_mapping, "gpu_inflation": last_map.gpu_inflation,
+            "gpu_box_compression": last_map.gpu_box_compression,
             "gpu_distance_map": result.gpu_distance_map,
             "gpu_legal_moves": result.gpu_legal_moves,
             "speed_initial_m_s": result.initial_speed,

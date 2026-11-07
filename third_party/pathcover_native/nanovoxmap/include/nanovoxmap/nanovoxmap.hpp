@@ -202,6 +202,9 @@ public:
         invalidateEsdf();
     }
 
+    // CPU workers merging CUDA ray updates; zero retains hardware-based selection.
+    void setCudaMergeThreads(unsigned threads) { cuda_merge_threads_ = threads; }
+
     std::vector<Vec3> getOccupiedVoxels() const {
         std::vector<Vec3> result;
         result.reserve(numOccupied());
@@ -787,6 +790,7 @@ private:
     int8_t l_miss_;
     int8_t l_min_;
     int8_t l_max_;
+    unsigned cuda_merge_threads_ = 0;
     Backend requested_backend_ = Backend::kAuto;
     bool allow_cuda_fallback_ = true;
 

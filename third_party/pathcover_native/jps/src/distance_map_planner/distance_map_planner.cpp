@@ -449,6 +449,7 @@ void DMPlanner<Dim>::setMap(const std::shared_ptr<JPS::MapUtil<Dim>> &map_util,
 
   cmap_ = distance_map;
   map_util_->setMap(map_util_->getOrigin(), dim, distance_map, map_util_->getRes());
+  xy_lower_bound_.mapChanged();
 }
 
 template <int Dim>
@@ -464,6 +465,8 @@ bool DMPlanner<Dim>::plan(const Vecf<Dim> &start, const Vecf<Dim> &goal, decimal
   raw_path_.clear();
   status_ = 0;
   selected_start_anchor_ = selected_goal_anchor_ = -1;
+  xy_cache_hit_ = false;
+  xy_preprocessing_ms_ = 0.0;
 
   /// check if the map exists
   if(cmap_.empty()) {
@@ -498,6 +501,13 @@ bool DMPlanner<Dim>::plan(const Vecf<Dim> &start, const Vecf<Dim> &goal, decimal
     graph_search_ = std::make_shared<DMP::GraphSearch>(
         cmap_.data(), dim(0), dim(1), dim(2), eps, cweight, planner_verbose_,
         legal_moves_.empty() ? nullptr : legal_moves_.data());
+    if (xy_heuristic_) {
+      const auto update = xy_lower_bound_.update(cmap_.data(), dim(0), dim(1), dim(2),
+          cweight, eps, {{goal_int(0), goal_int(1), 0.0}});
+      xy_cache_hit_ = update.cache_hit;
+      xy_preprocessing_ms_ = update.milliseconds;
+      graph_search_->setXYLowerBound(xy_lower_bound_.data());
+    }
     path_cost_ = graph_search_->plan(start_int(0), start_int(1), start_int(2),
                                      goal_int(0), goal_int(1), goal_int(2),
                                      search_region_);
@@ -587,6 +597,7 @@ template <int Dim>
 bool DMPlanner<Dim>::plan(const EndpointAnchors& starts, const EndpointAnchors& goals, bool simplify) {
   search_region_.clear(); prior_path_.clear(); path_.clear(); raw_path_.clear();
   selected_start_anchor_=selected_goal_anchor_=-1;
+  xy_cache_hit_=false; xy_preprocessing_ms_=0.0;
   path_cost_=std::numeric_limits<double>::infinity();
   status_=0;
   if (cmap_.empty()) { status_=-1; return false; }
@@ -612,7 +623,19 @@ bool DMPlanner<Dim>::plan(const EndpointAnchors& starts, const EndpointAnchors& 
     }
     return result;
   };
-  path_cost_=graph_search_->plan(convert(starts),convert(goals));
+  const auto grid_starts=convert(starts), grid_goals=convert(goals);
+  if constexpr (Dim==3) {
+    if (xy_heuristic_) {
+      std::vector<DMP::XYLowerBound3D::Goal> xy_goals;
+      xy_goals.reserve(grid_goals.size());
+      for (const auto& goal : grid_goals) xy_goals.push_back({goal.x,goal.y,goal.connector_cost});
+      const auto update=xy_lower_bound_.update(cmap_.data(),dimensions(0),dimensions(1),dimensions(2),
+          cweight_,eps_,xy_goals);
+      xy_cache_hit_=update.cache_hit; xy_preprocessing_ms_=update.milliseconds;
+      graph_search_->setXYLowerBound(xy_lower_bound_.data());
+    }
+  }
+  path_cost_=graph_search_->plan(grid_starts,grid_goals);
   const auto path=graph_search_->getPath();
   if (path.empty()) { status_=-1; return false; }
   selected_start_anchor_=graph_search_->getStartAnchorIndex();

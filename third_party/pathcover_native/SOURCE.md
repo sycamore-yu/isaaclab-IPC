@@ -427,6 +427,72 @@ license; embedded geometry utilities retain their original notices.
     including reused map frames. Preprocessing and transfer remain part of
     `distance_map_ms`; no extra kernel synchronization or timing leaf is added.
 
+35. The native 3D DMP explicitly enables an XY relaxed-graph lower bound;
+    the public DMPlanner API keeps the original heuristic by default. Each
+    column uses the minimum nonnegative final potential over its free heights,
+    and a projected diagonal requires both axial columns to be free. Reverse
+    Dijkstra charges the original forward destination's column potential.
+    Ordinary goals start at zero; projected multi-goals retain the minimum
+    connector fee in grid units, without changing the original 3D anchor list.
+    GraphSearch uses eps * max(unscaled 26-neighbour metric, XY distance), with
+    an explicit eps=0 case. The graph, costs and no-reopen policy are unchanged;
+    weighted search order and paths can change. An instance-owned exact cache
+    compares dimensions, column minima/occupancy, projected goal fees and both
+    weights. Map installation triggers a fresh projection, but identical column
+    values may reuse reverse distances. Goal changes are checked independently
+    of map updates. Metrics report enablement, cache reuse and preprocessing;
+    preprocessing remains within dmp_ms/search_ms. The isolated Dense V19 map
+    improved from 100.722 to 7.582 ms median including uncached preprocessing,
+    while High-speed/Dense first frames regressed by 3.584/1.323 ms; their changed
+    paths and costs are recorded in pathcover-xy-lower-bound-v22-study.json.
+36. CUDA box compression reads the same packed authoritative fine bitmap and
+    produces the same ordered integer boxes as the CPU implementation. Each
+    frontend owns its stream and scratch storage. It is selected only with
+    use_cuda and the existing cuda_min_grid_voxels packed-grid size threshold;
+    other configurations explicitly use the CPU implementation. CUDA errors
+    propagate instead of silently falling back. gpu_box_compression records
+    actual backend use, and all compression/transfer cost remains in grid_ms.
+    No occupancy padding, coarse projection, RISP box order or geometry changes.
+
+37. NativeFrontend passes its existing num_threads setting to NanoVoxMap's
+    CUDA host-side reduced-event merge. Nonpositive values retain automatic
+    hardware selection; positive values are capped at available hardware.
+    This changes host merge scheduling only, not ray reduction, log-odds or
+    occupancy rules. The pinned public default remains automatic. The frozen
+    single-scan microbenchmark is recorded separately from full-history runs.
+38. The default position-penalty weight is 1e5, versus upstream and V21 1e4.
+    The other four weights remain (100, 1e4, 1e4, 1e4), with 64 quadrature nodes,
+    0.15 m penalty-only reference margin, relative tolerance 1e-4 and the same
+    iteration budget. Explicit historical configurations keep their weights.
+    This repaired the observed 24.04 mm original-SFC residual on one frozen
+    Dense problem. It is an objective change, not a hard-containment guarantee.
+    The zero-yaw norm diagnostic can remain false even when final-yaw component
+    rates meet their distinct controller limits; all raw diagnostics remain.
+39. `reference_body_rate_margin=0.01 rad/s` subtracts only from the GCOPTER
+    zero-yaw norm target. `body_rate_max` remains the physical/quality limit,
+    including the existing 1e-3 rad/s diagnostic and offline allowance. The
+    default optimizer target is therefore 2.99 rad/s while CTBR retains
+    component bounds (3, 3, 1.5) rad/s. Metadata and failed problems distinguish
+    the target, margin and physical bound. Saved configurations contain the
+    margin; offline replay of older snapshots missing the field explicitly uses
+    zero. No additional online sampling or rejection is introduced.
+    This finite optimization headroom addresses observed inter-node rate peaks;
+    it is not a continuous-time guarantee. In the two frozen first frames and
+    the recorded Dense ceiling problem, original-SFC polynomial extrema and
+    final-yaw component checks passed with the original physical tolerances.
+    Checks used at-most-1ms samples, yaw/piece knots and local peak refinement.
+    The rejected alternative of multiplying the rate weight by ten still had
+    a 3.0013946 rad/s body-q peak in the Dense first frame and moved the ceiling
+    problem's original-SFC violation back to 16.7623 mm. Those results remain
+    recorded; rate weight stays 1e4 and all other optimizer settings are unchanged.
+40. NanoVoxMap's CUDA error exits now honor an explicit CUDA backend with
+    `allow_cuda_fallback=false` before any CPU completion of the failed chunk.
+    They return failure to the existing insertion exception path and mark the
+    CUDA backend unavailable. Explicitly permitted fallback and the normal CPU
+    path for long rays retain their behavior. Successful CUDA arithmetic is
+    unchanged. This is not transactional rollback: earlier completed chunks
+    may already have updated the map when the call fails.
+
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online
 execution-trajectory reintegration or recovery state machine is added.

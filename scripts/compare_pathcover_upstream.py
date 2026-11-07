@@ -97,7 +97,8 @@ def serialized_input(cloud, initial, goal, cfg):
         cfg.potential_radius, cfg.search_radius, cfg.random_seed,
         *initial.ravel(order="F"), *goal, len(cloud), *np.asarray(cloud).ravel(),
         cfg.time_weight, cfg.safety_margin, cfg.pieces_per_polytope, cfg.integral_resolution,
-        cfg.relative_tolerance, cfg.max_iterations, cfg.native_options()["nominal_velocity"], cfg.body_rate_max,
+        cfg.relative_tolerance, cfg.max_iterations, cfg.native_options()["nominal_velocity"],
+        cfg.body_rate_max - cfg.reference_body_rate_margin,
         cfg.tilt_max, cfg.thrust_min, options["thrust_max"], *cfg.penalty_weights,
         cfg.mass, cfg.gravity, 0.0, 0.0, 0.0, 0.001,
     ]
@@ -269,7 +270,9 @@ def main():
     for name, record in validation["first_frames"].items():
         source = Path(record["source_input"])
         cloud, initial, goal = captured_input(source)
-        cfg = PathCoverConfig(**record["config"])
+        config_values = dict(record["config"])
+        config_values.setdefault("reference_body_rate_margin", 0.0)
+        cfg = PathCoverConfig(**config_values)
         text = serialized_input(cloud, initial, goal, cfg)
         (folder / (name + ".input.txt")).write_text(text)
         with (folder / (name + ".stdout")).open("w") as output, (folder / (name + ".stderr")).open("w") as error:

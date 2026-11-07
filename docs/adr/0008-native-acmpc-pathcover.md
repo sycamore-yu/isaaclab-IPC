@@ -55,13 +55,25 @@ code and evidence remain available; this branch develops the new AC-MPC route.
   measured initial speed changes. Historical `speed_acceptance_limit_m_s` names
   now denote this quality threshold, not online rejection. CTBR hard velocity
   constraints remain unchanged.
-- Use the upstream reference preset for the formal A1/A2 baseline: nominal speed
-  3 m/s, tilt 0.7854 rad, penalty weights `(1e4, 100, 1e4, 1e4, 1e4)`.
+- Use the same reference preset for the formal A1/A2 baseline: nominal speed
+  3 m/s, tilt 0.7854 rad. V22 raises only the position penalty from the upstream
+  1e4 to 1e5 after an exactly reproduced SFC violation. Weights are
+  `(1e5, 100, 1e4, 1e4, 1e4)`; increasing the rate weight as well reintroduced
+  a 16.762 mm SFC violation and was rejected.
   Scale upstream thrust bounds `(2, 10) N` by `mass / 0.716 kg` and intersect them
   with the CTBR physical force range. This defines the reference optimization
   limits; the MPC retains its physical input constraints. Preserve measured
   initial PVA even when it exceeds a reference limit. Prior 6 m/s runs remain
   separate stress results; do not combine them with the new matched baseline.
+- Keep the physical roll/pitch rate bound separate from the reference target.
+  `reference_body_rate_margin=0.01 rad/s` lowers only GCOPTER's zero-heading
+  rate-norm target from 3 to 2.99 rad/s. Physical diagnostics and MPC bounds stay
+  at 3 rad/s; body-yaw stays at 1.5 rad/s. This is a fixed optimization allowance,
+  not a constraint guarantee or a changed acceptance tolerance. For zero drag,
+  the zero-heading norm bounds the thrust-axis turning rate, which equals the
+  actual roll/pitch rate norm for any valid heading. Its violations remain
+  separate from actual per-axis violations. Serialize both limits and the margin;
+  replay of old problems with no margin field must retain zero margin.
 - Rollout observations freeze state, reference, SFC and warm-start controls.
   PPO replay does not mutate the frontend or use a hidden last-solve cache.
 - The CTBR adapter supplies an optional three-point `initial_motion_seed` to
@@ -121,6 +133,24 @@ CPU interface. Retain direction order, edge costs and endpoint semantics.
 The native chain consumes the raw DMP path; the public simplified-path API
 remains available. Measure mask generation and transfer within the existing
 distance-map stage, not as a second additive timing stage.
+
+V22 computes exact box X runs and Y grouping on CUDA, then completes the original
+Z merge on the CPU. Preserve every integer box boundary and final ordering.
+The helper owns reusable buffers and a stream per frontend instance. Full-map
+staging and host finishing count inside the existing grid stage. The incremental
+inflater's scratch window is not a reusable copy of the accumulated map.
+Limit NanoVoxMap's host merge workers using the existing frontend `num_threads`;
+leave its CUDA update algorithm and public hardware-selected default unchanged.
+
+Strengthen 3D DMP's heuristic with exact reverse costs on a relaxed XY graph.
+Each column uses its minimum free-cell potential; every actual 3D edge remains
+subject to the original occupancy and legal-neighbour checks. Take the maximum
+of the existing 26-neighbour lower bound and the XY bound, then apply the existing
+1.5 heuristic weight. This intentionally changes search order and may change path
+cost. Do not describe it as equivalent paths or globally optimal weighted search.
+Cache only identical projected potentials, target connector costs, dimensions
+and weights. Reproject changed maps and recheck targets independently. Account
+for preprocessing inside DMP time, not as an additional timing leaf.
 
 If a physically free endpoint is blocked only by coarse occupancy, connect it
 through a fine-grid local search within a 1 m axis-aligned half-width. Retain

@@ -81,6 +81,12 @@ inline bool GraphSearch::isFree(int x, int y, int z) const {
          cMap_[coordToId(x, y, z)] < val_occ_;
 }
 
+inline double GraphSearch::scaleHeuristic(double base, int x, int y) const {
+  if (eps_ == 0.0) return 0.0; // A disconnected XY graph may have infinite distance.
+  if (!use_2d_ && xy_lower_bound_) base = std::max(base, xy_lower_bound_[x+xDim_*y]);
+  return eps_*base;
+}
+
 inline double GraphSearch::getHeur(int x, int y) const {
   if (!goal_anchors_.empty()) return getAnchorHeur(x, y, 0);
   const int dx = std::abs(x - xGoal_), dy = std::abs(y - yGoal_);
@@ -95,7 +101,7 @@ inline double GraphSearch::getHeur(int x, int y, int z) const {
   const int dx = std::abs(x - xGoal_), dy = std::abs(y - yGoal_), dz = std::abs(z - zGoal_);
   const int lo = std::min({dx, dy, dz}), hi = std::max({dx, dy, dz});
   const int mid = dx + dy + dz - lo - hi;
-  return eps_ * (hi + (std::sqrt(2.0) - 1.0) * mid + (std::sqrt(3.0) - std::sqrt(2.0)) * lo);
+  return scaleHeuristic(hi + (std::sqrt(2.0) - 1.0) * mid + (std::sqrt(3.0) - std::sqrt(2.0)) * lo, x, y);
 }
 
 double GraphSearch::getAnchorHeur(int x, int y, int z) const {
@@ -114,7 +120,7 @@ double GraphSearch::getAnchorHeur(int x, int y, int z) const {
     }
     lower_bound = std::min(lower_bound, distance+goal.connector_cost);
   }
-  return eps_*lower_bound;
+  return scaleHeuristic(lower_bound, x, y);
 }
 
 void GraphSearch::resetSearch(std::vector<bool> in_region) {

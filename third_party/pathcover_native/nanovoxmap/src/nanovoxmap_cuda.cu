@@ -746,8 +746,9 @@ bool OccupancyMap<Scalar>::insertPointCloudCuda(
         }
 
         const unsigned available = std::max(1u, std::thread::hardware_concurrency());
+        const unsigned limit = cuda_merge_threads_ ? std::min(available, cuda_merge_threads_) : available;
         const unsigned workers = updates.size() >= 4096
-            ? std::min<unsigned>(available, static_cast<unsigned>(groups.size())) : 1u;
+            ? std::min<unsigned>(limit, static_cast<unsigned>(groups.size())) : 1u;
         std::vector<uint8_t> dirty(groups.size(), 0);
         const auto run = [&](size_t group_begin, size_t group_end) {
             const int step = hits ? static_cast<int>(l_hit_) : static_cast<int>(l_miss_);
@@ -802,8 +803,9 @@ bool OccupancyMap<Scalar>::insertPointCloudCuda(
     };
 
     // Each completed chunk is immediately merged into the host block hash.
-    // If a later device operation fails, only the unprocessed misses and the
-    // still-pending hit pass are completed on the CPU.
+    // If fallback is permitted, a later device failure completes only the
+    // unprocessed misses and pending hits on the CPU. Strict CUDA callers
+    // receive false so insertPointCloud raises instead of accepting a mixed frame.
     const auto apply_hits_on_cpu = [this, &valid_ends]() {
         BlockCursor cursor;
         for (const DeviceVoxel& end : valid_ends) {
@@ -850,11 +852,12 @@ bool OccupancyMap<Scalar>::insertPointCloudCuda(
         if (last == first) continue;   // cannot happen: the long-ray branch consumed it
         std::vector<HostUpdate> chunk_updates;
         if (!traceChunk(s, start, valid_ends, first, last, chunk_updates)) {
+            cuda_unavailable_ = true;
+            if (requested_backend_ == Backend::kCuda && !allow_cuda_fallback_) return false;
             // Earlier chunks are already committed.  Complete only the
             // remaining misses and all hits on the CPU, then latch fallback.
             finish_misses_on_cpu(first);
             if (apply_hits) apply_hits_on_cpu();
-            cuda_unavailable_ = true;
             return true;
         }
         // chunk_updates arrive sorted by block/local voxel from reduce_by_key, so
@@ -885,22 +888,25 @@ bool OccupancyMap<Scalar>::insertPointCloudCuda(
         if (s.d_events.size() < hit_keys.size()) s.d_events.resize(hit_keys.size());
         thrust::copy(hit_keys.begin(), hit_keys.end(), s.d_events.begin());
         if (!reduceUpdates(s, hit_keys.size(), start, hit_updates)) {
-            apply_hits_on_cpu();
             cuda_unavailable_ = true;
+            if (requested_backend_ == Backend::kCuda && !allow_cuda_fallback_) return false;
+            apply_hits_on_cpu();
             return true;
         }
     } catch (const thrust::system_error& error) {
         std::cerr << "[nanovoxmap][cuda] endpoint reduction failed: "
                   << error.what() << std::endl;
         cudaGetLastError();
-        apply_hits_on_cpu();
         cuda_unavailable_ = true;
+        if (requested_backend_ == Backend::kCuda && !allow_cuda_fallback_) return false;
+        apply_hits_on_cpu();
         return true;
     } catch (const std::bad_alloc&) {
         std::cerr << "[nanovoxmap][cuda] endpoint reduction ran out of memory" << std::endl;
         cudaGetLastError();
-        apply_hits_on_cpu();
         cuda_unavailable_ = true;
+        if (requested_backend_ == Backend::kCuda && !allow_cuda_fallback_) return false;
+        apply_hits_on_cpu();
         return true;
     }
     merge_reduced(hit_updates, true);

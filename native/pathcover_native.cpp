@@ -25,6 +25,7 @@
 #include "pathcover_yaw.h"
 #ifdef OCCUPANCY_INFLATION_WITH_CUDA
 #include "pathcover_distance_map.h"
+#include "pathcover_boxes_cuda.h"
 #endif
 
 namespace py = pybind11;
@@ -62,13 +63,13 @@ static py::dict timeInitializationDict(const TimeInitialization &value) {
 struct Options {
     Vec3 lower, upper;
     double resolution, search_resolution, radius, radius_z, max_velocity, nominal_velocity, mass, gravity;
-    double thrust_min, thrust_max, body_rate_max, tilt_max;
+    double thrust_min, thrust_max, body_rate_max, reference_body_rate_margin, tilt_max;
     double potential_radius, dmp_heuristic_weight, time_weight, safety_margin, endpoint_connection_radius;
     double relative_tolerance, alpha, position_penalty_smoothing;
     int horizon, pieces_per_polytope, integral_resolution, max_iterations, num_threads;
     std::size_t cuda_min_grid_voxels;
     unsigned int random_seed;
-    bool use_cuda;
+    bool use_cuda, dmp_xy_heuristic;
     Eigen::VectorXd penalty_weights;
     explicit Options(const py::dict &values) {
         lower = values["bounds_lower"].cast<Vec3>();
@@ -85,9 +86,15 @@ struct Options {
         thrust_min = values["thrust_min"].cast<double>();
         thrust_max = values["thrust_max"].cast<double>();
         body_rate_max = values["body_rate_max"].cast<double>();
+        reference_body_rate_margin = values["reference_body_rate_margin"].cast<double>();
+        if (!std::isfinite(body_rate_max) || !std::isfinite(reference_body_rate_margin)
+            || reference_body_rate_margin < 0 || reference_body_rate_margin >= body_rate_max) {
+            throw std::invalid_argument("PathCover rate limits require finite 0 <= reference_body_rate_margin < body_rate_max");
+        }
         tilt_max = values["tilt_max"].cast<double>();
         potential_radius = values["potential_radius"].cast<double>();
         dmp_heuristic_weight = values["dmp_heuristic_weight"].cast<double>();
+        dmp_xy_heuristic = values["dmp_xy_heuristic"].cast<bool>();
         time_weight = values["time_weight"].cast<double>();
         safety_margin = values["safety_margin"].cast<double>();
         relative_tolerance = values["relative_tolerance"].cast<double>();
@@ -108,7 +115,7 @@ struct Options {
 struct MappingStats {
     double mapping_ms = 0.0, inflation_ms = 0.0, grid_ms = 0.0;
     std::size_t occupied_voxels = 0, inflated_voxels = 0, geometry_boxes = 0;
-    bool gpu_mapping = false, gpu_inflation = false;
+    bool gpu_mapping = false, gpu_inflation = false, gpu_box_compression = false;
 };
 
 struct PlanResult {
@@ -122,11 +129,13 @@ struct PlanResult {
     Eigen::Matrix<double, 6, 1> constraint_metrics = Eigen::Matrix<double, 6, 1>::Zero();
     double cost = 0.0, search_ms = 0.0, corridor_ms = 0.0, trajectory_ms = 0.0;
     double jps_ms = 0.0, distance_map_ms = 0.0, dmp_ms = 0.0, dmp_cost = 0.0;
+    double dmp_xy_preprocessing_ms = 0.0; // Included in dmp_ms, not an extra leaf.
     double endpoint_connection_ms = 0.0;
     std::size_t endpoint_connection_visited_cells = 0, start_endpoint_anchors = 0, goal_endpoint_anchors = 0;
     double initial_speed = 0.0, speed_acceptance_limit = 0.0;
     int optimizer_status = 0;
     bool gpu_distance_map = false, gpu_legal_moves = false;
+    bool dmp_xy_heuristic = false, dmp_xy_cache_hit = false;
     bool optimizer_quadrature_feasible = false;
     TimeInitialization time_initialization;
 };
@@ -163,6 +172,7 @@ class NativeFrontend {
     std::unique_ptr<DMPlanner<3>> dmp_;
 #ifdef OCCUPANCY_INFLATION_WITH_CUDA
     std::unique_ptr<pathcover_cuda::DistanceMap> distance_cuda_;
+    std::unique_ptr<pathcover_cuda::BoxCompressor> boxes_cuda_;
     std::vector<std::array<int, 4>> distance_mask_;
 #endif
     Eigen::Vector3i dimensions_, grid_origin_index_;
@@ -179,6 +189,8 @@ class NativeFrontend {
             options_.resolution, 0.7, 0.4, 0.1192, 0.971,
             options_.use_cuda ? NanoVoxMap::Backend::kCuda : NanoVoxMap::Backend::kCpu,
             false);
+        map_->setCudaMergeThreads(options_.num_threads > 0
+            ? static_cast<unsigned>(options_.num_threads) : 0U);
     }
 
 public:
@@ -255,6 +267,7 @@ public:
         grid_ = std::make_shared<JPS::VoxelMapUtil>();
         grid_->setMap(grid_origin_, dimensions_, empty, options_.search_resolution);
         dmp_ = std::make_unique<DMPlanner<3>>(false);
+        dmp_->setXYHeuristic(options_.dmp_xy_heuristic);
         dmp_->setPotentialRadius(Vec3::Constant(options_.potential_radius));
         // Weight 0 is Dijkstra, 1 is admissible A*, and >1 explicitly trades
         // shortest-path optimality for fewer expansions on the same legal graph.
@@ -262,6 +275,7 @@ public:
 #ifdef OCCUPANCY_INFLATION_WITH_CUDA
         if (options_.use_cuda) {
             distance_cuda_ = std::make_unique<pathcover_cuda::DistanceMap>();
+            boxes_cuda_ = std::make_unique<pathcover_cuda::BoxCompressor>();
             for (const auto& entry : dmp_->potentialMask(options_.search_resolution)) {
                 distance_mask_.push_back({entry.first.x(), entry.first.y(), entry.first.z(), entry.second});
             }
@@ -299,10 +313,22 @@ public:
         last_update_.gpu_inflation = stats.gpu_dilation;
         last_update_.inflated_voxels = stats.inflated_voxels;
         const auto grid_begin = Clock::now();
+        last_update_.gpu_box_compression = false;
         if (stats.changed) {
             // Exact union of inflated fine cells. Integer runs are merged without
             // filling gaps; no point-cloud serialization or second inflation.
-            const auto boxes = pathcover_boxes::compress(inflater_.outputGrid());
+            const auto& fine_grid = inflater_.outputGrid();
+            std::vector<pathcover_boxes::Box> boxes;
+#ifdef OCCUPANCY_INFLATION_WITH_CUDA
+            if (options_.use_cuda && !fine_grid.empty()
+                && fine_grid.wordCount() * occupancy_inflation::kWordBits >= options_.cuda_min_grid_voxels) {
+                boxes = boxes_cuda_->compress(fine_grid);
+                last_update_.gpu_box_compression = true;
+            } else
+#endif
+            {
+                boxes = pathcover_boxes::compress(fine_grid);
+            }
             VoxelGrid::resetOccupancy(grid_->map_, occupied_indices_);
             pathcover_grid::coarsenOccupiedBoxes(
                 boxes, grid_resolution_ratio_, grid_origin_index_, dimensions_,
@@ -393,6 +419,9 @@ public:
         bounds["tilt_max_rad"] = options_.tilt_max;
         bounds["rate_max_rad_s"] = options_.body_rate_max;
         value["constraint_bounds"] = std::move(bounds);
+        value["reference_body_rate_margin_rad_s"] = options_.reference_body_rate_margin;
+        value["optimizer_body_rate_target_rad_s"] = options_.body_rate_max - options_.reference_body_rate_margin;
+        value["body_rate_physical_limit_rad_s"] = options_.body_rate_max;
         py::dict allowed_error;
         allowed_error["sfc_m"] = kSfcFeasibilityToleranceM;
         allowed_error["speed_relative"] = 1e-3;
@@ -506,6 +535,9 @@ public:
             }
             result.dmp_ms = milliseconds(dmp_begin);
             result.dmp_cost = dmp_->getPathCost();
+            result.dmp_xy_heuristic = dmp_->hasXYHeuristic();
+            result.dmp_xy_cache_hit = dmp_->xyHeuristicCacheHit();
+            result.dmp_xy_preprocessing_ms = dmp_->xyHeuristicMilliseconds();
             auto append_point = [&](const Vec3& point) {
                 if (path.empty() || (point - path.back()).norm() > 1e-9) path.push_back(point);
             };
@@ -575,7 +607,7 @@ public:
             initial.col(2) = acceleration;
             terminal.col(0) = result.local_goal;
             Eigen::VectorXd bounds(5), physics(6);
-            bounds << options_.nominal_velocity, options_.body_rate_max, options_.tilt_max,
+            bounds << options_.nominal_velocity, options_.body_rate_max - options_.reference_body_rate_margin, options_.tilt_max,
                 options_.thrust_min, options_.thrust_max;
             physics << options_.mass, options_.gravity, 0.0, 0.0, 0.0, 1e-3;
             if (!solver.setup(options_.time_weight, initial, terminal, result.corridors,
@@ -686,7 +718,8 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def_readonly("inflated_voxels", &MappingStats::inflated_voxels)
         .def_readonly("geometry_boxes", &MappingStats::geometry_boxes)
         .def_readonly("gpu_mapping", &MappingStats::gpu_mapping)
-        .def_readonly("gpu_inflation", &MappingStats::gpu_inflation);
+        .def_readonly("gpu_inflation", &MappingStats::gpu_inflation)
+        .def_readonly("gpu_box_compression", &MappingStats::gpu_box_compression);
     py::class_<PlanResult>(m, "PlanResult")
         .def_readonly("path", &PlanResult::path)
         .def_readonly("local_goal", &PlanResult::local_goal)
@@ -711,6 +744,9 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def_readonly("distance_map_ms", &PlanResult::distance_map_ms)
         .def_readonly("dmp_ms", &PlanResult::dmp_ms)
         .def_readonly("dmp_cost", &PlanResult::dmp_cost)
+        .def_readonly("dmp_xy_heuristic", &PlanResult::dmp_xy_heuristic)
+        .def_readonly("dmp_xy_cache_hit", &PlanResult::dmp_xy_cache_hit)
+        .def_readonly("dmp_xy_preprocessing_ms", &PlanResult::dmp_xy_preprocessing_ms)
         .def_readonly("endpoint_connection_ms", &PlanResult::endpoint_connection_ms)
         .def_readonly("endpoint_connection_visited_cells", &PlanResult::endpoint_connection_visited_cells)
         .def_readonly("start_endpoint_anchors", &PlanResult::start_endpoint_anchors)

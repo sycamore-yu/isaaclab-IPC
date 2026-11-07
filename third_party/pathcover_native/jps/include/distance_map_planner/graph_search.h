@@ -150,6 +150,8 @@ namespace DMP
       double plan(const std::vector<GridAnchor>& starts, const std::vector<GridAnchor>& goals);
       int getStartAnchorIndex() const { return selected_start_anchor_; }
       int getGoalAnchorIndex() const { return selected_goal_anchor_; }
+      /// Optional unscaled 3D XY lower bound; the planner owns this storage.
+      void setXYLowerBound(const double* values) { xy_lower_bound_ = values; }
 
       /// Get the optimal path
       std::vector<StatePtr> getPath() const;
@@ -170,6 +172,7 @@ namespace DMP
       void resetSearch(std::vector<bool> in_region);
       void initializeNeighbours();
       double getAnchorHeur(int x, int y, int z) const;
+      double scaleHeuristic(double base, int x, int y) const;
       /// Get successor function for A*
       void getSucc(const StatePtr& curr, std::vector<int>& succ_ids, std::vector<double>& succ_costs);
       /// Recover the optimal path
@@ -192,6 +195,7 @@ namespace DMP
 
       const int8_t* cMap_;
       const uint32_t* legal_moves_ = nullptr;
+      const double* xy_lower_bound_ = nullptr;
       int xDim_, yDim_, zDim_;
       /// weight of heuristic
       double eps_;

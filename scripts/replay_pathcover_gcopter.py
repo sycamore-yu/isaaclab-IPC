@@ -27,11 +27,23 @@ def serialized_problem(problem, config):
     values.extend([
         config.time_weight, config.safety_margin, config.pieces_per_polytope, config.integral_resolution,
         config.relative_tolerance, config.max_iterations,
-        config.native_options()["nominal_velocity"], config.body_rate_max, config.tilt_max, config.thrust_min,
+        config.native_options()["nominal_velocity"], config.body_rate_max - config.reference_body_rate_margin,
+        config.tilt_max, config.thrust_min,
         config.native_options()["thrust_max"], *config.penalty_weights,
         config.mass, config.gravity, 0.0, 0.0, 0.0, 0.001, config.position_penalty_smoothing_m,
     ])
     return " ".join(str(value) for value in values)
+
+
+def config_from_snapshot(values):
+    """Resolve recorded settings without adding a later reference-rate margin."""
+    config_values = dict(values)
+    # Offline migration of frozen V1-V7 evidence. Production has only body yaw.
+    if "yaw_rate_max" in config_values:
+        config_values["body_yaw_rate_max"] = config_values.pop("yaw_rate_max")
+    config_values.setdefault("position_penalty_smoothing_m", 0.01)
+    config_values.setdefault("reference_body_rate_margin", 0.0)
+    return PathCoverConfig(**config_values)
 
 
 def build_solver(root, include, name, ported):
@@ -102,14 +114,7 @@ def main():
     elif "current_state" in captured:
         state = captured["current_state"]
         problem["initial_yaw"] = float(state["yaw"] if isinstance(state, dict) else state.yaw)
-    config_values = dict(problem["config"])
-    # Offline migration of frozen V1-V7 evidence. The production API has only
-    # body_yaw_rate_max; new replays use the V8 heading construction explicitly.
-    if "yaw_rate_max" in config_values:
-        config_values["body_yaw_rate_max"] = config_values.pop("yaw_rate_max")
-    # Earlier frozen problems used the shared upstream 0.01 position width.
-    config_values.setdefault("position_penalty_smoothing_m", 0.01)
-    config = PathCoverConfig(**config_values)
+    config = config_from_snapshot(problem["config"])
     if args.max_iterations is not None:
         config = replace(config, max_iterations=args.max_iterations)
     root = Path(__file__).resolve().parents[1]
@@ -122,7 +127,11 @@ def main():
               "yaw_profile": "body-r constrained heading, V8 semantics",
               "captured_trial_durations": [float(value) if np.isfinite(value) else None
                                            for value in problem.get("trial_durations", [])],
-              "config": config.native_options(), "initial": {
+              "config": config.native_options(),
+              "reference_body_rate_margin_rad_s": config.reference_body_rate_margin,
+              "optimizer_body_rate_target_rad_s": config.body_rate_max - config.reference_body_rate_margin,
+              "body_rate_physical_limit_rad_s": config.body_rate_max,
+              "initial": {
                   "speed_m_s": float(np.linalg.norm(problem["initial_pva"][:, 1])),
                   "thrust_n": config.mass * norm,
                   "tilt_rad": float(np.arccos(np.clip(force[2] / norm, -1, 1))) if norm else None,

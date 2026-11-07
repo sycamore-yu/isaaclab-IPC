@@ -23,7 +23,8 @@ def configuration(**overrides):
                         resolution=0.2, robot_radius=0.2, max_velocity=2.0,
                         thrust_min=0.0, thrust_max=3 * 0.75 * 9.81, tilt_max=1.2,
                         penalty_weights=(1e4, 1e3, 1e4, 1e4, 1e4),
-                        max_iterations=256, use_cuda=False),
+                        max_iterations=256, use_cuda=False, dmp_xy_heuristic=False,
+                        reference_body_rate_margin=0.0),
         **overrides,
     )
 
@@ -60,12 +61,50 @@ def test_official_reference_defaults_resolve_to_concrete_mass_scaled_values():
     assert cfg.thrust_min == pytest.approx(2.0 / 0.716 * 0.9)
     assert cfg.thrust_max == pytest.approx(10.0 / 0.716 * 0.9)
     assert cfg.tilt_max == 0.7854
-    assert cfg.penalty_weights == (1e4, 100.0, 1e4, 1e4, 1e4)
+    assert cfg.penalty_weights == (1e5, 100.0, 1e4, 1e4, 1e4)
     assert cfg.endpoint_connection_radius == 1.0
+    assert cfg.dmp_xy_heuristic is True
+    assert cfg.body_rate_max == 3.0 and cfg.reference_body_rate_margin == 0.01
     options = cfg.native_options()
     assert options["nominal_velocity"] == cfg.nominal_velocity
     assert options["thrust_min"] == cfg.thrust_min
     assert options["thrust_max"] == cfg.thrust_max
+    assert options["reference_body_rate_margin"] == 0.01
+
+
+@pytest.mark.parametrize("margin, maximum", [(-0.01, 3.0), (3.0, 3.0), (np.nan, 3.0),
+                                            (np.inf, 3.0), (0.01, np.inf), (0.0, 0.0)])
+def test_reference_rate_margin_validates_physical_bound(margin, maximum):
+    with pytest.raises(ValueError, match="reference_body_rate_margin"):
+        PathCoverConfig(reference_body_rate_margin=margin, body_rate_max=maximum)
+    native = native_module()
+    options = PathCoverConfig().native_options()
+    options.update(reference_body_rate_margin=margin, body_rate_max=maximum)
+    with pytest.raises(ValueError, match="reference_body_rate_margin"):
+        native.NativeFrontend(options)
+
+
+def test_recorded_rate_margin_replay_preserves_historical_target(monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    from replay_pathcover_gcopter import config_from_snapshot, serialized_problem
+
+    current = PathCoverConfig().native_options()
+    historical = dict(current)
+    historical.pop("reference_body_rate_margin")
+    old = config_from_snapshot(historical)
+    new = config_from_snapshot(current)
+    assert old.reference_body_rate_margin == 0.0
+    assert new.reference_body_rate_margin == 0.01
+    problem = {"initial_pva": np.zeros((3, 3)), "terminal_pva": np.zeros((3, 3)), "corridors": ()}
+    old_values = np.fromstring(serialized_problem(problem, old), sep=" ")
+    new_values = np.fromstring(serialized_problem(problem, new), sep=" ")
+    assert old_values[-16] == 3.0
+    assert new_values[-16] == 2.99
+    np.testing.assert_array_equal(np.delete(old_values, len(old_values) - 16),
+                                  np.delete(new_values, len(new_values) - 16))
+    assert "reference_body_rate_margin" not in historical
 
 
 def test_nominal_speed_clamps_default_to_physical_limit_and_validates_order():
@@ -145,7 +184,7 @@ def test_cpu_cuda_mapping_and_native_solution_agree():
     native = native_module()
     if not native.cuda_built:
         pytest.skip("explicit CPU-only extension")
-    cfg = configuration()
+    cfg = configuration(dmp_xy_heuristic=True)
     cpu = NativePathCoverFrontend(cfg)
     gpu = NativePathCoverFrontend(replace(cfg, use_cuda=True, cuda_min_grid_voxels=0))
     for shift in (0.0, 0.05, -0.04):
@@ -162,11 +201,17 @@ def test_cpu_cuda_mapping_and_native_solution_agree():
     np.testing.assert_allclose(cpu_plan.trajectory.coefficients, gpu_plan.trajectory.coefficients, atol=1e-9)
     assert gpu._native.last_update.gpu_mapping
     assert gpu._native.last_update.gpu_inflation
+    assert gpu._native.last_update.gpu_box_compression
+    assert not cpu._native.last_update.gpu_box_compression
+    assert gpu_plan.metrics["dmp_xy_heuristic"]
+    assert not gpu_plan.metrics["dmp_xy_cache_hit"]
+    assert 0 <= gpu_plan.metrics["dmp_xy_preprocessing_ms"] <= gpu_plan.metrics["dmp_ms"]
     assert gpu_plan.metrics["gpu_distance_map"]
     assert not cpu_plan.metrics["gpu_legal_moves"]
     assert gpu_plan.metrics["gpu_legal_moves"]
     cached_plan = gpu.plan(None, state(), np.array([5.0, 0.0, 1.5]))
     assert cached_plan.metrics["gpu_legal_moves"]
+    assert cached_plan.metrics["dmp_xy_cache_hit"]
     np.testing.assert_array_equal(cached_plan.path, gpu_plan.path)
 
 
@@ -295,7 +340,7 @@ def test_virtual_workspace_clearance_and_iteration_limit_failure():
     plan = frontend.plan(None, state(), np.array([5.0, 0.0, 1.5]))
     floor = plan.corridors[0][np.all(plan.corridors[0][:, :3] == (0.0, 0.0, -1.0), axis=1)]
     assert floor[0, 3] == pytest.approx(cfg.bounds_lower[2] + cfg.robot_radius)
-    limited = NativePathCoverFrontend(configuration(max_iterations=1))
+    limited = NativePathCoverFrontend(configuration(max_iterations=1, reference_body_rate_margin=0.01))
     with pytest.raises(PathCoverPlanningError, match="GCOPTER optimization failed"):
         limited.plan(wall(), state(), np.array([5.0, 0.0, 1.5]))
     problem = limited.failed_problem()
@@ -304,6 +349,11 @@ def test_virtual_workspace_clearance_and_iteration_limit_failure():
     assert problem["optimizer_status"] < 0
     assert len(problem["corridors"]) > 1
     assert problem["config"]["max_iterations"] == 1
+    assert problem["reference_body_rate_margin_rad_s"] == 0.01
+    assert problem["optimizer_body_rate_target_rad_s"] == 2.99
+    assert problem["body_rate_physical_limit_rad_s"] == 3.0
+    assert problem["constraint_bounds"]["rate_max_rad_s"] == 3.0
+    assert problem["soft_constraint_allowed_error"]["body_rate_rad_s"] == 1e-3
 
 
 def test_finite_soft_speed_violation_returns_reference_and_false_diagnostic():

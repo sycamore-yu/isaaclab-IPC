@@ -16,12 +16,14 @@ def main():
     parser.add_argument("--cuda-home", type=Path, default=os.environ.get("CUDA_HOME"))
     parser.add_argument("--cuda-arch", default="89")
     parser.add_argument("--jobs", type=int, default=2)
+    parser.add_argument("--build-dir", type=Path, help="Independent object directory for a candidate build")
+    parser.add_argument("--output-dir", type=Path, help="Write the candidate extension here without publishing it")
     args = parser.parse_args()
     import pybind11
 
     root = Path(__file__).resolve().parents[1]
     vendor = root / "third_party/pathcover_native"
-    build = root / "build/pathcover_native" / ("cpu" if args.cpu else "cuda")
+    build = args.build_dir or root / "build/pathcover_native" / ("cpu" if args.cpu else "cuda")
     build.mkdir(parents=True, exist_ok=True)
     cuda = args.cuda_home or root / "build/turbompc/toolchains/cuda-13.0.2"
     if not args.cpu and not (cuda / "bin/nvcc").is_file():
@@ -32,6 +34,8 @@ def main():
         Path("/usr/include/eigen3"), Path(pybind11.get_include()),
         Path(sysconfig.get_path("include")),
     ]
+    if not args.cpu:
+        includes.append(cuda / "include/cccl")
     flags = [
         "-O3", "-DNDEBUG", "-std=c++17", "-fPIC", "-fopenmp", "-pthread",
         "-DPATHCOVER_DIM=3", *(f"-I{path}" for path in includes),
@@ -49,6 +53,7 @@ def main():
     if not args.cpu:
         sources += [
             root / "native/pathcover_distance_map.cu",
+            root / "native/pathcover_boxes_cuda.cu",
             vendor / "nanovoxmap/src/nanovoxmap_cuda.cu",
             vendor / "occupancy_inflation/src/inflation_cuda.cu",
         ]
@@ -85,7 +90,9 @@ def main():
 
     with ThreadPoolExecutor(max_workers=args.jobs) as pool:
         objects = list(pool.map(compile_source, sources))
-    target = root / "src/isaaclab_ipc" / ("_pathcover_native" + sysconfig.get_config_var("EXT_SUFFIX"))
+    output = args.output_dir or root / "src/isaaclab_ipc"
+    output.mkdir(parents=True, exist_ok=True)
+    target = output / ("_pathcover_native" + sysconfig.get_config_var("EXT_SUFFIX"))
     temporary = target.with_name(target.name + ".tmp")
     libraries = ["-lqhullcpp", "-lqhull_r"]
     if not args.cpu:

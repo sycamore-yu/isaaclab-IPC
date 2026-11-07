@@ -6,6 +6,7 @@
 #define DMPLANNER_H
 
 #include "graph_search.h"
+#include "xy_lower_bound.h"
 #include <jps_collision/map_util.h>
 #include <jps_basis/data_type.h>
 #include <stdexcept>
@@ -104,6 +105,7 @@ public:
     cmap_ = std::move(potential);
     legal_moves_ = std::move(legal_moves);
     map_util_->map_ = cmap_;
+    xy_lower_bound_.mapChanged();
   }
   vec_E<std::pair<Veci<Dim>, int8_t>> potentialMask(double resolution) {
     return createMask(pow_, resolution);
@@ -126,6 +128,11 @@ public:
   /// Original input-list indices from the latest multi-anchor search; -1 otherwise.
   int getStartAnchorIndex() const { return selected_start_anchor_; }
   int getGoalAnchorIndex() const { return selected_goal_anchor_; }
+  /// Opt-in for the nonnegative-cost 3D graph; the original public default is off.
+  void setXYHeuristic(bool enabled) { xy_heuristic_ = Dim == 3 && enabled; }
+  bool hasXYHeuristic() const { return xy_heuristic_; }
+  bool xyHeuristicCacheHit() const { return xy_cache_hit_; }
+  double xyHeuristicMilliseconds() const { return xy_preprocessing_ms_; }
 protected:
   /// Create the mask for potential distance field
   vec_E<std::pair<Veci<Dim>, int8_t>> createMask(int pow, double resolution);
@@ -150,6 +157,9 @@ protected:
   std::vector<int8_t> cmap_;
   /// Owns optional per-cell masks borrowed by the current 3D graph search.
   std::vector<uint32_t> legal_moves_;
+  DMP::XYLowerBound3D xy_lower_bound_;
+  bool xy_heuristic_ = false, xy_cache_hit_ = false;
+  double xy_preprocessing_ms_ = 0.0;
 
   /// Enabled for printing info
   bool planner_verbose_;

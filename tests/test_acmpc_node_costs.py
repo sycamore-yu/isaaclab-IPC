@@ -205,7 +205,9 @@ def test_frontend_and_ctbr_share_physical_parameters():
     default = pathcover_config_for_ctbr(model, {})
     assert default.max_velocity == 10.0 and default.nominal_velocity == 3.0
     assert default.tilt_max == 0.7854
-    assert default.penalty_weights == (1e4, 100.0, 1e4, 1e4, 1e4)
+    assert default.penalty_weights == (1e5, 100.0, 1e4, 1e4, 1e4)
+    assert default.body_rate_max == 3.0 and default.reference_body_rate_margin == 0.01
+    assert model.body_rate_limits == (3.0, 3.0, 1.5)
     narrow = CTBRConfig(mass=0.9, specific_thrust_limits=(4.0, 12.0))
     restricted = pathcover_config_for_ctbr(narrow, {})
     assert restricted.thrust_min == pytest.approx(3.6)
@@ -235,7 +237,9 @@ def test_marsim_keeps_cruise_target_distinct_from_physical_speed(benchmark, phys
     assert frontend.thrust_min == pytest.approx(2.0 / 0.716 * model.mass)
     assert frontend.thrust_max == pytest.approx(10.0 / 0.716 * model.mass)
     assert frontend.tilt_max == 0.7854
-    assert frontend.penalty_weights == (1e4, 100.0, 1e4, 1e4, 1e4)
+    assert frontend.penalty_weights == (1e5, 100.0, 1e4, 1e4, 1e4)
+    assert frontend.body_rate_max == 3.0 and frontend.reference_body_rate_margin == 0.01
+    assert model.body_rate_limits == (3.0, 3.0, 1.5)
     stress = benchmark_frontend_config(load_case(benchmark), model, reference_speed=6.0)
     assert stress.max_velocity == physical_speed and stress.nominal_velocity == 6.0
     narrow = CTBRConfig(specific_thrust_limits=(4.0, 12.0))
