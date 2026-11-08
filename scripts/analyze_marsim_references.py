@@ -64,8 +64,9 @@ def validate_saved_identity(identity, identity_sha, start, end, recorded_run, me
     to the files that were checked. A validation-only executable is not a ROS
     process and is not required in run.json's runtime executable list.
     """
-    _require(identity.get("schema_version") == 2 and identity.get("status") == "identity_captured",
-             "Expected a completed schema-2 identity capture")
+    schema_version = identity.get("schema_version")
+    _require(schema_version in (2, 3) and identity.get("status") == "identity_captured",
+             "Expected a completed schema-2/schema-3 identity capture")
     for phase, boundary in (("start", start), ("end", end)):
         _require(boundary.get("phase") == phase and boundary.get("identity_matches") is True
                  and boundary.get("identity_sha256") == identity_sha,
@@ -89,6 +90,15 @@ def validate_saved_identity(identity, identity_sha, start, end, recorded_run, me
     _require(runtime and len(executables) == len(runtime), "Recorded ROS executable scope differs")
     for name, digest in runtime.items():
         _require(_recorded_digest(executables, name) == digest, f"Recorded ROS executable differs: {name}")
+    runtime_libraries = identity["executor"].get("runtime_library_sha256")
+    if "runtime_library_sha256" in identity["executor"]:
+        recorded_runtime_libraries = recorded_run.get("runtime_library_sha256")
+        _require(isinstance(runtime_libraries, dict) and isinstance(recorded_runtime_libraries, dict)
+                 and len(recorded_runtime_libraries) == len(runtime_libraries),
+                 "Recorded runtime library scope differs")
+        for name, digest in runtime_libraries.items():
+            _require(_recorded_digest(recorded_runtime_libraries, name) == digest,
+                     f"Recorded runtime library differs: {name}")
     checked_sources = 0
     for name, digest in controller["source_file_sha256"].items():
         if name.startswith(("src/", "ros2/", "scripts/")) and PurePath(name).suffix in {
@@ -103,17 +113,24 @@ def validate_saved_identity(identity, identity_sha, start, end, recorded_run, me
     _require(checkpoint is None or training, "Recorded checkpoint is absent from captured training origins")
     return {
         "identity_evidence_matches": True, "recorded_run_name": end.get("run"),
+        "identity_schema_version": schema_version,
         "controller_git_head": controller["git_head"],
         "controller_source_sha256": controller["source_sha256"],
         "checked_runtime_source_count": checked_sources,
         "admm_linear_solver": controller.get("admm_linear_solver"),
         "frontend_origin": frontend, "controller_native_origin": controller["native"],
         "training_origins_for_checkpoint": training,
+        "configuration": identity.get("configuration"),
+        "configuration_manifest": identity.get("configuration_manifest"),
+        "p0_reuse": identity.get("p0_reuse"),
         "runtime_binary_sha256": runtime,
+        "runtime_library_sha256": runtime_libraries,
         "validation_only_binary_sha256": identity["executor"].get("validation_binary_sha256", {}),
         "scope": "Saved capture/start/end evidence and recorded run artifacts agree. "
                  "No current binary, source tree, checkpoint or device is revalidated. "
-                 "Validation-only binaries retain their captured hashes and are not runtime processes.",
+                 "Validation-only binaries retain their captured hashes and are not runtime processes. "
+                 "Configuration and P0 reuse fields retain captured provenance; "
+                 "the configuration manifest is not independently revalidated here.",
     }
 
 
@@ -155,8 +172,10 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True, help="New report directory; final reports are not overwritten")
     parser.add_argument("--cache-directory", type=Path, help="Optional resumable per-plan cache (default: OUTPUT/plan-cache)")
     parser.add_argument("--expected-git-prefix", help="Optional recorded-run Git expectation, not the current checkout")
-    parser.add_argument("--frontend-manifest", type=Path, help="Optional archived release manifest with so_sha256")
-    parser.add_argument("--identity", type=Path, help="Optional schema-2 captured identity; requires both boundary checks")
+    parser.add_argument("--frontend-manifest", type=Path,
+                        help="Optional native-binary release manifest with so_sha256, not a configuration manifest")
+    parser.add_argument("--identity", type=Path,
+                        help="Optional schema-2/schema-3 captured identity; requires both boundary checks")
     parser.add_argument("--identity-start", type=Path)
     parser.add_argument("--identity-end", type=Path)
     args = parser.parse_args()
@@ -189,7 +208,10 @@ def main():
     published_frontend, frontend_matches = None, None
     if args.frontend_manifest is not None:
         release = json.loads(args.frontend_manifest.read_text())
-        published_frontend = release["so_sha256"]
+        published_frontend = release.get("so_sha256")
+        _require(isinstance(published_frontend, str) and published_frontend,
+                 "--frontend-manifest requires a native-binary release with so_sha256; "
+                 "a configuration manifest is not a binary release")
         frontend_matches = frontend_hashes == [published_frontend]
         _require(frontend_matches, "Recorded frontend differs from supplied release manifest")
     saved_identity = {"identity_evidence_matches": None,
@@ -228,6 +250,7 @@ def main():
             "published_frontend_sha256": published_frontend, "frontend_sha256_matches": frontend_matches,
             "recorded_native_library_sha256": recorded_run.get("native_library_sha256"),
             "recorded_executable_sha256": recorded_run.get("executable_sha256"),
+            "recorded_runtime_library_sha256": recorded_run.get("runtime_library_sha256"),
             "recorded_source_sha256": recorded_run.get("source_sha256"),
             "recorded_parameters": metadata["parameters"], "recorded_solver": metadata["solver"],
             "checkpoint_sha256": metadata.get("checkpoint_sha256"),

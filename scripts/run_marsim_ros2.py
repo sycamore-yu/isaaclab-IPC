@@ -25,6 +25,17 @@ def stop(process):
             process.wait(timeout=10)
 
 
+def renderer_library_sha256(executable, environment):
+    """Record the renderer selected by the launch environment's dynamic loader."""
+    dependencies = subprocess.check_output(["ldd", str(executable)], env=environment, text=True)
+    for line in dependencies.splitlines():
+        fields = line.split()
+        if fields[:2] == ["libmarsim_render.so", "=>"] and fields[2] != "not":
+            library = Path(fields[2]).resolve()
+            return {str(library): hashlib.sha256(library.read_bytes()).hexdigest()}
+    raise RuntimeError(f"Cannot resolve libmarsim_render.so for {executable}")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("ideal", "dynamic"), required=True)
@@ -91,6 +102,8 @@ def main():
     native_binaries = list((ROOT / "src/isaaclab_ipc").glob("_pathcover_native*.so"))
     native_binaries.extend(Path(environment.get("TURBOMPC_NATIVE_BUILD_DIR",
         ROOT / "build/turbompc/native/cu130")).glob("_turbompc_native*.so"))
+    renderer_executable = binaries[1] if args.mode == "dynamic" else binaries[2]
+    runtime_libraries = renderer_library_sha256(renderer_executable, environment)
     (output / "run.json").write_text(json.dumps({
         "launch": command, "monitor": monitor_command, "ros_domain_id": args.domain,
         "time_mode": args.time_mode, "frontend": args.frontend,
@@ -100,6 +113,7 @@ def main():
         "marsim_runtime": str(runtime),
         "executable_sha256": {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
                               for path in binaries if path.exists()},
+        "runtime_library_sha256": runtime_libraries,
         "native_library_sha256": {str(path.resolve()): hashlib.sha256(path.read_bytes()).hexdigest()
                                   for path in native_binaries},
         "executor_parameters_sha256": hashlib.sha256(args.executor_parameters.read_bytes()).hexdigest()

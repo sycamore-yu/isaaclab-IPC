@@ -71,7 +71,7 @@ python3 scripts/build_marsim_ros2.py \
 source scripts/marsim_ros2_env.sh
 ```
 
-构建和安装都限制在 `build/marsim_ros2/`。脚本支持 `--prepare-only`、`--upstream-only` 和 `--packages`，供分阶段构建使用。通常先完整构建，再用 `--packages isaaclab_marsim` 增量编译桥接节点。
+默认构建和安装目录为 `build/marsim_ros2/`；使用 `--workspace <独立目录>` 可隔离候选。脚本支持 `--prepare-only`、`--upstream-only` 和 `--packages`，供分阶段构建使用。通常先完整构建，再用 `--packages isaaclab_marsim` 增量编译桥接节点。
 
 之后每个评测终端都执行：
 
@@ -110,6 +110,10 @@ export DISPLAY=:11
 ```
 
 统一 Launch 的渲染参数为 `render_prefix:="vglrun -d egl0"`。该值是当前机器配置；迁移机器需确认实际显示和 GPU 设备。仅有 ROS 话题存在，不能证明地图已加载或点云正确。
+
+私有 SUPER 准备脚本修正 `360camera.vs` 的量程外顶点：明确放到裁剪体外，并写入点大小。原分支的全零齐次坐标与未定义点大小曾使全部深度像素接近零，随后被盲区过滤为空点云。修复保留有效点的算式和原缓冲区顺序。隔离 60 帧全部有效，并与旧版有效帧的 XYZ 逐位一致；证据见原生验证记录的 V39 渲染器章节。
+
+渲染器在运行时从编译期 `ROOT_DIR` 读取 shader。复现必须同时冻结运行库和该目录的资源。运行器在 `run.json` 中记录实际依赖解析得到的渲染库路径及 SHA256；同一个 LiDAR 可执行文件不等于同一个渲染器。
 
 ## 3. 一个 Launch，两个执行器
 

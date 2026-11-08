@@ -190,20 +190,33 @@ def test_cache_is_bound_to_inputs_code_and_exact_event(tmp_path):
         PlanCache(tmp_path / "plans", {**provenance, "analysis_source_sha256": {"module": "c"}})
 
 
-def test_saved_identity_validates_runtime_scope_and_end_artifact_hashes():
+@pytest.mark.parametrize("schema_version", [2, 3])
+@pytest.mark.parametrize("with_runtime_libraries", [False, True])
+def test_saved_identity_validates_runtime_scope_and_end_artifact_hashes(schema_version, with_runtime_libraries):
     script = Path(__file__).resolve().parents[1] / "scripts/analyze_marsim_references.py"
     validate = runpy.run_path(str(script))["validate_saved_identity"]
     identity = {
-        "schema_version": 2, "status": "identity_captured",
+        "schema_version": schema_version, "status": "identity_captured",
         "controller": {"git_head": "git", "source_sha256": "sources", "source_file_sha256": {"src/a.py": "a"},
                        "native": {"library": {"path": "/recorded/build/solver.so", "sha256": "solver"}}},
-        "frontend": {"library": {"path": "/recorded/src/frontend.so", "sha256": "frontend"}},
+        "frontend": {"git_head": "frontend-build-git",
+                     "library": {"path": "/recorded/src/frontend.so", "sha256": "frontend"}},
         "executor": {"runtime_binary_sha256": {f"build/node{i}": str(i) for i in range(4)},
                      "validation_binary_sha256": {"build/check_allocator": "checker"}}, "training": {},
     }
+    if schema_version == 3:
+        identity.update(
+            configuration={"kind": "configuration_only", "runtime_git_head": "git", "native_rebuilt": False},
+            configuration_manifest={"path": "/recorded/configuration.json", "sha256": "configuration"},
+            p0_reuse={"fresh_p0_run": False, "original_source_count": 76, "unchanged_source_count": 75},
+        )
     run = {"git_revision": "git", "source_sha256": {"src/a.py": "a"},
            "native_library_sha256": {"/recorded/build/solver.so": "solver", "/recorded/src/frontend.so": "frontend"},
            "executable_sha256": {f"/recorded/build/node{i}": str(i) for i in range(4)}}
+    renderer_path = "/recorded/build/renderer/libmarsim_render.so"
+    if with_runtime_libraries:
+        identity["executor"]["runtime_library_sha256"] = {"build/renderer/libmarsim_render.so": "renderer"}
+        run["runtime_library_sha256"] = {renderer_path: "renderer"}
     metadata = {"solver": {"native_extension_path": "/recorded/build/solver.so"}, "checkpoint_sha256": None}
     hashes = {"run.json": "run", "policy/metadata.json": "metadata", "metrics.json": "metrics"}
     start = {"phase": "start", "run": "arbitrary-run", "identity_matches": True, "identity_sha256": "identity"}
@@ -212,7 +225,31 @@ def test_saved_identity_validates_runtime_scope_and_end_artifact_hashes():
         "metadata": {"sha256": "metadata"}, "metrics": {"sha256": "metrics"}}}
     result = validate(identity, "identity", start, end, run, metadata, hashes)
     assert result["identity_evidence_matches"] is True
+    assert result["identity_schema_version"] == schema_version
+    assert result["frontend_origin"]["git_head"] != result["controller_git_head"]
+    for key in ("configuration", "configuration_manifest", "p0_reuse"):
+        assert result[key] == identity.get(key)
+    assert result["runtime_library_sha256"] == identity["executor"].get("runtime_library_sha256")
     assert result["validation_only_binary_sha256"] == {"build/check_allocator": "checker"}
+    if with_runtime_libraries:
+        bad_library = {**run, "runtime_library_sha256": {renderer_path: "wrong"}}
+        with pytest.raises(ArchiveIntegrityError, match="Recorded runtime library differs"):
+            validate(identity, "identity", start, end, bad_library, metadata, hashes)
+        missing_library = {key: value for key, value in run.items() if key != "runtime_library_sha256"}
+        for bad_library in (missing_library, {**run, "runtime_library_sha256": {}},
+                            {**run, "runtime_library_sha256": {renderer_path: "renderer", "extra.so": "extra"}}):
+            with pytest.raises(ArchiveIntegrityError, match="runtime library scope"):
+                validate(identity, "identity", start, end, bad_library, metadata, hashes)
+        bad_path = {**run, "runtime_library_sha256": {"/other/libmarsim_render.so": "renderer"}}
+        with pytest.raises(ArchiveIntegrityError, match="one recorded identity"):
+            validate(identity, "identity", start, end, bad_path, metadata, hashes)
+    else:
+        # Historical identities do not gain a library guarantee from new run fields.
+        with_library = {**run, "runtime_library_sha256": {renderer_path: "renderer"}}
+        historical = validate(identity, "identity", start, end, with_library, metadata, hashes)
+        assert historical["runtime_library_sha256"] is None
+    with pytest.raises(ArchiveIntegrityError, match="schema-2/schema-3"):
+        validate({**identity, "schema_version": 4}, "identity", start, end, run, metadata, hashes)
     bad = copy.deepcopy(run)
     bad["executable_sha256"]["/recorded/build/node0"] = "wrong"
     with pytest.raises(ArchiveIntegrityError, match="ROS executable"):
@@ -265,3 +302,21 @@ def test_cli_reads_cpu_archive_and_writes_failed_quality_with_failed_attempt(tmp
     assert summary["per_plan_report"]["sha256"] == hashlib.sha256((output / "references.json").read_bytes()).hexdigest()
     assert (output / "summary.md").is_file()
     assert json.loads((output / "plan-cache/progress.json").read_text())["aggregate_available"] is True
+
+
+
+def test_cli_rejects_configuration_manifest_as_native_release(tmp_path, monkeypatch):
+    script = Path(__file__).resolve().parents[1] / "scripts/analyze_marsim_references.py"
+    run, output = tmp_path / "run", tmp_path / "analysis"
+    (run / "policy").mkdir(parents=True)
+    for name in ("metrics.json", "run.json", "policy/metadata.json"):
+        (run / name).write_text("{}")
+    (run / "policy_stats.jsonl").write_text("")
+    (run / "policy/reference-plans.pt").write_bytes(b"must not be loaded")
+    configuration = tmp_path / "configuration.json"
+    configuration.write_text(json.dumps({"kind": "configuration_only", "native_build_performed": False}))
+    monkeypatch.setattr(sys, "argv", [str(script), "--run-dir", str(run), "--output-dir", str(output),
+                                     "--frontend-manifest", str(configuration)])
+    with pytest.raises(ArchiveIntegrityError, match="native-binary release with so_sha256"):
+        runpy.run_path(str(script), run_name="__main__")
+    assert not output.exists()

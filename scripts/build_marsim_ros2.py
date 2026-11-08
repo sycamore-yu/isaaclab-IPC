@@ -56,6 +56,14 @@ def prepare_super(source: Path, target: Path):
             if f"<depend>{dependency}</depend>" not in manifest:
                 manifest = manifest.replace("    <export>", f"    <depend>{dependency}</depend>\n    <export>")
         write_changed(directory / "package.xml", manifest)
+    shader = target / "mars_uav_sim/marsim_render/config/pattern/360camera.vs"
+    # w=0 and an unwritten point size can cover the depth buffer with near-zero
+    # returns. Clip range-out points explicitly; preserve all valid-point math.
+    shader_text = shader.read_text().replace(
+        "\t\tgl_Position = vec4(0.0f,0.0f,0.0f,0.0f);\n\t\tourColor = aColor;",
+        "\t\tgl_Position = vec4(2.0f,2.0f,2.0f,1.0f);\n"
+        "\t\tgl_PointSize = 1.0f;\n\t\tourColor = aColor;", 1)
+    write_changed(shader, shader_text)
     for name in ("src/super_core/fsm.cpp", "src/super_core/super_planner.cpp",
                  "include/ros_interface/ros2/ros2_adapter.hpp"):
         cpp = target / "super_planner" / name
@@ -291,10 +299,12 @@ def main():
     parser.add_argument("--upstream-only", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--packages", nargs="+", help="Build only these packages after their dependencies exist")
+    parser.add_argument("--workspace", type=Path, default=ROOT / "build/marsim_ros2",
+                        help="Independent ROS source/build/install directory")
     args = parser.parse_args()
     if not args.upstream_only and args.flightmare_root is None:
         parser.error("--flightmare-root is required unless --upstream-only is selected")
-    workspace = ROOT / "build/marsim_ros2"
+    workspace = args.workspace.resolve()
     source = workspace / "src/SUPER"
     revision = prepare_super(args.super_root.resolve(), source)
     provenance = {"super_revision": revision, "reference": str(args.super_root.resolve()), "source": str(source)}

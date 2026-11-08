@@ -154,6 +154,10 @@ PYTHONPATH=src .venv/bin/python scripts/analyze_marsim_references.py \
 
 报告保存输入、分析代码、运行提交、原生库、执行器及 checkpoint 来源。可选提供保存的 `--identity`、`--identity-start`、`--identity-end` 三份记录核对发布身份。多项式根和角速度局部精化不构成区间证明；100 Hz 实际 SFC 采样也不能替代连续执行证明。
 
+身份核对支持 schema 2 和 schema 3。schema 3 的配置清单引用、配置变更与 P0 复用来源按捕获记录保留。工具不再次核验配置清单文件，也不要求前端构建提交等于运行提交。
+
+可选的 `--frontend-manifest` 只接受含 `so_sha256` 的原生库发布清单。只改变运行配置时，应提供实际复用的原生库发布清单。配置清单不能替代原生库发布清单。
+
 ## 验证
 
 当前分支的配置、实测值与未通过项见 [原生 AC-MPC 验证](docs/acmpc-native-validation.md)。历史文档的通过结论不代替新主线验收。
