@@ -76,6 +76,7 @@ def pathcover_config_for_ctbr(model, overrides):
     options = dict(overrides)
     options.setdefault("max_corridors", 4)
     options.setdefault("geometry_model", "box_ellipsoid")
+    options.setdefault("risp_local_half_extent", 8.0 if options["geometry_model"] == "box_ellipsoid" else 0.0)
     # The original SFC already separates occupied boxes plus the body ellipsoid.
     options.setdefault("safety_margin", 0.0)
     options.setdefault("position_penalty_aggregation", "continuous_max")

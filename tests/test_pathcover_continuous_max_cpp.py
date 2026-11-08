@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 SOURCE = r"""
+#include <math.h> // QuickHull uses the unqualified floating-point abs overload.
 #include <cmath>
 #include <cstdint>
 #include <cstring>
@@ -91,7 +92,8 @@ void objective_and_derivatives() {
     const auto exact=penalty(c,1.,h,true);
     require(integral.cost==0 && integral.metrics.sfc<0, "sampling fixture does not isolate missed peak");
     near(exact.cost,1e5*(delta-.5e-6),1e-10,"continuous penalty missed the between-node maximum");
-    require(exact.metrics.sfc==integral.metrics.sfc,"quadrature diagnostic changed semantics");
+    require(std::isinf(exact.metrics.sfc) && exact.metrics.sfc<0 &&
+            exact.metrics.positionPieces==1,"continuous SFC diagnostic was not deferred");
     require(exact.metrics.finite && exact.coeff.allFinite(),"finite continuous gradient rejected");
     for (bool endpoint : {false,true}) {
         Coeff current=c;
@@ -133,6 +135,90 @@ void legacy_and_templates() {
     try { s4.setContinuousMaxPositionPenalty(true); } catch (const std::invalid_argument&) { rejected=true; }
     require(rejected,"unsupported S4 mode silently removed the position objective");
 }
+Eigen::MatrixX4d box(double lower_x, double upper_x) {
+    Eigen::MatrixX4d h(6,4);
+    h << -1,0,0,lower_x, 1,0,0,-upper_x,
+         0,-1,0,-.8, 0,1,0,-.9,
+         0,0,-1,.1, 0,0,1,-2.1;
+    return h;
+}
+void setup_diagnostic_problem(Solver& solver) {
+    sdlp::permutation_rng.seed(0);
+    Eigen::Matrix3d initial=Eigen::Matrix3d::Zero(), terminal=Eigen::Matrix3d::Zero();
+    initial.col(0) << 0,0,1;
+    initial.col(1) << .3,.1,0;
+    terminal.col(0) << 2.5,.2,1.1;
+    const Solver::PolyhedraH corridors{box(-1,1.4),box(.5,3.2)};
+    Eigen::VectorXd bounds(5), weights(5), physics(6);
+    bounds << 3,2.99,M_PI/2,2.094972067039106,22.0725;
+    weights << 1e5,100,1e4,1e4,1e4;
+    physics << .75,9.81,0,0,0,.001;
+    require(solver.setup(100,initial,terminal,corridors,.1,2.,1,.01,64,
+                         bounds,weights,physics),"diagnostic fixture setup failed");
+    solver.setPositionPenaltySmoothing(1e-6);
+    solver.setContinuousMaxPositionPenalty(true);
+    solver.enableInitialForce(Eigen::Vector3d::UnitZ(),0,22.0725,.75*9.81);
+}
+double quadrature_sfc(const Trajectory<5>& trajectory, const Solver& solver,
+                      const Solver::PolyhedraH& corridors) {
+    // Independently evaluate the returned/trial polynomial through Piece::getPos.
+    // Do not call the deferred-metric helper or its monomial-basis implementation.
+    double result=-INFINITY;
+    for (int i=0;i<trajectory.getPieceNum();++i) {
+        const auto& planes=corridors[solver.getPiecePolytopeIndices()(i)];
+        const double step=trajectory[i].getDuration()/solver.integralRes;
+        for (int j=0;j<=solver.integralRes;++j) {
+            const Eigen::Vector3d position=trajectory[i].getPos(j*step);
+            for (int k=0;k<planes.rows();++k)
+                result=std::max(result,planes.row(k).head<3>().dot(position)+planes(k,3));
+        }
+    }
+    return result;
+}
+void finalized_quadrature_diagnostics(bool iteration_limit) {
+    Solver solver;
+    setup_diagnostic_problem(solver);
+    Trajectory<5> returned;
+    const double cost=solver.optimize(returned,1e-5,iteration_limit ? 1 : 1000);
+    Trajectory<5> inspected;
+    if (iteration_limit) {
+        require(solver.getStatus()==lbfgs::LBFGSERR_MAXIMUMITERATION &&
+                std::isinf(cost) && returned.getPieceNum()==0,
+                "iteration-limit failure contract changed");
+        // On failure optimize() must retain diagnostics for the last evaluated
+        // MINCO trial, even though it does not return that trajectory.
+        solver.minco.getTrajectory(inspected);
+    } else {
+        require(solver.getStatus()>=0 && std::isfinite(cost) && returned.getPieceNum()>0,
+                "diagnostic fixture did not optimize successfully");
+        inspected=returned;
+    }
+    const auto& metrics=solver.getConstraintMetrics();
+    require(inspected.getPieceNum()>1 && metrics.positionPieces==inspected.getPieceNum(),
+            "diagnostic fixture lost its multiple visited pieces");
+    require(metrics.finite && metrics.values().allFinite(),"final diagnostics were left pending");
+    for (int i=0;i<inspected.getPieceNum();++i)
+        near(inspected[i].getDuration(),solver.getTrialDurations()(i),1e-14,
+             "inspected polynomial does not match the retained trial durations");
+    const double original=quadrature_sfc(inspected,solver,solver.hPolytopes);
+    const double shifted=quadrature_sfc(inspected,solver,solver.penaltyPolytopes);
+    near(metrics.sfc,original,1e-12,"final SFC diagnostic differs from independent quadrature");
+    require(shifted-original>.01,"fixture does not distinguish original and inward-offset planes");
+    // The unchanged integral evaluator remains an exact oracle for all six
+    // diagnostic fields on the same MINCO polynomial; its objective is ignored.
+    flatness::FlatnessMap map;
+    map.reset(.75,9.81,0,0,0,.001);
+    Solver::ConstraintMetrics integral_metrics;
+    Eigen::VectorXd grad_time=Eigen::VectorXd::Zero(solver.getTrialDurations().size());
+    Eigen::MatrixX3d grad_coeff=Eigen::MatrixX3d::Zero(solver.minco.getCoeffs().rows(),3);
+    double ignored_cost=0;
+    Solver::attachPenaltyFunctional<true>(solver.getTrialDurations(),solver.minco.getCoeffs(),
+        solver.getPiecePolytopeIndices(),solver.penaltyPolytopes,solver.smoothEps,solver.integralRes,
+        solver.magnitudeBd,solver.penaltyWt,map,integral_metrics,solver.positionSmoothEps,
+        solver.hPolytopes,ignored_cost,grad_time,grad_coeff,false);
+    require((metrics.values().array()==integral_metrics.values().array()).all() &&
+            metrics.finite==integral_metrics.finite,"final QUALITY differs from original quadrature");
+}
 int main(int argc,char** argv) {
     try {
         require(argc==2,"one contract name required");
@@ -140,6 +226,8 @@ int main(int argc,char** argv) {
         if(mode=="polynomials") polynomials();
         else if(mode=="derivatives") objective_and_derivatives();
         else if(mode=="legacy") legacy_and_templates();
+        else if(mode=="success_diagnostics") finalized_quadrature_diagnostics(false);
+        else if(mode=="failure_diagnostics") finalized_quadrature_diagnostics(true);
         else throw std::runtime_error("unknown contract");
     } catch(const std::exception& error) {
         std::cerr<<error.what()<<'\n'; return 1;
@@ -172,7 +260,9 @@ def continuous_contract(tmp_path_factory):
     return binary
 
 
-@pytest.mark.parametrize("mode", ["polynomials", "derivatives", "legacy"])
+@pytest.mark.parametrize(
+    "mode", ["polynomials", "derivatives", "legacy", "success_diagnostics", "failure_diagnostics"]
+)
 def test_continuous_position_contract(continuous_contract, mode):
     completed = subprocess.run([str(continuous_contract), mode], capture_output=True, text=True)
     assert completed.returncode == 0, completed.stdout + completed.stderr

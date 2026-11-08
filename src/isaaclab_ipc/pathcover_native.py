@@ -30,6 +30,9 @@ class PathCoverConfig:
     # Historical standalone plans use rasterized inflated cells. CTBR uses the
     # original occupied boxes plus the body ellipsoid for continuous geometry.
     geometry_model: str = "inflated_voxels"
+    # Explicit local RISP box in metres. Zero retains the global workspace.
+    # The first box encloses the entire initial motion seed before expansion.
+    risp_local_half_extent: float = 0.0
     # Physical reference speed diagnostic. The cruise-speed penalty can use a
     # lower nominal value; finite soft violations remain visible in plan metrics.
     max_velocity: float = 6.0
@@ -51,7 +54,7 @@ class PathCoverConfig:
     pieces_per_polytope: int = 1
     integral_resolution: int = 64
     max_iterations: int = 1000
-    relative_tolerance: float = 1e-4
+    relative_tolerance: float = 1e-5
     time_weight: float = 100.0
     # Metre-valued inward offset of the reference position-penalty copy only.
     safety_margin: float = 0.15
@@ -83,6 +86,9 @@ class PathCoverConfig:
     def __post_init__(self):
         if self.geometry_model not in ("inflated_voxels", "box_ellipsoid"):
             raise ValueError("geometry_model must be inflated_voxels or box_ellipsoid")
+        if (not math.isfinite(self.risp_local_half_extent) or self.risp_local_half_extent < 0
+                or (self.risp_local_half_extent > 0 and self.geometry_model != "box_ellipsoid")):
+            raise ValueError("risp_local_half_extent must be finite and nonnegative; positive values require box_ellipsoid")
         if self.geometry_model == "box_ellipsoid":
             radius_z = self.robot_radius if self.robot_radius_z is None else self.robot_radius_z
             radii = (self.robot_radius, radius_z)
@@ -455,6 +461,7 @@ class NativePathCoverFrontend:
             "optimizer_status": result.optimizer_status, "objective": result.cost,
             "initial_boundary": initial_boundary,
             "geometry_model": result.geometry_model,
+            "risp_local_half_extent_m": result.risp_local_half_extent,
             "position_penalty_aggregation": result.position_penalty_aggregation,
             "optimizer_quadrature_feasible": result.optimizer_quadrature_feasible,
             "constraint_metrics_semantics": (

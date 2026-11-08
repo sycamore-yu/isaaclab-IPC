@@ -63,6 +63,7 @@ def benchmark_frontend_config(case, config, reference_speed=3.0, *, nominal_thru
         robot_radius=case["planner"]["super_planner"]["robot_r"],
         max_corridors=4, safety_margin=0.0, position_penalty_aggregation="continuous_max",
         geometry_model="box_ellipsoid",
+        risp_local_half_extent=8.0,
         max_velocity=physical_speed, nominal_velocity=min(reference_speed, physical_speed),
         mass=config.mass, gravity=config.gravity,
         thrust_min=config.mass * config.specific_thrust_limits[0],

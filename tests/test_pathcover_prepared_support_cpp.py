@@ -8,6 +8,8 @@ import pytest
 
 SOURCE = r"""
 #include "pathcover_clearance.h"
+#include <cerrno>
+#include <cfenv>
 #include <cstdint>
 #include <cstring>
 #include <iostream>
@@ -115,6 +117,88 @@ void repeated_points() {
     }
 }
 
+void adjacent_contract() {
+    // Numeric boundary behavior includes errno and the floating environment.
+    // Compare the platform function directly, without reproducing its formula.
+    double (*volatile reference)(double,double) = &std::nextafter;
+    std::vector<std::uint64_t> patterns;
+    const std::array<std::uint64_t,14> edges{
+        0,1,UINT64_C(0x000ffffffffffffe),UINT64_C(0x000fffffffffffff),
+        UINT64_C(0x0010000000000000),UINT64_C(0x0010000000000001),
+        UINT64_C(0x3fefffffffffffff),UINT64_C(0x3ff0000000000000),
+        UINT64_C(0x3ff0000000000001),UINT64_C(0x7feffffffffffffe),
+        UINT64_C(0x7fefffffffffffff),UINT64_C(0x7ff0000000000000),
+        UINT64_C(0x7ff8000000000042),UINT64_C(0x7ff0000000000042)};
+    for (const auto sign : {UINT64_C(0),UINT64_C(0x8000000000000000)})
+        for (const auto edge : edges) patterns.push_back(sign | edge);
+    std::uint64_t random = UINT64_C(0x79c3a63d10e59b71);
+    for (int i=0;i<2048;++i) {
+        random ^= random << 13; random ^= random >> 7; random ^= random << 17;
+        patterns.push_back(random);
+    }
+    fenv_t environment;
+    require(fegetenv(&environment)==0,"could not save floating environment");
+    for (const int rounding : {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO}) {
+        require(fesetround(rounding)==0,"rounding mode unavailable");
+        for (const int preset : {0,FE_INEXACT | FE_DIVBYZERO})
+            for (const int direction : {-1,1}) for (const auto pattern : patterns) {
+                double value;
+                std::memcpy(&value,&pattern,sizeof(value));
+                const double target = direction > 0 ? std::numeric_limits<double>::infinity()
+                                                    : -std::numeric_limits<double>::infinity();
+                feclearexcept(FE_ALL_EXCEPT);
+                if (preset) feraiseexcept(preset);
+                errno=EDOM;
+                const double expected=reference(value,target);
+                const int expected_errno=errno, expected_flags=fetestexcept(FE_ALL_EXCEPT);
+                feclearexcept(FE_ALL_EXCEPT);
+                if (preset) feraiseexcept(preset);
+                errno=EDOM;
+                const double actual=direction > 0 ? detail::up(value) : detail::down(value);
+                const int actual_errno=errno, actual_flags=fetestexcept(FE_ALL_EXCEPT);
+                same(actual,expected,"adjacent double bits changed");
+                require(actual_errno==expected_errno,"adjacent errno changed");
+                require(actual_flags==expected_flags,"adjacent floating exceptions changed");
+            }
+    }
+    require(fesetenv(&environment)==0,"could not restore floating environment");
+}
+
+void support_filter_contract() {
+    fenv_t environment;
+    require(fegetenv(&environment)==0,"could not save floating environment");
+    for (const int rounding : {FE_TONEAREST,FE_UPWARD,FE_DOWNWARD,FE_TOWARDZERO}) {
+        require(fesetround(rounding)==0,"rounding mode unavailable");
+        for (const int exponent : {-500,-150,0,150,500}) for (int i=0;i<256;++i) {
+            const double scale=std::ldexp(1.0,exponent);
+            const Vec3 center=Vec3((i%23)-11.0,(i%17)-8.0,(i%13)-6.0)*scale;
+            const Vec3 width=Vec3(.05+(i%5)*.25,.25,.5)*scale;
+            const Box box{center-width,center+width};
+            const Vec3 normal=Vec3(.2+(i%3)*.1,-.7,.125)*scale;
+            for (const auto& radii : {Vec3::Zero().eval(),Vec3(.2,.3,.1)}) {
+                const PreparedBoxSupport prepared(normal,radii);
+                const double expected=prepared.upper(box);
+                const std::array<double,7> thresholds{expected,
+                    std::nextafter(expected,std::numeric_limits<double>::infinity()),
+                    std::nextafter(expected,-std::numeric_limits<double>::infinity()),
+                    -0.0,0.0,-std::numeric_limits<double>::infinity(),
+                    std::numeric_limits<double>::quiet_NaN()};
+                for (const double threshold : thresholds) {
+                    require(prepared.below(box,threshold)==(expected<threshold),
+                            "checked filter changed an old support decision");
+                    require(prepared.belowValidated(box,threshold)==(expected<threshold),
+                            "validated filter changed an old support decision");
+                }
+            }
+        }
+    }
+    require(fesetenv(&environment)==0,"could not restore floating environment");
+    const PreparedBoxSupport prepared(Vec3(1,0,0),Vec3::Constant(.2));
+    const Box invalid{Vec3(2,0,0),Vec3::Ones()};
+    require(rejection([&] {(void)prepared.below(invalid,0.0);})==1,
+            "checked filter accepted an invalid box");
+}
+
 int main(int argc,char** argv) {
     try {
         if(argc!=2)return 2;
@@ -122,6 +206,8 @@ int main(int argc,char** argv) {
         if(name=="support_bits")support_bits();
         else if(name=="support_rejections")support_rejections();
         else if(name=="repeated_points")repeated_points();
+        else if(name=="adjacent_contract")adjacent_contract();
+        else if(name=="support_filter_contract")support_filter_contract();
         else return 3;
         std::cout<<name<<" passed\n";
     } catch(const std::exception& error) {std::cerr<<error.what()<<'\n';return 1;}
@@ -140,14 +226,17 @@ def prepared_support_binary(tmp_path_factory):
     executable = directory / "prepared_box_support"
     source.write_text(SOURCE)
     result = subprocess.run([
-        compiler, "-O3", "-DNDEBUG", "-std=c++17", "-ffp-contract=off", "-I/usr/include/eigen3",
+        compiler, "-O3", "-DNDEBUG", "-std=c++17", "-ffp-contract=off", "-frounding-math",
+        "-fno-builtin-nextafter", "-I/usr/include/eigen3",
         f"-I{root / 'native'}", str(source), "-o", str(executable),
     ], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     return executable
 
 
-@pytest.mark.parametrize("case", ["support_bits", "support_rejections", "repeated_points"])
+@pytest.mark.parametrize("case", [
+    "support_bits", "support_rejections", "repeated_points", "adjacent_contract", "support_filter_contract",
+])
 def test_prepared_support_and_exact_point_contract(prepared_support_binary, case):
     result = subprocess.run([str(prepared_support_binary), case], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr

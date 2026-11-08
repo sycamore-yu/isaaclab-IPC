@@ -44,6 +44,72 @@ void point_segment() {
         require(!pointFree(p,box,Vec3::Zero()), "zero-radius contact was free");
     require(!segmentFree(Vec3(-2,1,1),Vec3(2,1,1),box,Vec3::Zero()), "edge contact was free");
     require(pointFree(Vec3(1+1e-9,0,0),box,Vec3::Zero()), "zero radius replaced by positive body");
+
+    // A repeated segment keeps closed contacts and the original signed-zero witness.
+    const Box unit{Vec3::Zero(),Vec3::Ones()};
+    for (const Vec3 p : {Vec3(1,.5,.5),Vec3(1,1,.5),Vec3(1,1,1),Vec3(.5,.5,.5)})
+        require(!segmentFree(p,p,unit,Vec3::Zero()), "repeated segment contact was free");
+    const auto zeros=segmentBoxClosest(Vec3(-0.,2.,0.),Vec3(0.,2.,-0.),unit);
+    near(zeros.squared_distance,1.0,0.0,"signed-zero repeated segment");
+    require(std::signbit(zeros.simplex_point.x()) && !std::signbit(zeros.simplex_point.z()),
+            "repeated segment changed the original witness signs");
+    // Adjacent representable endpoints are a nonzero segment, without an epsilon collapse.
+    const double adjacent=std::nextafter(1.,2.), next=std::nextafter(adjacent,2.);
+    const auto tiny=segmentBoxClosest(Vec3(next,.5,.5),Vec3(adjacent,.5,.5),unit);
+    require(tiny.simplex_point.x()==adjacent,"nonzero ULP segment collapsed to its first endpoint");
+    near(tiny.squared_distance,(adjacent-1.)*(adjacent-1.),0.0,"ULP segment distance");
+    // Far, irrelevant box corners do not invalidate a finite nearest distance.
+    const Box huge{Vec3::Zero(),Vec3::Constant(1e200)};
+    near(segmentBoxClosest(Vec3(-1,0,0),Vec3(-1,0,0),huge).squared_distance,
+         1.0,0.0,"finite distance to huge box");
+    bool overflow=false;
+    try { segmentBoxClosest(Vec3(1e200,0,0),Vec3(1e200,0,0),unit); }
+    catch(const std::overflow_error&) { overflow=true; }
+    require(overflow,"overflowing nearest squared distance accepted");
+    for(double invalid : {std::numeric_limits<double>::quiet_NaN(),std::numeric_limits<double>::infinity()}) {
+        for(int endpoint=0;endpoint<2;++endpoint) {
+            Vec3 a(2,0,0),b=a; (endpoint==0?a:b).x()=invalid;
+            bool rejected=false;
+            try { segmentBoxClosest(a,b,unit); }
+            catch(const std::invalid_argument&) { rejected=true; }
+            require(rejected,"nonfinite segment endpoint accepted");
+        }
+    }
+    // Six internal cuts: the closest point lies between cuts on a box edge.
+    const Vec3 qa(-1,3,-.2),qb(4,-1,2);
+    const auto interior=segmentBoxClosest(qa,qb,unit);
+    near(interior.squared_distance,4.0/41.0,1e-15,"piecewise interior minimum");
+    witness(interior,unit);
+    const Vec3 expected=qa+(18.0/41.0)*(qb-qa);
+    near((interior.simplex_point-expected).norm(),0.0,1e-14,"piecewise segment witness");
+    near(segmentBoxClosest(qb,qa,unit).squared_distance,4.0/41.0,1e-15,
+         "reversed piecewise minimum");
+    require(segmentFree(qa,qb,unit,Vec3::Constant(.2)),"separated segment rejected");
+    require(!segmentFree(qa,qb,unit,Vec3::Constant(.4)),"body collision accepted");
+    // Duplicate cuts from a zero-width box still retain the interior minimum.
+    const Box plane{Vec3::Zero(),Vec3(0,1,1)};
+    const auto duplicate=segmentBoxClosest(Vec3(-2,2,.5),Vec3(2,2,.5),plane);
+    near(duplicate.squared_distance,1.0,0.0,"duplicate breakpoints");witness(duplicate,plane);
+    // Nonzero segments also avoid overflowing irrelevant far-corner distances.
+    near(segmentBoxClosest(Vec3(-1,0,0),Vec3(-1,1,0),huge).squared_distance,
+         1.0,0.0,"finite nonzero-segment distance to huge box");
+    // World witnesses at 1e12 have a 0.0001220703125 coordinate ULP. Compare
+    // distance to a high-precision reference within that representation scale.
+    const Vec3 shifted_a(1000000000002.2681,1000000000001.9227,1000000000002.4735);
+    const Vec3 shifted_b(999999999999.51172,999999999998.75537,999999999998.85291);
+    const Box shifted{Vec3::Constant(1e12),Vec3(1000000000000.1,1000000000000.2,1000000000000.3)};
+    const double reference_distance=0.139366487120559581710466448925913638;
+    const double coordinate_ulp=std::nextafter(1e12,std::numeric_limits<double>::infinity())-1e12;
+    const auto translated=segmentBoxClosest(shifted_a,shifted_b,shifted);
+    near(translated.squared_distance,reference_distance,
+         4*coordinate_ulp*(std::sqrt(reference_distance)+coordinate_ulp),"translated minimum");
+    witness(translated,shifted);
+    const Vec3 delta=shifted_b-shifted_a,relative=translated.simplex_point-shifted_a;
+    const double parameter=relative.dot(delta)/delta.squaredNorm();
+    require(parameter>=0.0 && parameter<=1.0,"translated witness outside segment");
+    require((relative-parameter*delta).norm()<=4*coordinate_ulp,"translated witness off segment");
+    require(segmentFree(shifted_a,shifted_b,shifted,Vec3::Constant(.2)),"translated free segment rejected");
+    require(!segmentFree(shifted_a,shifted_b,shifted,Vec3::Constant(.4)),"translated body collision accepted");
 }
 void triangle_features() {
     const Box box{Vec3(-.25,-.25,-.25),Vec3(.25,.25,.25)};

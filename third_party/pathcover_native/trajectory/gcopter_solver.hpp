@@ -1189,6 +1189,7 @@ namespace trajectory_server
             double sfc = -INFINITY, velocitySquared = 0.0, rateSquared = 0.0;
             double minThrust = INFINITY, maxThrust = -INFINITY, tilt = 0.0;
             bool finite = true;
+            int positionPieces = 0;
             Eigen::Matrix<double, 6, 1> values() const {
                 Eigen::Matrix<double, 6, 1> result;
                 result << sfc, std::sqrt(velocitySquared), minThrust, maxThrust,
@@ -1781,7 +1782,8 @@ namespace trajectory_server
                 const int L = hIdx(i);
                 const int K = hPolys[L].rows();
                 // One buffer per piece, reused at every quadrature node.
-                Eigen::ArrayXd projectedPositions(K);
+                Eigen::ArrayXd projectedPositions(continuousMaxPosition ? 0 : K);
+                metrics.positionPieces = i + 1;
                 for (int j = 0; j <= integralResolution; j++)
                 {
                     fillDerivativeBasis<false>(j * step, beta0, beta1, beta2, beta3, beta4);
@@ -1822,22 +1824,28 @@ namespace trajectory_server
                     gradPos.setZero(), gradVel.setZero(), gradOmg.setZero();
                     pena = 0.0;
 
-                    // Preserve Vector3d::dot's original (x + y) + z order.
-                    projectedPositions =
-                        (hPolys[L].col(0).array() * pos(0)
-                         + hPolys[L].col(1).array() * pos(1))
-                        + hPolys[L].col(2).array() * pos(2);
-                    for (int k = 0; k < K; k++)
+                    // continuous_max's position objective is evaluated below.
+                    // Its quadrature SFC maximum is diagnostic-only and is
+                    // reconstructed once from the last objective evaluation.
+                    if (!continuousMaxPosition)
                     {
-                        const double projectedPosition = projectedPositions(k);
-                        violaPos = projectedPosition + hPolys[L](k, 3);
-                        metrics.sfc = std::max(metrics.sfc, projectedPosition + originalHPolys[L](k, 3));
-                        if (!continuousMaxPosition &&
-                            smoothedL1(violaPos, positionSmoothFactor, violaPosPena, violaPosPenaD))
+                        // Preserve Vector3d::dot's original (x + y) + z order.
+                        projectedPositions =
+                            (hPolys[L].col(0).array() * pos(0)
+                             + hPolys[L].col(1).array() * pos(1))
+                            + hPolys[L].col(2).array() * pos(2);
+                        for (int k = 0; k < K; k++)
                         {
-                            outerNormal = hPolys[L].block<1, 3>(k, 0);
-                            gradPos += weightPos * violaPosPenaD * outerNormal;
-                            pena += weightPos * violaPosPena;
+                            const double projectedPosition = projectedPositions(k);
+                            violaPos = projectedPosition + hPolys[L](k, 3);
+                            metrics.sfc = std::max(metrics.sfc, projectedPosition + originalHPolys[L](k, 3));
+                            if (!continuousMaxPosition &&
+                                smoothedL1(violaPos, positionSmoothFactor, violaPosPena, violaPosPenaD))
+                            {
+                                outerNormal = hPolys[L].block<1, 3>(k, 0);
+                                gradPos += weightPos * violaPosPenaD * outerNormal;
+                                pena += weightPos * violaPosPena;
+                            }
                         }
                     }
 
@@ -1959,6 +1967,41 @@ namespace trajectory_server
             }
 
             return;
+        }
+
+        inline void updateContinuousPositionQuadratureMetrics()
+        {
+            if (!continuousMaxPositionPenalty) return;
+            // Capture the exact last trial state before optimize() rebuilds the
+            // accepted trajectory. On an invalid objective, positionPieces
+            // preserves the original early-return coverage.
+            constraintMetrics.sfc = -INFINITY;
+            const double integralFrac = 1.0 / integralRes;
+            Eigen::Matrix<double, CoeffRows, 1> beta0, beta1, beta2, beta3, beta4;
+            const auto &coeffs = minco.getCoeffs();
+            for (int i = 0; i < constraintMetrics.positionPieces; ++i)
+            {
+                const Eigen::Matrix<double, CoeffRows, 3> &c =
+                    coeffs.template block<CoeffRows, 3>(i * CoeffRows, 0);
+                const double step = times(i) * integralFrac;
+                const int L = hPolyIdx(i);
+                const int K = penaltyPolytopes[L].rows();
+                Eigen::ArrayXd projectedPositions(K);
+                for (int j = 0; j <= integralRes; ++j)
+                {
+                    fillDerivativeBasis<false>(j * step, beta0, beta1, beta2, beta3, beta4);
+                    const Eigen::Vector3d pos = c.transpose() * beta0;
+                    projectedPositions =
+                        (penaltyPolytopes[L].col(0).array() * pos(0)
+                         + penaltyPolytopes[L].col(1).array() * pos(1))
+                        + penaltyPolytopes[L].col(2).array() * pos(2);
+                    for (int k = 0; k < K; ++k)
+                    {
+                        constraintMetrics.sfc = std::max(constraintMetrics.sfc,
+                            projectedPositions(k) + hPolytopes[L](k, 3));
+                    }
+                }
+            }
         }
 
         static inline double costFunctional(void *ptr,
@@ -2656,6 +2699,7 @@ namespace trajectory_server
                                             this,
                                             lbfgs_params);
 
+            updateContinuousPositionQuadratureMetrics();
             last_status_ = ret;
             if (ret >= 0)
             {

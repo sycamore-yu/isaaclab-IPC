@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -204,12 +206,48 @@ inline Closest pointBox(const Vec3& p, const Box& box) {
 inline Closest segmentBox(const Vec3& a, const Vec3& b, const Box& box) {
     Vec3 witness;
     if (segmentBoxIntersection(a, b, box, witness)) return {0.0, witness, witness};
+    if ((a.array() == b.array()).all()) return pointBox(a, box);
     Closest best = pointBox(a, box);
     take(best, pointBox(b, box));
-    const auto corners = vertices(box);
-    for (int i = 0; i < 8; ++i)
-        for (int axis = 0; axis < 3; ++axis)
-            if (!(i & (1 << axis))) take(best, segmentSegment(a, b, corners[i], corners[i | (1 << axis)]));
+    // Squared distance along the segment is a convex piecewise quadratic.
+    // The six axis-boundary crossings divide [0, 1] into at most seven pieces.
+    // Minimize each active quadratic, then retain the nearest finite witness.
+    const Wide3 start = a.cast<long double>();
+    const Wide3 direction = b.cast<long double>() - start;
+    std::array<long double, 8> cuts;
+    std::size_t count = 0;
+    cuts[count++] = 0.0L;
+    cuts[count++] = 1.0L;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (direction[axis] == 0.0L) continue;
+        for (const double bound : {box.lower[axis], box.upper[axis]}) {
+            const long double t = (static_cast<long double>(bound) - start[axis]) / direction[axis];
+            if (t > 0.0L && t < 1.0L) cuts[count++] = t;
+        }
+    }
+    std::sort(cuts.begin(), cuts.begin() + count);
+    for (std::size_t interval = 1; interval < count; ++interval) {
+        const long double left = cuts[interval - 1], right = cuts[interval];
+        if (left == right) continue;
+        const long double middle = left + (right - left) * 0.5L;
+        long double quadratic = 0.0L, linear = 0.0L;
+        for (int axis = 0; axis < 3; ++axis) {
+            const long double value = start[axis] + middle * direction[axis];
+            long double offset;
+            if (value < box.lower[axis]) offset = start[axis] - box.lower[axis];
+            else if (value > box.upper[axis]) offset = start[axis] - box.upper[axis];
+            else continue;
+            quadratic += direction[axis] * direction[axis];
+            linear += direction[axis] * offset;
+        }
+        const long double t = quadratic > 0.0L ? std::clamp(-linear / quadratic, left, right) : middle;
+        Vec3 point;
+        if (t == 0.0L) point = a;
+        else if (t == 1.0L) point = b;
+        else if (t <= 0.5L) point = (start + t * direction).cast<double>();
+        else point = (b.cast<long double>() - (1.0L - t) * direction).cast<double>();
+        take(best, pointBox(point, box));
+    }
     return best;
 }
 inline Closest triangleBox(const Triangle& triangle, const Box& box) {
@@ -271,8 +309,29 @@ inline Closest closest(const std::array<Vec3, N>& points, const Box& box) {
     else { static_assert(N == 4); return tetraBox(points, box); }
 }
 
-inline double down(double value) { return std::nextafter(value, -std::numeric_limits<double>::infinity()); }
-inline double up(double value) { return std::nextafter(value, std::numeric_limits<double>::infinity()); }
+// Strictly interior binary64 normal values step without an FP operation.
+// All special and boundary values keep the original libc errno/fenv semantics.
+template<bool Up>
+inline double adjacent(double value) {
+    static_assert(sizeof(double) == sizeof(std::uint64_t)
+        && std::numeric_limits<double>::is_iec559
+        && std::numeric_limits<double>::digits == 53);
+    std::uint64_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    const std::uint64_t magnitude = bits & UINT64_C(0x7fffffffffffffff);
+    if (magnitude > UINT64_C(0x0010000000000000)
+        && magnitude < UINT64_C(0x7fefffffffffffff)) {
+        const bool negative = (bits >> 63) != 0;
+        if (negative == Up) --bits;
+        else ++bits;
+        std::memcpy(&value, &bits, sizeof(value));
+        return value;
+    }
+    return std::nextafter(value, Up ? std::numeric_limits<double>::infinity()
+                                    : -std::numeric_limits<double>::infinity());
+}
+inline double down(double value) { return adjacent<false>(value); }
+inline double up(double value) { return adjacent<true>(value); }
 inline double dotLower(const Vec3& a, const Vec3& b) {
     double value = 0.0;
     for (int i = 0; i < 3; ++i) value = down(value + down(a[i] * b[i]));
@@ -408,6 +467,32 @@ public:
         for (int i = 0; i < 3; ++i) corner[i] = normal_[i] >= 0.0 ? box.upper[i] : box.lower[i];
         const double support = detail::dotUpper(normal_, corner);
         return zero_ ? support : detail::up(support + ellipsoid_support_);
+    }
+    // Internal predicate only: the public checked upper() remains unchanged.
+    // The interval encloses the result of that exact directed-rounding program,
+    // not just the real-valued dot product. Close comparisons retain upper().
+    bool belowValidated(const Box& box, double threshold) const {
+        const double p0 = normal_[0] * (normal_[0] >= 0.0 ? box.upper[0] : box.lower[0]);
+        const double p1 = normal_[1] * (normal_[1] >= 0.0 ? box.upper[1] : box.lower[1]);
+        const double p2 = normal_[2] * (normal_[2] >= 0.0 ? box.upper[2] : box.lower[2]);
+        const double scale = ((std::abs(p0) + std::abs(p1)) + std::abs(p2)) + std::abs(ellipsoid_support_);
+        // This excludes nonfinite terms and bounds every original intermediate
+        // far below overflow. NaN fails this comparison and uses the old path.
+        if (scale < std::numeric_limits<double>::max() * 0.25) {
+            const double rough = ((p0 + p1) + p2) + ellipsoid_support_;
+            constexpr double factor = 64.0 * std::numeric_limits<double>::epsilon();
+            constexpr double floor = 128.0 * std::numeric_limits<double>::denorm_min();
+            const double error = factor * scale + floor;
+            const double high = detail::up(rough + error);
+            const double low = detail::down(rough - error);
+            if (high < threshold) return true;
+            if (low >= threshold) return false;
+        }
+        return upper(box) < threshold;
+    }
+    bool below(const Box& box, double threshold) const {
+        detail::validate(box);
+        return belowValidated(box, threshold);
     }
 };
 

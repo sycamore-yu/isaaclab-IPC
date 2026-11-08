@@ -90,6 +90,45 @@ inline void noredund(Eigen::Matrix<T, -1, dim> &A,
 }
 
 
+
+// Local-mode preparation. The inflated axis bounds enclose the exact
+// double-box Minkowski sum with the axis-aligned ellipsoid.
+struct LocalObstacleBoxes {
+    std::vector<pathcover_clearance::Box> original;
+    std::vector<pathcover_clearance::Box> axis_bounds;
+};
+template<typename T, int dim, typename HalfWidths>
+LocalObstacleBoxes prepareLocalBoxes(
+    const std::vector<Eigen::Matrix<T, dim, 1>>& centers,
+    const HalfWidths& widths,
+    const Eigen::Matrix<T, dim, 1>& body_radii) {
+    static_assert(dim == 3);
+    if constexpr (!std::is_arithmetic_v<HalfWidths>) {
+        if (widths.size() != centers.size())
+            throw std::invalid_argument("RISP needs one half-width vector per obstacle box");
+    }
+    const auto radii=body_radii.template cast<double>().eval();
+    if (!radii.allFinite() || (radii.array()<0.0).any())
+        throw std::invalid_argument("Local RISP requires finite nonnegative radii");
+    LocalObstacleBoxes result;
+    result.original.reserve(centers.size()); result.axis_bounds.reserve(centers.size());
+    for(std::size_t i=0;i<centers.size();++i) {
+        Eigen::Matrix<T,dim,1> half;
+        if constexpr(std::is_arithmetic_v<HalfWidths>) half.setConstant(widths);
+        else half=widths[i];
+        pathcover_clearance::Box box{(centers[i]-half).template cast<double>(),
+                                    (centers[i]+half).template cast<double>()};
+        pathcover_clearance::detail::validate(box);
+        pathcover_clearance::Box axis=box;
+        for(int k=0;k<3;++k) {
+            axis.lower[k]=pathcover_clearance::detail::down(box.lower[k]-radii[k]);
+            axis.upper[k]=pathcover_clearance::detail::up(box.upper[k]+radii[k]);
+        }
+        result.original.push_back(box); result.axis_bounds.push_back(axis);
+    }
+    return result;
+}
+
 // RISP (Randomized Iterative Space Partitioning), Algorithm 2 of the paper.
 // For each randomly sampled obstacle point p, the cutting hyperplane is
 //
@@ -114,7 +153,9 @@ inline void RISP(const std::vector<Eigen::Matrix<T, dim, 1>> &obstacle_pts,
                  const std::vector<Eigen::Matrix<T, dim, 1>> *seed_region = nullptr,
                  Eigen::Matrix<T, -1, dim> *raw_A = nullptr,
                  Eigen::Matrix<T, -1, 1> *raw_b = nullptr,
-                 const Eigen::Matrix<T, dim, 1> &body_radii = Eigen::Matrix<T, dim, 1>::Zero()) {
+                 const Eigen::Matrix<T, dim, 1> &body_radii = Eigen::Matrix<T, dim, 1>::Zero(),
+                 T local_half_extent = T(0),
+                 const LocalObstacleBoxes* prepared_local = nullptr) {
     assert(alpha > T(0) && alpha < T(1) && "RISP: alpha must lie in (0, 1)");
 
     // Uniform voxels and exact merged boxes share the same support arithmetic.
@@ -133,10 +174,62 @@ inline void RISP(const std::vector<Eigen::Matrix<T, dim, 1>> &obstacle_pts,
     };
 
     const bool rounded_body = body_radii.maxCoeff() > T(0);
+    if (!std::isfinite(local_half_extent) || local_half_extent < T(0))
+        throw std::invalid_argument("Local RISP half extent must be finite and nonnegative");
+    const bool local = local_half_extent > T(0);
+    std::optional<LocalObstacleBoxes> owned_local;
+    std::vector<pathcover_clearance::Box> owned_support_boxes;
+    const std::vector<pathcover_clearance::Box>* support_boxes=nullptr;
+    Eigen::Matrix<T,dim,1> local_lower,local_upper;
+    if constexpr (dim == 3) {
+        if (local) {
+            if (!prepared_local) {
+                owned_local.emplace(prepareLocalBoxes<T,dim>(obstacle_pts,voxel_half_extent,body_radii));
+                prepared_local=&*owned_local;
+            }
+            support_boxes=&prepared_local->original;
+            local_lower=seed; local_upper=seed;
+            if(seed_region) for(const auto& point:*seed_region) {
+                local_lower=local_lower.cwiseMin(point); local_upper=local_upper.cwiseMax(point);
+            }
+            local_lower.array()-=local_half_extent; local_upper.array()+=local_half_extent;
+            if(!local_lower.allFinite() || !local_upper.allFinite())
+                throw std::invalid_argument("Local RISP boundary is nonfinite");
+        } else if (rounded_body) {
+            owned_support_boxes.reserve(obstacle_pts.size());
+            for (std::size_t index=0; index<obstacle_pts.size(); ++index) {
+                const auto widths = halfwidth(index);
+                pathcover_clearance::Box box{
+                    (obstacle_pts[index] - widths).template cast<double>(),
+                    (obstacle_pts[index] + widths).template cast<double>()};
+                pathcover_clearance::detail::validate(box);
+                owned_support_boxes.push_back(box);
+            }
+            support_boxes=&owned_support_boxes;
+        }
+    } else if(local) {
+        throw std::invalid_argument("Local RISP supports only 3D");
+    }
 
-    // Compact indices instead of copying and moving every XYZ point on each cut.
-    std::vector<std::size_t> remaining(obstacle_pts.size());
-    std::iota(remaining.begin(), remaining.end(), 0);
+    // Only a strict directed axis-support certificate can omit a box.
+    std::vector<std::size_t> remaining;
+    if(local) {
+        remaining.reserve(obstacle_pts.size());
+        for(std::size_t index=0;index<obstacle_pts.size();++index) {
+            bool separated=false;
+            if constexpr(dim==3) {
+                const auto& box=prepared_local->axis_bounds[index];
+                for(int axis=0;axis<3;++axis) {
+                    if(box.upper[axis]<double(local_lower[axis])
+                       || box.lower[axis]>double(local_upper[axis])) {separated=true;break;}
+                }
+            }
+            if(!separated)remaining.push_back(index);
+        }
+    } else {
+        remaining.resize(obstacle_pts.size());
+        std::iota(remaining.begin(),remaining.end(),0);
+    }
     std::vector<Eigen::Matrix<T, dim, 1>> normals;
     std::vector<T> offsets;
     normals.reserve(64);
@@ -183,13 +276,7 @@ inline void RISP(const std::vector<Eigen::Matrix<T, dim, 1>> &obstacle_pts,
             [&](std::size_t index) {
                 if constexpr (dim == 3) {
                     if (rounded_body) {
-                        const auto widths = halfwidth(index);
-                        const pathcover_clearance::Box box{
-                            (obstacle_pts[index] - widths).template cast<double>(),
-                            (obstacle_pts[index] + widths).template cast<double>()};
-                        // Removal needs the same conservative support certificate
-                        // as the selected cut, without another closest-pair solve.
-                        return -cut_support->upper(box) > double(offset);
+                        return cut_support->belowValidated((*support_boxes)[index], -double(offset));
                     }
                 }
                 return normal.dot(obstacle_pts[index]) - absolute_normal.dot(halfwidth(index)) > offset;
@@ -198,14 +285,19 @@ inline void RISP(const std::vector<Eigen::Matrix<T, dim, 1>> &obstacle_pts,
         pts_remaining.push_back(static_cast<int>(remaining.size()));
     }
     const int count = static_cast<int>(normals.size());
-    A.resize(count + A_bound.rows(), dim);
-    b.resize(count + b_bound.size());
+    A.resize(count + A_bound.rows() + (local ? 2*dim : 0), dim);
+    b.resize(count + b_bound.size() + (local ? 2*dim : 0));
     for (int i = 0; i < count; ++i) {
         A.row(i) = normals[i].transpose();
         b(i) = offsets[i];
     }
-    A.bottomRows(A_bound.rows()) = A_bound;
-    b.tail(b_bound.size()) = b_bound;
+    A.middleRows(count,A_bound.rows()) = A_bound;
+    b.segment(count,b_bound.size()) = b_bound;
+    if(local) for(int axis=0;axis<dim;++axis) {
+        const int row=count+A_bound.rows()+2*axis;
+        A.row(row).setZero();A(row,axis)=T(-1);b[row]=-local_lower[axis];
+        A.row(row+1).setZero();A(row+1,axis)=T(1);b[row+1]=local_upper[axis];
+    }
 
     // Each removal above records an explicit separating cut in this raw system.
     // The equivalent reduced polytope can exclude a box through several faces;
@@ -254,7 +346,8 @@ inline void pathCover(const std::vector<Eigen::Matrix<T, Dim, 1>> &obstacle_pts,
                       const std::vector<Eigen::Matrix<T, Dim, 1>> &initial_seed_region = {},
                       std::vector<Eigen::Matrix<T, -1, Dim>> *raw_As = nullptr,
                       std::vector<Eigen::Matrix<T, -1, 1>> *raw_bs = nullptr,
-                      const Eigen::Matrix<T, Dim, 1> &body_radii = Eigen::Matrix<T, Dim, 1>::Zero()) {
+                      const Eigen::Matrix<T, Dim, 1> &body_radii = Eigen::Matrix<T, Dim, 1>::Zero(),
+                      T local_half_extent = T(0)) {
 
     if (path.empty() || max_horizon < 1) {
         throw std::invalid_argument("PathCover needs a path and a positive corridor horizon");
@@ -268,11 +361,17 @@ inline void pathCover(const std::vector<Eigen::Matrix<T, Dim, 1>> &obstacle_pts,
     Eigen::Matrix<T, -1, Dim> current_A, raw_A;
     Eigen::Matrix<T, -1, 1> current_b, raw_b;
     std::vector<int> decay;
+    std::optional<LocalObstacleBoxes> prepared_local;
+    if constexpr(Dim==3) {
+        if(local_half_extent>T(0)) prepared_local.emplace(
+            prepareLocalBoxes<T,Dim>(obstacle_pts,voxel_half_extent,body_radii));
+    }
     auto append = [&](const Eigen::Matrix<T, Dim, 1> &point) {
         RISP<T, Dim>(obstacle_pts, point, A_bound, b_bound,
                      current_A, current_b, decay, alpha, voxel_half_extent,
                      A.empty() && !initial_seed_region.empty() ? &initial_seed_region : nullptr,
-                     raw_As ? &raw_A : nullptr, raw_bs ? &raw_b : nullptr, body_radii);
+                     raw_As ? &raw_A : nullptr, raw_bs ? &raw_b : nullptr, body_radii,
+                     local_half_extent, prepared_local ? &*prepared_local : nullptr);
         A.push_back(current_A);
         b.push_back(current_b);
         if (raw_As) raw_As->push_back(raw_A);

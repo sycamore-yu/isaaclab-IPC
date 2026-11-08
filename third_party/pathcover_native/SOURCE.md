@@ -798,6 +798,141 @@ license; embedded geometry utilities retain their original notices.
     Permanent prepared-support and exact repeated-point contracts supplement
     the existing clearance/geometry tests.
 
+55. V31 replaces ordinary binary64 `nextafter` calls in directed support bounds
+    with integer bit steps only when `min_normal < abs(x) < max_finite`.
+    `memcpy` preserves the representation without aliasing undefined behavior.
+    Zero, subnormal and boundary values, infinities and NaNs retain the original
+    `std::nextafter`, including its errno and floating-exception semantics.
+    The isolated contract compared 66,390 input bit patterns and 1,062,240
+    directional calls across four rounding modes and clean/preexisting exception
+    states; result bits, errno and exception flags agreed. Another 20,000 support
+    results and 80,000 comparison branches agreed. On the same three saved
+    Newton V29 RISP inputs, twenty interleaved pairs reduced p50 from
+    8.273/22.863/14.335 ms to 3.361/9.172/6.030 ms, with bitwise identical raw and
+    reduced planes, seeds and removal sequences. These are CPU RISP-component
+    measurements, not Dense or full-planning latency. The binary64/non-fast-math
+    assumptions and all samples are recorded in `nextafter-bitstep-study.{json,md}`.
+
+56. V31 adds a bounded support-threshold classifier and prepared box bounds.
+    An ordinary dot product plus a conservative error interval encloses the old
+    directed-upper result. A comparison is returned early only if that entire
+    interval lies on one side of the same threshold. Near-threshold, nonfinite
+    and potentially overflowing cases evaluate the original directed upper.
+    The interval is an arithmetic bound, not a geometric tolerance. Validated
+    lower/upper bounds are reused within the geometric operation; there is no
+    stale cross-plan obstacle cache. The public checked upper is unchanged.
+    Across four rounding modes, 96,000 valid geometries, 864,000 thresholds and
+    1,728,000 checked/validated predicate comparisons agreed; invalid boxes still
+    failed. Internal floating-exception histories and the first invalid batch
+    index are not claimed instruction-for-instruction identical after ordinary
+    arithmetic and early validation. In a separate eighteen-round comparison
+    whose baseline already included item 55, the three RISP p50 values changed
+    from 3.361/9.258/6.077 ms to 2.143/5.526/3.859 ms. Complete geometry outputs
+    and all measurement fingerprints agreed. Evidence and the rounding proof
+    are in `support-filter-v31-study.{json,md}` and
+    `build/pathcover-support-filter-v31/rounding-bound.md`.
+
+57. V31 specializes segment/AABB distance after the original closed intersection
+    predicate. Exactly equal endpoints use `pointBox`; adjacent representable
+    endpoints remain nonzero segments. Other segments minimize the convex
+    piecewise-quadratic squared distance on their parameter interval. At most
+    six long-double boundary crossings define at most seven intervals; each
+    interval uses its fixed active axes and a clamped quadratic minimizer.
+    Original endpoint-best order is retained. Candidate world witnesses still
+    pass through the existing closest-pair representation, and `free` still
+    requires the existing outward support certificate against the actual a/b
+    endpoints and box plus body ellipsoid. Neither contact nor a numerical
+    ambiguity becomes free through a distance threshold alone.
+    The repeated-point study had 12,030 bitwise-equal ordinary-domain cases.
+    The nonzero-segment study covered 7,752 cases and 243 independent
+    multiprecision distance references, including every one of the 43 changed
+    closest-pair outputs. Forty changes select different nonunique parallel
+    minima; one ordinary witness differs by one coordinate ULP; two 1e12-world
+    translations differ by up to 59 coordinate ULPs. Both translated squared
+    distances are closer to the independent reference, but bitwise equivalence
+    and exact interval-certified minima are not claimed. All `free` decisions
+    agreed, all returned free supports passed independent multiprecision
+    separation checks, and witness rounding enclosures passed. True nearest
+    squared-distance overflow and NaN/Inf rejection remain checked; avoiding
+    irrelevant far-corner overflow may now return a valid finite nearest result.
+    With the point branch already present, the synthetic nonzero-segment kernel
+    improved 4.51 times; single-box/wall/two-wall connector means changed from
+    13.198/4.737/4.150 ms to 8.618/4.343/3.783 ms. All three connector outputs were
+    bitwise identical, including the empty-anchor negative case. These fixtures
+    are not historical Dense map replays. Evidence, numerical differences and
+    the retained initial witness-check failure are in
+    `search-v31-segment-point.json`, `search-v31-segment-quadratic.json` and
+    `search-v31-segment-quadratic-{numeric-final.json,report.md}`.
+
+58. V31 exposes `risp_local_half_extent`; standalone and historical configurations
+    default to zero, while CTBR `box_ellipsoid` factories select 8 m. The first
+    local box encloses the current seed and complete initial seed hull before
+    expanding each axis by that half extent. Later boxes are centered on their
+    seed. Their six faces are added alongside the original workspace faces.
+    A raw box is omitted only if its outward-rounded box-plus-ellipsoid axial
+    range lies strictly beyond a local face. Contact and ambiguous cases remain.
+    Prepared bounds are built once per pathCover call, but every corridor still
+    scans the full box table; this adds no spatial index or sublinear full-chain
+    complexity claim. Zero half extent reproduced all four studied outputs
+    bitwise. Positive half extent deliberately changes SFCs and possibly the
+    returned horizon. All original obstacles retained raw-plane exclusion
+    certificates; initial hull, workspace/local containment, path-prefix coverage,
+    reduction equivalence and neighboring positive-volume overlap were checked.
+    The sole 120,000-box timing case kept call 13's 8,672 boxes and appended
+    111,328 boxes in remote clusters with |x| and |y| at least 100 m, while
+    extending X/Y workspace to [-256,256] m. It is an artificial spatial expansion,
+    not the Dense map. Twenty interleaved pairs reduced cached-global RISP
+    p50/p95 from 57.651/65.083 ms to 6.927/7.914 ms, including preparation and
+    every linear filter. The preparation table used 11.52 MB. Evidence:
+    `local-risp-v31-study.{json,md}`; permanent local-corridor contracts cover
+    zero-mode output, all-obstacle geometry and touching/straddling boxes.
+
+59. V31 tightens the native `PathCoverConfig.relative_tolerance` default from
+    1e-4 to 1e-5. The frozen Dense V30 plan 624 reproduced the saved coefficients,
+    durations and objective exactly: the old cost-change stop occurred after
+    ten accepted iterations with gradient infinity norm 20,710.319. The tighter
+    stop used 155 iterations; initial body-q magnitude changed from 3.059099 to
+    0.105979 rad/s and the candidate's full-curve q maximum was 1.018346 rad/s.
+    The measured initial position, velocity and attitude, original SFC, objective,
+    physical limits and free initial-thrust contract were retained. This does
+    not add a boundary replacement, online quality gate, retry or recovery.
+    Reoptimizing all 944 evaluator-matched frozen problems succeeded, with zero
+    failures under the existing offline quality thresholds. Maximum original-SFC
+    residual was 6.0496225e-7 m and actual p/q/r peaks were
+    2.4111103/2.9142339/1.5000956 rad/s; the last value is compared using the
+    existing 0.001 rad/s allowance, not rounded down. Candidate yaw was rebuilt;
+    body rates used at most 1 ms sampling, one-sided knots and local refinement,
+    while polynomial quantities used numerical roots. This is numerical frozen
+    optimizer evidence, not interval proof or a new closed-loop run. Pure
+    optimize p50/p95/max was 13.137/41.481/137.438 ms; old online trajectory
+    timings have a different scope/load and are not paired speed comparisons.
+    Evidence: `bodyrate-v31-study/plan624-summary.md` and
+    `bodyrate-v31-study-panel/{report.md,report.json,summary.json}`.
+
+60. In V31 `continuous_max` mode, the raw-SFC quadrature maximum used only for
+    diagnostics is computed once after optimization, rather than at every
+    objective evaluation. Continuous position penalties, all dynamic quadrature,
+    objective/gradient, finite checks and line search retain their arithmetic.
+    Reconstruction uses the same last-evaluation MINCO coefficients, durations,
+    node order, face order and actually visited piece count. It runs before the
+    accepted trajectory overwrites that state, preserving failed-trial diagnostics.
+    Integral/S4 behavior is unchanged. Three frozen 1e-5 problems, plans 703/631/905,
+    had twenty paired optimize measurements each: medians changed from
+    13.073/56.073/198.744 ms to 10.700/45.059/159.333 ms. All sixty normal returns,
+    objective/coefficients/durations and complete diagnostics were identical.
+    Setting max_iterations to one in all three cases retained STATUS -1008 and
+    identical last-trial failure output. This local 18%–20% reduction does not
+    revalidate the other 941 problems or establish a 100 ms complete-planning
+    budget. Evidence: `gcopter-perf-v31/{report.md,benchmark.json,failure-contract.json}`
+    and the continuous-max success/failure diagnostic contracts.
+
+Items 55–60 record selected V31 changes and their local evidence, not publication
+or complete V31 acceptance. The last measured Dense end-to-end planning p95 is
+still V30's 282.285 ms. The positive local-RISP extent and tighter stopping also
+change CTBR training factories; V31 A0 is to be trained again. The audited V29
+checkpoint keeps its historical training provenance and is not relabeled V31.
+See `docs/acmpc-native-validation.md` for stage and run boundaries.
+
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online
 execution-trajectory reintegration or recovery state machine is added.

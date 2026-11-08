@@ -58,6 +58,8 @@ def assert_corridor_excludes_boxes(corridor, centers, half_extent):
 def test_official_reference_defaults_resolve_to_concrete_mass_scaled_values():
     cfg = PathCoverConfig(mass=0.9)
     assert cfg.geometry_model == "inflated_voxels"
+    assert cfg.risp_local_half_extent == 0.0
+    assert cfg.relative_tolerance == 1e-5
     assert cfg.nominal_velocity == 3.0
     assert cfg.thrust_min == pytest.approx(2.0 / 0.716 * 0.9)
     assert cfg.nominal_thrust_min == cfg.thrust_min

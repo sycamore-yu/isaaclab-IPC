@@ -86,6 +86,57 @@ def test_native_geometry_mode_validation_and_wrapper_actual_mode():
     assert planner.geometry_obstacles()["model"] == "box_ellipsoid"
 
 
+@pytest.mark.parametrize("half_extent", [0.0, 2.0, 8.0])
+def test_native_local_risp_bounds_enclose_initial_seed_and_report_configuration(half_extent):
+    cfg = PathCoverConfig(
+        bounds_lower=(-20., -20., 0.), bounds_upper=(20., 20., 6.),
+        resolution=.25, robot_radius=.2, geometry_model="box_ellipsoid",
+        risp_local_half_extent=half_extent, use_cuda=False,
+    )
+    position = np.array([0., 0., 2.])
+    seed = np.array([position, [.4, .05, 2.], [.8, .1, 2.]])
+    frontend = native(cfg.native_options())
+    plan = frontend.plan(position, np.zeros(3), np.zeros(3), position, seed)
+    assert plan.risp_local_half_extent == half_extent
+    lower = np.array(cfg.bounds_lower) + cfg.robot_radius
+    upper = np.array(cfg.bounds_upper) - cfg.robot_radius
+    if half_extent:
+        lower = np.maximum(lower, seed.min(axis=0) - half_extent)
+        upper = np.minimum(upper, seed.max(axis=0) + half_extent)
+    planes = np.asarray(plan.corridors[0])
+    assert np.max(seed @ planes[:, :3].T + planes[:, 3]) <= 1e-12
+    for axis in range(3):
+        for sign, bound in ((-1., lower[axis]), (1., upper[axis])):
+            normal = np.eye(3)[axis] * sign
+            matching = np.all(planes[:, :3] == normal, axis=1)
+            assert np.count_nonzero(matching) == 1
+            assert planes[matching, 3].item() == pytest.approx(-sign * bound, abs=1e-12)
+    wrapped = NativePathCoverFrontend(cfg).plan(
+        None, PathCoverState(position, np.zeros(3), np.zeros(3)), position,
+        initial_motion_seed=seed,
+    )
+    assert wrapped.metrics["risp_local_half_extent_m"] == half_extent
+    np.testing.assert_array_equal(wrapped.corridors[0], plan.corridors[0])
+    if half_extent == 0:
+        legacy = cfg.native_options()
+        legacy.pop("risp_local_half_extent")
+        old = native(legacy).plan(position, np.zeros(3), np.zeros(3), position, seed)
+        np.testing.assert_array_equal(old.corridors[0], plan.corridors[0])
+
+
+def test_local_risp_rejects_invalid_or_legacy_geometry_configuration():
+    options = config("box_ellipsoid").native_options()
+    for value in (-1., np.nan, np.inf):
+        with pytest.raises(ValueError, match="risp_local_half_extent"):
+            PathCoverConfig(geometry_model="box_ellipsoid", risp_local_half_extent=value)
+        with pytest.raises(ValueError, match="risp_local_half_extent"):
+            native({**options, "risp_local_half_extent": value})
+    with pytest.raises(ValueError, match="risp_local_half_extent"):
+        PathCoverConfig(risp_local_half_extent=8.)
+    with pytest.raises(ValueError, match="risp_local_half_extent"):
+        native({**options, "geometry_model": "inflated_voxels", "risp_local_half_extent": 8.})
+
+
 def test_native_box_ellipsoid_cpu_cuda_geometry_match():
     module = pytest.importorskip("isaaclab_ipc._pathcover_native")
     torch = pytest.importorskip("torch")

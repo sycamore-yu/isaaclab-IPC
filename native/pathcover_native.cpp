@@ -68,7 +68,7 @@ struct Options {
     double resolution, search_resolution, radius, radius_z, max_velocity, nominal_velocity, mass, gravity;
     double thrust_min, nominal_thrust_min, thrust_max, body_rate_max, reference_body_rate_margin, tilt_max;
     double potential_radius, dmp_heuristic_weight, time_weight, safety_margin, endpoint_connection_radius;
-    double relative_tolerance, alpha, position_penalty_smoothing;
+    double relative_tolerance, alpha, position_penalty_smoothing, risp_local_half_extent;
     int horizon, pieces_per_polytope, integral_resolution, max_iterations, num_threads;
     std::size_t cuda_min_grid_voxels;
     unsigned int random_seed;
@@ -87,6 +87,12 @@ struct Options {
             ? values["geometry_model"].cast<std::string>() : "inflated_voxels";
         if (geometry_model != "inflated_voxels" && geometry_model != "box_ellipsoid") {
             throw std::invalid_argument("PathCover geometry_model must be inflated_voxels or box_ellipsoid");
+        }
+        risp_local_half_extent = values.contains("risp_local_half_extent")
+            ? values["risp_local_half_extent"].cast<double>() : 0.0;
+        if (!std::isfinite(risp_local_half_extent) || risp_local_half_extent < 0.0
+            || (risp_local_half_extent > 0.0 && geometry_model != "box_ellipsoid")) {
+            throw std::invalid_argument("PathCover risp_local_half_extent must be finite and nonnegative; positive values require box_ellipsoid");
         }
         if (geometry_model == "box_ellipsoid"
             && (!std::isfinite(radius) || !std::isfinite(radius_z)
@@ -208,6 +214,7 @@ static py::dict initialBoundaryDict(const InitialBoundary &value) {
 struct PlanResult {
     std::string position_penalty_aggregation;
     std::string geometry_model;
+    double risp_local_half_extent = 0.0;
     Points path;
     Points selected_initial_motion_seed;
     bool initial_motion_seed_adjusted = false;
@@ -553,6 +560,7 @@ public:
         py::dict value;
         value["position_penalty_aggregation"] = options_.position_penalty_aggregation;
         value["geometry_model"] = options_.geometry_model;
+        value["risp_local_half_extent"] = options_.risp_local_half_extent;
         if (pending_initial_boundary_)
             value["initial_boundary"] = initialBoundaryDict(*pending_initial_boundary_);
         if (!failed_problem_) return value;
@@ -656,6 +664,7 @@ public:
         PlanResult result;
         result.position_penalty_aggregation = options_.position_penalty_aggregation;
         result.geometry_model = options_.geometry_model;
+        result.risp_local_half_extent = options_.risp_local_half_extent;
         result.initial_boundary = *pending_initial_boundary_;
         result.initial_speed = velocity.norm();
         result.speed_acceptance_limit = speedAcceptanceLimit(options_.max_velocity);
@@ -780,7 +789,7 @@ public:
         try {
             PathCover::pathCover<double, 3>(geometry_box_centers_, path, bounds_A, bounds_b,
                 As, bs, seeds, decay, options_.horizon, options_.alpha, geometry_box_halfwidths_, seed_region,
-                nullptr, nullptr, geometry_radii);
+                nullptr, nullptr, geometry_radii, options_.risp_local_half_extent);
         } catch (const PathCover::SeedRegionCollision &error) {
             throw PathCoverPlanningError(error.what());
         }
@@ -958,6 +967,7 @@ PYBIND11_MODULE(_pathcover_native, m) {
     py::class_<PlanResult>(m, "PlanResult")
         .def_readonly("position_penalty_aggregation", &PlanResult::position_penalty_aggregation)
         .def_readonly("geometry_model", &PlanResult::geometry_model)
+        .def_readonly("risp_local_half_extent", &PlanResult::risp_local_half_extent)
         .def_readonly("path", &PlanResult::path)
         .def_readonly("selected_initial_motion_seed", &PlanResult::selected_initial_motion_seed)
         .def_readonly("initial_motion_seed_adjusted", &PlanResult::initial_motion_seed_adjusted)

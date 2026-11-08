@@ -408,6 +408,43 @@ The 100 Hz actuator clock and 10 Hz MPC replanning are separate. Simulation
 time execution is supported. Wall-time planning p95 below 100 ms is a measured
 acceptance target, not an implication of a configured ROS timer.
 
+## Bounded corridors and reference convergence
+
+CTBR uses an explicit `risp_local_half_extent=8.0` m in both Newton and MARSIM.
+Each RISP call intersects the existing workspace with a local axis-aligned box.
+The first box encloses the complete initial motion seed before expanding each
+axis by 8 m; subsequent boxes surround their path seed. Prepare the original
+obstacle boxes and outward-rounded axis bounds of their body-ellipsoid sum once
+per plan. Omit a box only when a strict axis-support certificate puts that whole
+sum outside the local box. Touching and numerically uncertain boxes remain.
+The six local faces remain part of the raw corridor, so every omitted obstacle
+is still excluded by the returned geometry. This is a new bounded corridor
+configuration, not an equivalence claim about global RISP output. Keep global
+DMP, the existing ordered path advancement and the fixed corridor count.
+Zero retains global RISP; absent historical configuration resolves to zero.
+Positive local extent requires `box_ellipsoid` in the native/Python adapters.
+The full-table preparation and per-corridor linear filter remain in measured
+planning time; this is not an algorithm independent of the global box count.
+
+Use piecewise quadratic segment/AABB distance and the exact repeated-point
+shortcut before producing the existing directed support certificate. Finite
+distance witnesses may change at floating-point precision or at nonunique
+minima. Collision acceptance continues to require a strict separating support
+certificate; an approximate nearest distance alone cannot accept a segment.
+Binary64 normal-adjacent steps and conservative cached support classification
+reduce arithmetic cost without weakening that certificate.
+
+Use GCOPTER relative cost tolerance `1e-5`. The previous `1e-4` stop produced
+one actual initial pitch-rate violation among 944 complete Dense references.
+All 944 frozen inputs pass the unchanged physical-quality comparison at the
+selected tolerance. This is frozen-problem evidence, not a new task result.
+In `continuous_max` mode, compute its pure quadrature SFC diagnostic once after
+optimization from the final objective trial, before reconstructing the accepted
+trajectory. Keep the continuous position objective, dynamic quadrature,
+gradients and finite-value checks in every objective evaluation. Preserve
+failure diagnostics over the same visited pieces. The integral position mode
+retains its existing quadrature path.
+
 ## Validation
 
 P0: frozen-input forward comparison, finite-difference cost gradients, complete
