@@ -28,6 +28,8 @@
 #include <Eigen/Eigen>
 
 #include <cmath>
+#include <cstdint>
+#include <cstring>
 
 namespace flatness
 {
@@ -269,6 +271,73 @@ namespace flatness
             return dh == 0.0 && dv == 0.0 && cp == 0.0
                 && mass > 0.0 && std::isfinite(mass)
                 && veps > 0.0 && std::isfinite(veps);
+        }
+
+        // Conservative certificate for this exact zero-yaw implementation.
+        // Preserve the original thrust and quaternion arithmetic. For rates,
+        // nonnegative arithmetic bounds the absolute signed operations below.
+        // Callers must select supportsZeroDragZeroYaw() before using this path.
+        inline bool zeroDragZeroYawPenaltyInactive(const Eigen::Vector3d &acc,
+                            const Eigen::Vector3d &jer,
+                            double thrustMean, double thrustSqrRadi,
+                            double omgSqrMax, double thetaMax) const
+        {
+            // This deliberately keeps a large angular margin; all other bounds
+            // and uncertain/invalid intermediates use the original forward.
+            if (thetaMax != 1.5707963267948966) return false;
+            const double u0 = acc(0), u1 = acc(1), u2 = acc(2) + grav;
+            const double s0 = u0 * u0, s1 = u1 * u1, s2 = u2 * u2;
+            const double q = s0 + s1 + s2;
+            const double r = sqrt(q);
+            const double b0 = u0 / r, b1 = u1 / r, b2 = u2 / r;
+            const double den = q * r, od = b2 + 1.0;
+            if (!(den > 0.0 && std::isfinite(den) && od > 0.0 && std::isfinite(od)))
+                return false;
+            const double force0 = mass * acc(0), force1 = mass * acc(1);
+            const double force2 = mass * (acc(2) + grav);
+            const double thrust = b0 * force0 + b1 * force1 + b2 * force2;
+            const double thrustResidual = (thrust - thrustMean) * (thrust - thrustMean) - thrustSqrRadi;
+            if (!(std::isfinite(thrust) && std::isfinite(thrustResidual) && thrustResidual < 0.0))
+                return false;
+            const double tiltDen = sqrt(2.0 * (1.0 + b2));
+            const double tilt1 = -b1 / tiltDen, tilt2 = b0 / tiltDen;
+            const double cosine = 1.0 - 2.0 * (tilt1 * tilt1 + tilt2 * tilt2);
+            if (!(cosine >= 0.5 && cosine <= 1.0)) return false;
+
+            // nextUp(RN(1/den)) is an upper bound on the exact reciprocal.
+            // Positive finite binary64 values have increasing bit patterns.
+            // Round-to-nearest is monotone: RN(a*upper(1/d)) >= RN(a/d)
+            // for a >= 0. The same nonnegative multiply/add trees then bound
+            // the absolute original signed intermediates, including underflow.
+            // The experiment keeps the original non-fast-math scalar FP flags.
+            double inverse = 1.0 / den;
+            if (!(inverse > 0.0 && std::isfinite(inverse))) return false;
+            std::uint64_t bits;
+            static_assert(sizeof(bits) == sizeof(inverse), "binary64 required");
+            std::memcpy(&bits, &inverse, sizeof(bits));
+            ++bits;
+            std::memcpy(&inverse, &bits, sizeof(bits));
+            const double n00 = (s1 + s2) * inverse;
+            const double n01 = std::abs(u0 * u1) * inverse;
+            const double n02 = std::abs(u0 * u2) * inverse;
+            const double n11 = (s0 + s2) * inverse;
+            const double n12 = std::abs(u1 * u2) * inverse;
+            const double n22 = (s0 + s1) * inverse;
+            const double j0 = std::abs(jer(0)), j1 = std::abs(jer(1)), j2 = std::abs(jer(2));
+            const double d0 = n00 * j0 + n01 * j1 + n02 * j2;
+            const double d1 = n01 * j0 + n11 * j1 + n12 * j2;
+            const double d2 = n02 * j0 + n12 * j1 + n22 * j2;
+            const double term = d2 / od;
+            const double w0 = d1 + std::abs(b1) * term;
+            const double w1 = d0 + std::abs(b0) * term;
+            const double w2 = (std::abs(b1) * d0 + std::abs(b0) * d1) / od;
+            const double w00 = w0 * w0, w11 = w1 * w1, w22 = w2 * w2;
+            // Cover every pairwise order used by Vector3d::squaredNorm().
+            const double sum01 = (w00 + w11) + w22;
+            const double sum02 = (w00 + w22) + w11;
+            const double sum12 = (w11 + w22) + w00;
+            return std::isfinite(sum01) && std::isfinite(sum02) && std::isfinite(sum12)
+                && sum01 < omgSqrMax && sum02 < omgSqrMax && sum12 < omgSqrMax;
         }
 
         inline void forwardZeroDragZeroYaw(const Eigen::Vector3d &acc,

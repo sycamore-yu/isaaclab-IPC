@@ -1723,7 +1723,7 @@ namespace trajectory_server
             }
         }
 
-        template <bool ZeroDragZeroYaw>
+        template <bool ZeroDragZeroYaw, bool DeferDynamicMetrics = false, bool DiagnosticsOnly = false>
         static inline void attachPenaltyFunctional(const Eigen::VectorXd &T,
                                                     const Eigen::MatrixX3d &coeffs,
                                                     const Eigen::VectorXi &hIdx,
@@ -1742,6 +1742,7 @@ namespace trajectory_server
                                                     bool continuousMaxPosition = false)
         {
             metrics = ConstraintMetrics{};
+            const bool deferMetrics = DeferDynamicMetrics && continuousMaxPosition;
             const double velSqrMax = magnitudeBounds(0) * magnitudeBounds(0);
             const double omgSqrMax = magnitudeBounds(1) * magnitudeBounds(1);
             const double thetaMax = magnitudeBounds(2);
@@ -1839,32 +1840,46 @@ namespace trajectory_server
                         jer = c.transpose() * beta3;
                     }
 
-                    if constexpr (ZeroDragZeroYaw)
+                    const double velSquared = vel.squaredNorm();
+                    bool skipFlat = false;
+                    if constexpr (ZeroDragZeroYaw && DeferDynamicMetrics && !DiagnosticsOnly)
                     {
-                        flatMap.forwardZeroDragZeroYaw(acc, jer, thr, quat, omg);
+                        skipFlat = deferMetrics && metrics.finite && pos.allFinite()
+                            && std::isfinite(velSquared)
+                            && flatMap.zeroDragZeroYawPenaltyInactive(acc, jer,
+                                thrustMean, thrustSqrRadi, omgSqrMax, thetaMax);
                     }
-                    else
-                    {
-                        flatMap.forward(vel, acc, jer, 0.0, 0.0, thr, quat, omg);
-                    }
-
-                    const double velSquared = vel.squaredNorm(), rateSquared = omg.squaredNorm();
                     violaVel = velSquared - velSqrMax;
-                    violaOmg = rateSquared - omgSqrMax;
-                    cos_theta = 1.0 - 2.0 * (quat(1) * quat(1) + quat(2) * quat(2));
-                    violaTheta = acos(cos_theta) - thetaMax;
-                    violaThrust = (thr - thrustMean) * (thr - thrustMean) - thrustSqrRadi;
-
-                    // Reuse the values already needed by the objective. This is
-                    // a summary of its quadrature nodes, not another rollout.
-                    metrics.velocitySquared = std::max(metrics.velocitySquared, velSquared);
-                    metrics.rateSquared = std::max(metrics.rateSquared, rateSquared);
-                    metrics.minThrust = std::min(metrics.minThrust, thr);
-                    metrics.maxThrust = std::max(metrics.maxThrust, thr);
-                    metrics.tilt = std::max(metrics.tilt, violaTheta + thetaMax);
-                    metrics.finite = metrics.finite && pos.allFinite()
-                        && std::isfinite(velSquared) && std::isfinite(rateSquared)
-                        && std::isfinite(thr) && std::isfinite(violaTheta);
+                    if (!skipFlat)
+                    {
+                        if constexpr (ZeroDragZeroYaw)
+                        {
+                            flatMap.forwardZeroDragZeroYaw(acc, jer, thr, quat, omg);
+                        }
+                        else
+                        {
+                            flatMap.forward(vel, acc, jer, 0.0, 0.0, thr, quat, omg);
+                        }
+                        const double rateSquared = omg.squaredNorm();
+                        violaOmg = rateSquared - omgSqrMax;
+                        cos_theta = 1.0 - 2.0 * (quat(1) * quat(1) + quat(2) * quat(2));
+                        violaTheta = acos(cos_theta) - thetaMax;
+                        violaThrust = (thr - thrustMean) * (thr - thrustMean) - thrustSqrRadi;
+                        if (!deferMetrics)
+                        {
+                            metrics.velocitySquared = std::max(metrics.velocitySquared, velSquared);
+                            metrics.rateSquared = std::max(metrics.rateSquared, rateSquared);
+                            metrics.minThrust = std::min(metrics.minThrust, thr);
+                            metrics.maxThrust = std::max(metrics.maxThrust, thr);
+                            metrics.tilt = std::max(metrics.tilt, violaTheta + thetaMax);
+                        }
+                        metrics.finite = metrics.finite && pos.allFinite()
+                            && std::isfinite(velSquared) && std::isfinite(rateSquared)
+                            && std::isfinite(thr) && std::isfinite(violaTheta);
+                    }
+                    // Final diagnostics reuse this exact Horner/fallback node
+                    // evaluator, but do not revisit objectives or gradients.
+                    if constexpr (DiagnosticsOnly) continue;
 
                     gradThr = 0.0;
                     gradQuat.setZero();
@@ -1902,13 +1917,13 @@ namespace trajectory_server
                         pena += weightVel * violaVelPena;
                     }
 
-                    if (smoothedL1(violaOmg, smoothFactor, violaOmgPena, violaOmgPenaD))
+                    if (!skipFlat && smoothedL1(violaOmg, smoothFactor, violaOmgPena, violaOmgPenaD))
                     {
                         gradOmg += weightOmg * violaOmgPenaD * 2.0 * omg;
                         pena += weightOmg * violaOmgPena;
                     }
 
-                    if (smoothedL1(violaTheta, smoothFactor, violaThetaPena, violaThetaPenaD))
+                    if (!skipFlat && smoothedL1(violaTheta, smoothFactor, violaThetaPena, violaThetaPenaD))
                     {
                         gradQuat += weightTheta * violaThetaPenaD /
                                     sqrt(1.0 - cos_theta * cos_theta) * 4.0 *
@@ -1916,7 +1931,7 @@ namespace trajectory_server
                         pena += weightTheta * violaThetaPena;
                     }
 
-                    if (smoothedL1(violaThrust, smoothFactor, violaThrustPena, violaThrustPenaD))
+                    if (!skipFlat && smoothedL1(violaThrust, smoothFactor, violaThrustPena, violaThrustPenaD))
                     {
                         gradThr += weightThrust * violaThrustPenaD * 2.0 * (thr - thrustMean);
                         pena += weightThrust * violaThrustPena;
@@ -1989,7 +2004,7 @@ namespace trajectory_server
                                 node * integralFrac * pena;
                     cost += node * step * pena;
                 }
-                if constexpr (S == 3)
+                if constexpr (S == 3 && !DiagnosticsOnly)
                 {
                     if (continuousMaxPosition)
                     {
@@ -2029,6 +2044,23 @@ namespace trajectory_server
             // Capture the exact last trial state before optimize() rebuilds the
             // accepted trajectory. On an invalid objective, positionPieces
             // preserves the original early-return coverage.
+            const int coveredPieces = constraintMetrics.positionPieces;
+            const bool trialFinite = constraintMetrics.finite;
+            const Eigen::VectorXd coveredTimes = times.head(coveredPieces);
+            double unusedCost = 0.0;
+            Eigen::VectorXd unusedTimeGradient;
+            Eigen::MatrixX3d unusedCoefficientGradient;
+            if (flatmap.supportsZeroDragZeroYaw())
+                attachPenaltyFunctional<true, false, true>(coveredTimes, minco.getCoeffs(),
+                    hPolyIdx, penaltyPolytopes, smoothEps, integralRes, magnitudeBd, penaltyWt,
+                    flatmap, constraintMetrics, positionSmoothEps, hPolytopes,
+                    unusedCost, unusedTimeGradient, unusedCoefficientGradient, true);
+            else
+                attachPenaltyFunctional<false, false, true>(coveredTimes, minco.getCoeffs(),
+                    hPolyIdx, penaltyPolytopes, smoothEps, integralRes, magnitudeBd, penaltyWt,
+                    flatmap, constraintMetrics, positionSmoothEps, hPolytopes,
+                    unusedCost, unusedTimeGradient, unusedCoefficientGradient, true);
+            constraintMetrics.finite = constraintMetrics.finite && trialFinite;
             constraintMetrics.sfc = -INFINITY;
             const double integralFrac = 1.0 / integralRes;
             Eigen::Matrix<double, CoeffRows, 1> beta0, beta1, beta2, beta3, beta4;
@@ -2085,7 +2117,7 @@ namespace trajectory_server
             // Select once per objective evaluation, outside the quadrature loops.
             if (obj.flatmap.supportsZeroDragZeroYaw())
             {
-                attachPenaltyFunctional<true>(obj.times, obj.minco.getCoeffs(),
+                attachPenaltyFunctional<true, true>(obj.times, obj.minco.getCoeffs(),
                                         obj.hPolyIdx, obj.penaltyPolytopes,
                                         obj.smoothEps, obj.integralRes,
                                         obj.magnitudeBd, obj.penaltyWt, obj.flatmap, obj.constraintMetrics,
@@ -2095,7 +2127,7 @@ namespace trajectory_server
             }
             else
             {
-                attachPenaltyFunctional<false>(obj.times, obj.minco.getCoeffs(),
+                attachPenaltyFunctional<false, true>(obj.times, obj.minco.getCoeffs(),
                                         obj.hPolyIdx, obj.penaltyPolytopes,
                                         obj.smoothEps, obj.integralRes,
                                         obj.magnitudeBd, obj.penaltyWt, obj.flatmap, obj.constraintMetrics,

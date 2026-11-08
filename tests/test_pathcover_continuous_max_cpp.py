@@ -15,6 +15,8 @@ SOURCE = r"""
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <array>
+#include <type_traits>
 #include "gcopter_solver.hpp"
 
 using Solver = trajectory_server::GcopterSolver<3>;
@@ -358,6 +360,238 @@ void finalized_quadrature_diagnostics(bool iteration_limit) {
     for(int i=1;i<actual.size();++i)
         near(actual(i),expected(i),1e-12,"final dynamic QUALITY differs from original quadrature");
 }
+
+Eigen::VectorXd lazy_bounds() {
+    Eigen::VectorXd b(5); b << 3.,2.99,M_PI/2,2.094972067039106,22.0725; return b;
+}
+Eigen::VectorXd lazy_weights() {
+    Eigen::VectorXd w(5); w << 1e5,100.,1e4,1e4,1e4; return w;
+}
+template<bool Defer>
+Evaluation lazy_penalty(const Eigen::MatrixX3d& c, const Eigen::VectorXd& times,
+                       const Solver::PolyhedraH& planes, const Solver::PolyhedraH& original,
+                       const Eigen::VectorXd& bounds=lazy_bounds()) {
+    Evaluation result;
+    result.time=Eigen::VectorXd::Zero(times.size());
+    result.coeff=Eigen::MatrixX3d::Zero(c.rows(),3);
+    const Eigen::VectorXi indices=Eigen::VectorXi::Zero(times.size());
+    flatness::FlatnessMap map; map.reset(.75,9.81,0,0,0,.001);
+    Solver::attachPenaltyFunctional<true,Defer>(times,c,indices,planes,.01,64,
+        bounds,lazy_weights(),map,result.metrics,1e-6,original,
+        result.cost,result.time,result.coeff,true);
+    return result;
+}
+template<bool Defer>
+Evaluation lazy_penalty(const Coeff& c,double duration=.3) {
+    const Solver::PolyhedraH p{box(-1.,3.)};
+    return lazy_penalty<Defer>(c,Eigen::VectorXd::Constant(1,duration),p,p);
+}
+void same_number(double a,double b,const char* message) {
+    if(std::isnan(a) || std::isnan(b)) {
+        require(std::isnan(a) && std::isnan(b),message);
+    } else if(std::isinf(a) || std::isinf(b)) {
+        require(a==b,message);
+    } else near(a,b,1e-12,message);
+}
+void same_lazy_evaluation(const Evaluation& original,const Evaluation& selected) {
+    require(original.metrics.finite==selected.metrics.finite,"lazy finite category changed");
+    require(original.metrics.positionPieces==selected.metrics.positionPieces,"lazy piece coverage changed");
+    same_number(original.cost,selected.cost,"lazy objective changed");
+    require(original.time.size()==selected.time.size() && original.coeff.rows()==selected.coeff.rows(),
+            "lazy gradient shape changed");
+    for(int i=0;i<original.time.size();++i)
+        same_number(original.time(i),selected.time(i),"lazy explicit-time gradient changed");
+    for(int i=0;i<original.coeff.size();++i)
+        same_number(original.coeff.data()[i],selected.coeff.data()[i],"lazy coefficient gradient changed");
+}
+bool point_certificate(const Eigen::Vector3d& acceleration,const Eigen::Vector3d& jerk,
+                       const Eigen::VectorXd& bounds,int expected=-1,
+                       double mass=.75,double gravity=9.81) {
+    flatness::FlatnessMap map; map.reset(mass,gravity,0.,0.,0.,.001);
+    const double mean=.5*(bounds(3)+bounds(4));
+    const double radius=.5*std::abs(bounds(4)-bounds(3));
+    const bool skip=map.zeroDragZeroYawPenaltyInactive(acceleration,jerk,
+        mean,radius*radius,bounds(1)*bounds(1),bounds(2));
+    if(expected>=0) require(skip==bool(expected),"unexpected certificate decision");
+    // This is the actual original expression, not m*sqrt(q), acos(b_z),
+    // a real-arithmetic proxy bound, or a separately normalized quaternion.
+    double thrust; Eigen::Vector4d quat; Eigen::Vector3d omega;
+    map.forwardZeroDragZeroYaw(acceleration,jerk,thrust,quat,omega);
+    const double rate=omega.squaredNorm()-bounds(1)*bounds(1);
+    const double cosine=1.-2.*(quat(1)*quat(1)+quat(2)*quat(2));
+    const double tilt=std::acos(cosine)-bounds(2);
+    const double force=(thrust-mean)*(thrust-mean)-radius*radius;
+    if(skip) {
+        require(std::isfinite(thrust) && std::isfinite(rate) && std::isfinite(tilt)
+                && std::isfinite(force),"certificate hid a nonfinite original");
+        require(rate<=0. && tilt<=0. && force<=0.,
+                "certificate skipped a positive original dynamic penalty");
+    }
+    return skip;
+}
+void lazy_boundaries() {
+    const auto bounds=lazy_bounds();
+    int checked=0,skipped=0;
+    auto check=[&](const Eigen::Vector3d& a,const Eigen::Vector3d& j,
+                   const Eigen::VectorXd& b,int expected=-1,double gravity=9.81) {
+        ++checked; skipped+=point_certificate(a,j,b,expected,.75,gravity);
+    };
+    check(Eigen::Vector3d::Zero(),Eigen::Vector3d::Zero(),bounds,1);
+    for(double x:{-2.,-.5,0.,.5,2.})
+        for(double y:{-1.,0.,1.})
+            for(double z:{-2.,0.,3.})
+                for(double j:{0.,.1,1.,3.})
+                    check({x,y,z},{j,-.5*j,.3*j},bounds);
+    check({0,0,0},{40,0,0},bounds,0);       // original angular penalty is active
+    check({0,0,-9.},{0,0,0},bounds,0);      // thrust below nominal lower bound
+    check({0,0,30.},{0,0,0},bounds,0);      // thrust above upper bound
+    check({4,0,-10.81},{0,0,0},bounds,0);   // defined attitude beyond pi/2
+    // Sweep representable neighbours around both the real proxy threshold
+    // and the actual vertical-force angular threshold. Decisions may be
+    // conservative; every accepted point must satisfy the original expression.
+    for(double center:{bounds(1)*9.81/std::sqrt(2.),bounds(1)*9.81}) {
+        for(double direction:{0.,std::numeric_limits<double>::infinity()}) {
+            double value=center;
+            for(int k=0;k<24;++k) {
+                check({0,0,0},{value,0,0},bounds);
+                value=std::nextafter(value,direction);
+            }
+        }
+    }
+    for(double force:{bounds(3),bounds(4)}) {
+        for(double direction:{0.,std::numeric_limits<double>::infinity()}) {
+            double value=force;
+            for(int k=0;k<24;++k) {
+                check({0,0,value/.75},{0,0,0},bounds,-1,0.);
+                value=std::nextafter(value,direction);
+            }
+        }
+    }
+    // Includes the exact tilt boundary, both sides, and nearly horizontal
+    // values that must not turn a rounded positive acos residual into zero.
+    for(double z:{-1e-6,-1e-14,-1e-16,0.,1e-16,1e-14,1e-6})
+        check({9.81,0,z},{.1,.2,.3},bounds,0,0.);
+    check({0,0,-9.81},{0,0,0},bounds,0);
+    check({1e-200,0,0},{0,0,0},bounds,0,0.);
+    check({1e110,0,1e110},{0,0,0},bounds,0,0.); // q*r overflow
+    check({1e200,0,0},{0,0,0},bounds,0);
+    check({0,0,0},{1e200,0,0},bounds,0);
+    const double nan=std::numeric_limits<double>::quiet_NaN();
+    const double inf=std::numeric_limits<double>::infinity();
+    for(double value:{nan,inf,-inf}) for(int axis=0;axis<3;++axis) {
+        Eigen::Vector3d a=Eigen::Vector3d::Zero(),j=Eigen::Vector3d::Zero();
+        a(axis)=value; check(a,j,bounds,0);
+        a.setZero();j(axis)=value;check(a,j,bounds,0);
+    }
+    auto other=bounds;
+    for(double theta:{std::nextafter(M_PI/2,0.),std::nextafter(M_PI/2,inf),nan}) {
+        other=bounds;other(2)=theta;check({0,0,0},{0,0,0},other,0);
+    }
+    other=bounds;other(1)=nan;check({0,0,0},{0,0,0},other,0);
+    other=bounds;other(3)=nan;check({0,0,0},{0,0,0},other,0);
+    require(skipped>20,"certificate never exercised the inactive branch");
+    std::cout<<"lazy_boundaries checked="<<checked<<" skipped="<<skipped<<"\n";
+}
+void lazy_objective() {
+    Coeff hover=Coeff::Zero();hover(0,2)=1.;
+    std::vector<Coeff> cases{hover};
+    Coeff c=hover;c(1,0)=5.;cases.push_back(c); // velocity stays independent
+    c=hover;c(3,0)=40./6.;cases.push_back(c);
+    c=hover;c(2,2)=-9./2.;cases.push_back(c);
+    c=hover;c(2,2)=30./2.;cases.push_back(c);
+    c=hover;c(2,0)=4./2.;c(2,2)=-10.81/2.;cases.push_back(c);
+    c=hover;
+    c.col(0) << 0,1.6,.3,.2,-.07,.02;
+    c.col(1) << .2,-.8,.6,-.15,.04,-.005;
+    c.col(2) << 1,.3,.1,.04,-.02,.002;
+    cases.push_back(c);
+    for(const auto& poly:cases)
+        same_lazy_evaluation(lazy_penalty<false>(poly),lazy_penalty<true>(poly));
+    const auto velocity=lazy_penalty<true>(cases[1]);
+    require(velocity.cost>0. && velocity.coeff.norm()>0.,"velocity penalty disappeared with flatness");
+    require(std::isinf(lazy_penalty<true>(hover).metrics.minThrust),
+            "deferred metrics were unexpectedly filled during the objective");
+    constexpr double step=1e-6;
+    for(int index:{1,2,6}) {
+        const auto& poly=cases[index];
+        const auto center=lazy_penalty<true>(poly);
+        require(center.metrics.finite && center.coeff.allFinite(),"finite lazy objective rejected");
+        for(int trial=0;trial<4;++trial) {
+            Coeff direction;
+            for(int r=0;r<6;++r) for(int a=0;a<3;++a)
+                direction(r,a)=std::sin(.31+1.3*r+2.1*a+.7*trial);
+            direction.normalize();
+            const double fd=(lazy_penalty<true>(poly+step*direction).cost-
+                             lazy_penalty<true>(poly-step*direction).cost)/(2*step);
+            near(fd,center.coeff.cwiseProduct(direction).sum(),2e-6,"lazy coefficient FD");
+        }
+        const double fd=(lazy_penalty<true>(poly,.3+step).cost-
+                         lazy_penalty<true>(poly,.3-step).cost)/(2*step);
+        near(fd,center.time(0),2e-6,"lazy explicit-time FD");
+    }
+}
+void lazy_finite() {
+    Coeff base=Coeff::Zero();base(0,2)=1.;
+    const double nan=std::numeric_limits<double>::quiet_NaN();
+    const double inf=std::numeric_limits<double>::infinity();
+    for(int row:{0,1,3}) for(double value:{nan,inf,-inf,1e200}) {
+        Coeff c=base;c(row,0)=value;
+        same_lazy_evaluation(lazy_penalty<false>(c),lazy_penalty<true>(c));
+    }
+    Eigen::MatrixX3d c=Eigen::MatrixX3d::Zero(12,3);
+    c(0,2)=c(6,2)=1.;c(2,2)=-9.81/2.;
+    const Eigen::VectorXd times=Eigen::VectorXd::Constant(2,.3);
+    const Solver::PolyhedraH p{box(-1.,3.)};
+    const auto original=lazy_penalty<false>(c,times,p,p);
+    const auto selected=lazy_penalty<true>(c,times,p,p);
+    require(!original.metrics.finite && !selected.metrics.finite,"zero force failed to poison finite");
+    require(original.metrics.positionPieces==2 && selected.metrics.positionPieces==2,
+            "sticky-finite fixture did not visit the next piece");
+    require(original.coeff.bottomRows(6).allFinite(),
+            "sticky-finite fixture lacks a finite later backward evaluation");
+    same_lazy_evaluation(original,selected);
+}
+void lazy_last_trial() {
+    // The first piece has a nonfinite continuous position objective. Its
+    // dynamic quadrature is finite; the second piece is deliberately different
+    // and must not be visited by deferred diagnostic reconstruction.
+    Solver solver;
+    solver.continuousMaxPositionPenalty=true;
+    solver.times=Eigen::VectorXd::Constant(2,.3);
+    solver.hPolyIdx=Eigen::VectorXi::Zero(2);
+    solver.hPolytopes=Solver::PolyhedraH{box(-1.,3.)};
+    solver.penaltyPolytopes=solver.hPolytopes;
+    solver.penaltyPolytopes[0](0,3)=std::numeric_limits<double>::quiet_NaN();
+    solver.smoothEps=.01;solver.integralRes=64;solver.positionSmoothEps=1e-6;
+    solver.magnitudeBd=lazy_bounds();solver.penaltyWt=lazy_weights();
+    solver.flatmap.reset(.75,9.81,0,0,0,.001);
+    Eigen::MatrixX3d c=Eigen::MatrixX3d::Zero(12,3);
+    c(0,2)=c(6,2)=1.;c(6,0)=10000.;c(8,2)=30./2.;
+    using Stored=std::remove_const_t<std::remove_reference_t<decltype(solver.minco.getCoeffs())>>;
+    const_cast<Stored&>(solver.minco.getCoeffs())=c;
+    const auto original=lazy_penalty<false>(c,solver.times,solver.penaltyPolytopes,solver.hPolytopes);
+    const auto selected=lazy_penalty<true>(c,solver.times,solver.penaltyPolytopes,solver.hPolytopes);
+    same_lazy_evaluation(original,selected);
+    require(!selected.metrics.finite && selected.metrics.positionPieces==1,
+            "last-trial fixture did not preserve early-return range");
+    solver.constraintMetrics=selected.metrics;
+    solver.updateContinuousPositionQuadratureMetrics();
+    const auto& final=solver.constraintMetrics;
+    require(!final.finite && final.positionPieces==1,
+            "diagnostic replay erased finite failure or enlarged trial coverage");
+    near(final.sfc,-.8,1e-12,"diagnostic replay visited an unevaluated piece");
+    const auto expected=original.metrics.values(),actual=final.values();
+    for(int i=1;i<actual.size();++i)
+        same_number(expected(i),actual(i),"last-trial dynamic metrics differ");
+    // A second call is idempotent for the same last trial, including finite=false.
+    const auto before=final.values();
+    solver.updateContinuousPositionQuadratureMetrics();
+    require(!solver.constraintMetrics.finite && solver.constraintMetrics.positionPieces==1,
+            "repeated diagnostic reconstruction altered validity");
+    const auto after=solver.constraintMetrics.values();
+    for(int i=0;i<after.size();++i) same_number(before(i),after(i),"diagnostic reconstruction not idempotent");
+}
+
 int main(int argc,char** argv) {
     try {
         require(argc==2,"one contract name required");
@@ -371,11 +605,16 @@ int main(int argc,char** argv) {
         else if(mode=="dynamic_derivatives") dynamic_derivatives();
         else if(mode=="full_derivatives") full_objective_derivatives();
         else if(mode=="derivative_overflow") derivative_coefficient_overflow();
+        else if(mode=="lazy_boundaries") lazy_boundaries();
+        else if(mode=="lazy_objective") lazy_objective();
+        else if(mode=="lazy_finite") lazy_finite();
+        else if(mode=="lazy_last_trial") lazy_last_trial();
         else throw std::runtime_error("unknown contract");
     } catch(const std::exception& error) {
         std::cerr<<error.what()<<'\n'; return 1;
     }
 }
+
 """
 
 
@@ -405,7 +644,8 @@ def continuous_contract(tmp_path_factory):
 
 @pytest.mark.parametrize(
     "mode", ["polynomials", "positive_penalty", "derivatives", "legacy", "success_diagnostics", "failure_diagnostics",
-             "dynamic_derivatives", "full_derivatives", "derivative_overflow"]
+             "dynamic_derivatives", "full_derivatives", "derivative_overflow",
+             "lazy_boundaries", "lazy_objective", "lazy_finite", "lazy_last_trial"]
 )
 def test_continuous_position_contract(continuous_contract, mode):
     completed = subprocess.run([str(continuous_contract), mode], capture_output=True, text=True)

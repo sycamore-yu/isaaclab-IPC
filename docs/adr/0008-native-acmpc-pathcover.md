@@ -470,6 +470,23 @@ nonconvex optimizer path and intermediate-overflow behavior. Preserve the actual
 finite-value checks and independently validate the resulting complete references.
 The integral mode and continuous SFC extremum calculation retain their old path.
 
+In continuous-position mode, defer pure dynamic extrema to the same final
+objective trial as the existing SFC diagnostic. Reuse the original Horner/fallback
+node evaluation and visited-piece count before rebuilding the accepted trajectory.
+Keep the per-node finite flag sticky throughout every objective evaluation.
+For zero drag and zero yaw, skip the flatness forward only when a conservative
+binary64 certificate proves its original thrust, tilt and rate penalties are zero.
+Preserve the original thrust and quaternion expressions. Bound the absolute
+signed rate operations with nonnegative arithmetic and an upward adjacent
+reciprocal; require all Vector3d squared-norm reduction orders to be strictly
+below the original bound. Retain the full path at uncertain or invalid nodes.
+Velocity costs, continuous position extrema, active dynamic costs and their
+derivatives remain unchanged. This certificate assumes the existing binary64,
+round-to-nearest scalar build without fast-math or FMA contraction. A future
+compiler/ISA change must revalidate those arithmetic assumptions. The measured
+three-input reduction of about 11% in complete optimization time does not prove
+the end-to-end Dense planning budget; actual frontend and task gates still apply.
+
 ## Validation
 
 P0: frozen-input forward comparison, finite-difference cost gradients, complete

@@ -1053,6 +1053,46 @@ license; embedded geometry utilities retain their original notices.
     remains unmeasured here. See `map-pipeline-v33/report.md` and
     `map-snapshot-v34-integration/` for the unchanged evidence and actual tests.
 
+69. V36 adds an inactive-dynamic-penalty certificate for zero drag and zero
+    yaw in the continuous-position objective. It reuses the original rounded
+    thrust and quaternion expressions. Thrust must have a strictly negative
+    residual; the reconstructed tilt cosine must lie in [0.5, 1] with the
+    existing pi/2 limit. An upward-rounded reciprocal and nonnegative
+    arithmetic bound the original rounded normalization derivative, body-rate
+    products and sums. All three squared-norm reduction orders must be finite
+    and strictly below the original angular-rate limit. An uncertain or
+    nonfinite case retains the original full flatness calculation. Position
+    and velocity penalties, weights, margins, quadrature and optimizer stopping
+    rules are unchanged. Per-node validity remains sticky and still controls
+    backward propagation. Dynamic extrema join the existing deferred SFC
+    diagnostic reconstruction on the last evaluated objective trial, before
+    the returned trajectory is rebuilt; reconstruction preserves that trial's
+    finite flag and covered-piece range on success and failure.
+
+    The certificate assumes binary64 round-to-nearest arithmetic without
+    fast-math or fused multiply-add transformations. The replay uses global
+    -mpopcnt; production uses it only for the voxel-bit-grid translation unit,
+    not the trajectory translation unit. Neither build enables -march, -mfma
+    or -ffast-math. A future target or contraction change requires rechecking
+    this arithmetic contract. No compiler option changes accompany V36.
+
+    The isolated 13-mode contract passed, including 412 boundary cases with
+    295 accepted certificates and no skipped positive penalty. Three complete
+    optimizations, three one-iteration failure diagnostics and the frozen
+    MINCO/initial-force objective and gradient comparisons matched exactly;
+    the original 2e-6 finite-difference threshold passed with worst normalized
+    error 4.38e-7. All 66 paired complete outputs, including warmup, matched
+    byte for byte. Twenty timed pairs per case reduced optimization p50 from
+    5.506/24.757/76.249 to 4.901/22.016/67.752 ms; every timed pair improved.
+    The paired median savings were 0.601/2.778/8.477 ms, approximately 11%,
+    below the initial 20% hypothesis. These are frozen replay results, not
+    formal closed-loop measurements. Four modes are added to the existing
+    permanent C++ contract file without changing its nine earlier modes or
+    tolerances. Production build and permanent-test execution remain pending
+    at integration. Evidence is in `gcopter-lazy-flatness-v36/benchmark.json`,
+    `gcopter-lazy-flatness-v36/contracts-summary.json` and
+    `gcopter-lazy-flatness-v36/certificate-and-contracts.md`.
+
 V33 was published from `86ca04f` with native SHA256
 `b64deaa459be21f1d2aa65786341263e26caf6919d18bac61e4fc35777347b8d`.
 Newton passed 35/35 MPC solves and 36/36 complete references. Dense completed
