@@ -829,10 +829,149 @@ __global__ void copyOutputsKernel(
 // Python-owned cuDSS workspace.
 // ============================================================
 
+// The CSR matrix is block diagonal across batch rows. From analysis onward,
+// the inverse backend uses (B*TN)-by-TN column-major dense descriptors.
+// Identity column j contains e_j in every independent TN-by-TN block.
+template<typename T>
+__global__ void initializeStackedIdentityKernel(
+    T* __restrict__ rhs, int batches, int rows_per_system) {
+    const size_t leading_dim = static_cast<size_t>(batches) * rows_per_system;
+    const size_t count = leading_dim * rows_per_system;
+    const size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (index >= count) return;
+    const int column = static_cast<int>(index / leading_dim);
+    const int local_row = static_cast<int>((index % leading_dim) % rows_per_system);
+    rhs[index] = local_row == column ? T(1) : T(0);
+}
+
+// One independent batch block executes only until the next host event.
+// Every body uses the original device helpers and FP64 inverse GEMV order.
+template<typename T, ConstraintHandling Handling>
+__global__ void __launch_bounds__(768) fusedInverseChunkKernel(
+    T* __restrict__ x, T* __restrict__ z_g, T* __restrict__ y_g,
+    T* __restrict__ y_f_0, T* __restrict__ y_f_dyn, T* __restrict__ xi_g,
+    T* __restrict__ gamma, T* __restrict__ x_old,
+    T* __restrict__ Gx, T* __restrict__ Cx0, T* __restrict__ Cx_dyn,
+    T* __restrict__ z_g_old,
+    T* __restrict__ previous_y_g, T* __restrict__ previous_y_f_0,
+    T* __restrict__ previous_y_f_dyn, T* __restrict__ previous_xi_g,
+    const T* __restrict__ inverse, const T* __restrict__ q_g,
+    const T* __restrict__ A0_g, const T* __restrict__ Am_g,
+    const T* __restrict__ Ap_g, const T* __restrict__ G_g,
+    const T* __restrict__ l_g, const T* __restrict__ u_g,
+    const T* __restrict__ c0_g, const T* __restrict__ cdyn_g,
+    T sigma, T alpha_relax, T rho_f_factor,
+    const T* __restrict__ rho_bar_arr,
+    const T* __restrict__ slack_weight_arr,
+    int T_blocks, int n, int nx, int n0, int m, int batches,
+    bool use_slack, T log_barrier_kappa,
+    const uint32_t* __restrict__ status,
+    int chunk_iterations, bool certificate_at_end)
+{
+    const int bid = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int N = T_blocks - 1;
+    const int total_tn = T_blocks * n;
+    const int total_Tm = T_blocks * m;
+    const int total_Nnx = N * nx;
+    const int off_tn = bid * total_tn;
+    const int off_Tm = bid * total_Tm;
+    const int off_n0 = bid * n0;
+    const int off_Nnx = bid * total_Nnx;
+    const int off_A0 = bid * n0 * n;
+    const int off_Am = bid * N * nx * n;
+    const int off_G = bid * T_blocks * m * n;
+    const size_t leading_dim = static_cast<size_t>(batches) * total_tn;
+    extern __shared__ unsigned char fused_inverse_shared[];
+    T* local_gamma = reinterpret_cast<T*>(fused_inverse_shared);
+
+    // A completed row has no body updates. Match the old loop's final
+    // scratch snapshots without overwriting its terminal primal with GEMV.
+    if (status[bid] != static_cast<uint32_t>(ADMM_STATUS_NOT_RUN)) {
+        for (int i = tid; i < total_tn; i += blockDim.x)
+            x_old[off_tn + i] = x[off_tn + i];
+        if (certificate_at_end) {
+            for (int i = tid; i < total_Tm; i += blockDim.x) {
+                previous_y_g[off_Tm+i] = y_g[off_Tm+i];
+                previous_xi_g[off_Tm+i] = xi_g[off_Tm+i];
+            }
+            for (int i = tid; i < n0; i += blockDim.x)
+                previous_y_f_0[off_n0+i] = y_f_0[off_n0+i];
+            for (int i = tid; i < total_Nnx; i += blockDim.x)
+                previous_y_f_dyn[off_Nnx+i] = y_f_dyn[off_Nnx+i];
+        }
+        return;
+    }
+    const T rho_bar = rho_bar_arr[bid];
+    const T rho_f = rho_bar * rho_f_factor;
+    const T slack_weight = slack_weight_arr[bid];
+    for (int local = 0; local < chunk_iterations; ++local) {
+        // The certificate is the final single ADMM step, not the full chunk.
+        if (certificate_at_end && local + 1 == chunk_iterations) {
+            for (int i = tid; i < total_Tm; i += blockDim.x) {
+                previous_y_g[off_Tm+i] = y_g[off_Tm+i];
+                previous_xi_g[off_Tm+i] = xi_g[off_Tm+i];
+            }
+            for (int i = tid; i < n0; i += blockDim.x)
+                previous_y_f_0[off_n0+i] = y_f_0[off_n0+i];
+            for (int i = tid; i < total_Nnx; i += blockDim.x)
+                previous_y_f_dyn[off_Nnx+i] = y_f_dyn[off_Nnx+i];
+        }
+        for (int i = tid; i < total_tn; i += blockDim.x)
+            x_old[off_tn+i] = x[off_tn+i];
+        computeGammaDevice(
+            gamma+off_tn, x+off_tn, z_g+off_Tm, y_g+off_Tm,
+            y_f_0+off_n0, y_f_dyn+off_Nnx,
+            q_g+off_tn, A0_g+off_A0, Am_g+off_Am, Ap_g+off_Am,
+            G_g+off_G, c0_g+off_n0, cdyn_g+off_Nnx,
+            sigma, rho_f, rho_bar, T_blocks, n, nx, n0, m);
+        for (int column = tid; column < total_tn; column += blockDim.x)
+            local_gamma[column] = gamma[off_tn+column];
+        __syncthreads();
+        for (int row = tid; row < total_tn; row += blockDim.x) {
+            T sum = T(0);
+            for (int column = 0; column < total_tn; ++column)
+                sum += inverse[static_cast<size_t>(column)*leading_dim+off_tn+row]
+                       * local_gamma[column];
+            x[off_tn+row] = sum;
+        }
+        __syncthreads();
+        // Constraints use x_new before over-relaxation, as in postSolve.
+        applyConstraintsDevice(
+            Cx0+off_n0, Cx_dyn+off_Nnx, Gx+off_Tm, x+off_tn,
+            A0_g+off_A0, Am_g+off_Am, Ap_g+off_Am, G_g+off_G,
+            T_blocks, n, nx, n0, m);
+        overRelaxDevice(x+off_tn, x_old+off_tn, alpha_relax, total_tn);
+        if (m > 0)
+            for (int i = tid; i < total_Tm; i += blockDim.x)
+                z_g_old[off_Tm+i] = z_g[off_Tm+i];
+        __syncthreads();
+        if constexpr (Handling == ConstraintHandling::LogBarrier) {
+            logBarrierUpdateDevice(
+                z_g+off_Tm, Gx+off_Tm, y_g+off_Tm,
+                l_g+off_Tm, u_g+off_Tm,
+                alpha_relax, rho_bar, T_blocks, m,
+                log_barrier_kappa, slack_weight, use_slack, xi_g+off_Tm);
+        } else {
+            projectionUpdateDevice(
+                z_g+off_Tm, Gx+off_Tm, y_g+off_Tm,
+                l_g+off_Tm, u_g+off_Tm,
+                alpha_relax, rho_bar, T_blocks, m,
+                slack_weight, use_slack, xi_g+off_Tm);
+        }
+        dualUpdateDevice(
+            y_f_0+off_n0, y_f_dyn+off_Nnx, y_g+off_Tm,
+            Cx0+off_n0, Cx_dyn+off_Nnx, Gx+off_Tm,
+            z_g+off_Tm, z_g_old+off_Tm, c0_g+off_n0, cdyn_g+off_Nnx,
+            alpha_relax, rho_f, rho_bar, T_blocks, n, nx, n0, m);
+    }
+}
+
 struct AdmmCudssWorkspace {
     turbompc::FfiDeviceAllocator cudss_allocator{};
     int32_t Nb = 0, T = 0, n = 0, nx = 0, n0 = 0, m = 0;
     int32_t dtype_bytes = 0;
+    AdmmLinearSolver linear_solver = AdmmLinearSolver::CudssVector;
     bool initialized = false;
     // cuDSS objects (persistent)
     cudssHandle_t handle = nullptr;
@@ -855,6 +994,9 @@ struct AdmmCudssWorkspace {
     void* d_y_f_dyn = nullptr;
     void* d_xi_g = nullptr;
     void* d_gamma = nullptr;
+    void* d_inverse_rhs = nullptr;
+    void* d_inverse = nullptr;
+    bool inverse_rhs_initialized = false;
     void* d_x_old = nullptr;
     void* d_Gx = nullptr;
     void* d_Cx0 = nullptr;
@@ -925,6 +1067,8 @@ struct AdmmCudssWorkspace {
         free(d_y_f_dyn, static_cast<size_t>(Nb) * total_Nnx * scalar_size);
         free(d_xi_g, static_cast<size_t>(Nb) * total_Tm * scalar_size);
         free(d_gamma, static_cast<size_t>(Nb) * total_tn * scalar_size);
+        free(d_inverse_rhs, total * total_tn * scalar_size);
+        free(d_inverse, total * total_tn * scalar_size);
         free(d_x_old, static_cast<size_t>(Nb) * total_tn * scalar_size);
         free(d_Gx, static_cast<size_t>(Nb) * total_Tm * scalar_size);
         free(d_Cx0, static_cast<size_t>(Nb) * n0 * scalar_size);
@@ -958,6 +1102,9 @@ struct AdmmCudssWorkspace {
         csr_data = nullptr;
         d_x = d_z_g = d_y_g = d_y_f_0 = d_y_f_dyn = nullptr;
         d_xi_g = d_gamma = d_x_old = d_Gx = d_Cx0 = d_Cx_dyn = nullptr;
+        d_inverse_rhs = d_inverse = nullptr;
+        inverse_rhs_initialized = false;
+        linear_solver = AdmmLinearSolver::CudssVector;
         d_z_g_old = d_residuals = d_infeasibility_metrics = nullptr;
         d_previous_y_g = d_previous_y_f_0 = d_previous_y_f_dyn = nullptr;
         d_previous_xi_g = d_S_work = d_rho_bar_work = d_theta_inv_work = nullptr;
@@ -1021,13 +1168,21 @@ template<typename T>
 static void ensureWorkspaceCapacity(turbompc::FfiDeviceAllocator& allocator,
                                     AdmmCudssWorkspace* entry, int32_t Nb,
                                     int32_t T_blocks, int32_t n, int32_t nx,
-                                    int32_t n0, int32_t m) {
+                                    int32_t n0, int32_t m,
+                                    AdmmLinearSolver linear_solver) {
     if (Nb < 1 || T_blocks < 1 || n < 1 || nx < 1 || n0 < 0 || m < 0)
         throw std::invalid_argument("invalid ADMM cuDSS workspace dimensions");
+    if (linear_solver != AdmmLinearSolver::CudssVector
+        && linear_solver != AdmmLinearSolver::CudssInverseChunk)
+        throw std::invalid_argument("unknown ADMM linear solver");
+    const bool inverse_chunk = linear_solver == AdmmLinearSolver::CudssInverseChunk;
+    if (inverse_chunk && !std::is_same_v<T, double>)
+        throw std::invalid_argument("cudss_inverse_chunk requires float64");
 
     if (entry->initialized && entry->Nb == Nb && entry->T == T_blocks &&
         entry->n == n && entry->nx == nx && entry->n0 == n0 &&
-        entry->m == m && entry->dtype_bytes == sizeof(T))
+        entry->m == m && entry->dtype_bytes == sizeof(T)
+        && entry->linear_solver == linear_solver)
         return;
 
     entry->release_capacity(allocator);
@@ -1042,6 +1197,7 @@ static void ensureWorkspaceCapacity(turbompc::FfiDeviceAllocator& allocator,
     entry->n0 = n0;
     entry->m = m;
     entry->dtype_bytes = sizeof(T);
+    entry->linear_solver = linear_solver;
 
     const int N = T_blocks - 1;
     const int total_tn = T_blocks * n;
@@ -1062,6 +1218,13 @@ static void ensureWorkspaceCapacity(turbompc::FfiDeviceAllocator& allocator,
     turbompc::FfiAllocate(allocator, &entry->d_y_f_dyn, (size_t)Nb * total_Nnx * sizeof(T));
     turbompc::FfiAllocate(allocator, &entry->d_xi_g, (size_t)Nb * total_Tm * sizeof(T));
     turbompc::FfiAllocate(allocator, &entry->d_gamma, (size_t)Nb * total_tn * sizeof(T));
+    if (inverse_chunk) {
+        if (static_cast<size_t>(Nb) > SIZE_MAX / sizeof(T) / total_tn / total_tn)
+            throw std::overflow_error("ADMM inverse workspace size overflows size_t");
+        const size_t inverse_count = static_cast<size_t>(Nb) * total_tn * total_tn;
+        turbompc::FfiAllocate(allocator, &entry->d_inverse_rhs, inverse_count * sizeof(T));
+        turbompc::FfiAllocate(allocator, &entry->d_inverse, inverse_count * sizeof(T));
+    }
     turbompc::FfiAllocate(allocator, &entry->d_x_old, (size_t)Nb * total_tn * sizeof(T));
     turbompc::FfiAllocate(allocator, &entry->d_Gx, (size_t)Nb * total_Tm * sizeof(T));
     turbompc::FfiAllocate(allocator, &entry->d_Cx0, (size_t)Nb * n0 * sizeof(T));
@@ -1108,18 +1271,20 @@ static void ensureWorkspaceCapacity(turbompc::FfiDeviceAllocator& allocator,
         &entry->matA, total, total, nnz, entry->csr_indptr, nullptr,
         entry->csr_indices, (T*)entry->csr_data, CUDSS_R_32I, CUDSS_R_32I,
         valueType, CUDSS_MTYPE_GENERAL, CUDSS_MVIEW_FULL, CUDSS_BASE_ZERO));
-    CUDSS_CHECK(cudssMatrixCreateDn(&entry->matX, total, 1, total,
-                                    (T*)entry->d_x, valueType,
-                                    CUDSS_LAYOUT_COL_MAJOR));
-    CUDSS_CHECK(cudssMatrixCreateDn(&entry->matB, total, 1, total,
-                                    (T*)entry->d_gamma, valueType,
-                                    CUDSS_LAYOUT_COL_MAJOR));
+    const int rhs_columns = inverse_chunk ? total_tn : 1;
+    T* solution = static_cast<T*>(inverse_chunk ? entry->d_inverse : entry->d_x);
+    T* rhs = static_cast<T*>(inverse_chunk ? entry->d_inverse_rhs : entry->d_gamma);
+    CUDSS_CHECK(cudssMatrixCreateDn(&entry->matX, total, rhs_columns, total,
+                                    solution, valueType, CUDSS_LAYOUT_COL_MAJOR));
+    CUDSS_CHECK(cudssMatrixCreateDn(&entry->matB, total, rhs_columns, total,
+                                    rhs, valueType, CUDSS_LAYOUT_COL_MAJOR));
     entry->initialized = true;
 }
 
 int EnsureAdmmCudssWorkspaceCapacity(
     turbompc::FfiDeviceAllocator& allocator, uint64_t workspace_handle, int32_t Nb, int32_t T, int32_t n,
-    int32_t nx, int32_t n0, int32_t m, int32_t dtype_bytes) {
+    int32_t nx, int32_t n0, int32_t m, int32_t dtype_bytes,
+    AdmmLinearSolver linear_solver) {
     try {
         std::unique_lock<std::mutex> registry_lock(g_workspace_registry_mutex);
         auto position = g_workspace_registry.find(workspace_handle);
@@ -1129,9 +1294,9 @@ int EnsureAdmmCudssWorkspaceCapacity(
         std::unique_lock<std::mutex> entry_lock(entry->entry_mutex);
         registry_lock.unlock();
         if (dtype_bytes == 4)
-            ensureWorkspaceCapacity<float>(allocator, entry, Nb, T, n, nx, n0, m);
+            ensureWorkspaceCapacity<float>(allocator, entry, Nb, T, n, nx, n0, m, linear_solver);
         else if (dtype_bytes == 8)
-            ensureWorkspaceCapacity<double>(allocator, entry, Nb, T, n, nx, n0, m);
+            ensureWorkspaceCapacity<double>(allocator, entry, Nb, T, n, nx, n0, m, linear_solver);
         else
             throw std::invalid_argument("workspace dtype must be 4 or 8 bytes");
         return 0;
@@ -1182,12 +1347,20 @@ static void launchADMMCudss(
     AdmmCudssWorkspace* entry = position->second.get();
     std::unique_lock<std::mutex> entry_lock(entry->entry_mutex);
     registry_lock.unlock();
-    ensureWorkspaceCapacity<T>(allocator, entry, Nb, T_blocks, n, nx, n0, m);
+    ensureWorkspaceCapacity<T>(allocator, entry, Nb, T_blocks, n, nx, n0, m, cfg.linear_solver);
+    const bool inverse_chunk = cfg.linear_solver == AdmmLinearSolver::CudssInverseChunk;
     CUDA_CHECK_THROW(cudaStreamWaitEvent(stream, entry->completion_event, 0));
 
     // Update stream (may change between calls)
     entry->cudss_allocator = allocator;
     CUDSS_CHECK(cudssSetStream(entry->handle, stream));
+    if (inverse_chunk && !entry->inverse_rhs_initialized) {
+        const size_t count = static_cast<size_t>(Nb) * total_tn * total_tn;
+        initializeStackedIdentityKernel<T><<<(count + 255) / 256, 256, 0, stream>>>(
+            static_cast<T*>(entry->d_inverse_rhs), Nb, total_tn);
+        CUDA_CHECK_THROW(cudaGetLastError());
+        entry->inverse_rhs_initialized = true;
+    }
 
     // Cast workspace-owned void* to typed pointers
     T* d_x        = (T*)entry->d_x;
@@ -1276,6 +1449,11 @@ static void launchADMMCudss(
     }
     CUDSS_CHECK(cudssExecute(entry->handle, CUDSS_PHASE_FACTORIZATION, entry->config,
                              entry->data, entry->matA, entry->matX, entry->matB));
+    if (inverse_chunk) {
+        // Refresh for every QP; the matrix values can change at every SQP step.
+        CUDSS_CHECK(cudssExecute(entry->handle, CUDSS_PHASE_SOLVE, entry->config,
+                                 entry->data, entry->matA, entry->matX, entry->matB));
+    }
 
     // ---- Reset convergence flag (host-side, visible to host immediately) ----
     *entry->h_converged_flag = -1;
@@ -1294,51 +1472,81 @@ static void launchADMMCudss(
     T log_barrier_kappa_k = static_cast<T>(cfg.log_barrier_kappa);
 
     const bool log_barrier = cfg.constraint_handling == ConstraintHandling::LogBarrier;
-    // Both instantiations share one signature, so the selection is a pointer.
     auto postSolve = log_barrier
         ? postSolveKernel<T, ConstraintHandling::LogBarrier>
         : postSolveKernel<T, ConstraintHandling::Projection>;
+    auto fusedChunk = log_barrier
+        ? fusedInverseChunkKernel<T, ConstraintHandling::LogBarrier>
+        : fusedInverseChunkKernel<T, ConstraintHandling::Projection>;
 
-    for (int it = 0; it < cfg.max_iter; ++it) {
-        bool termination_check_fires =
-            (cfg.check_termination_every > 0
-             && ((it + 1) % cfg.check_termination_every == 0))
-            || it + 1 == cfg.max_iter;
-        // Hard-QP infeasibility certificates only apply to projection; a
-        // barrier solve reports SOLVED, MAX_ITER, or NONFINITE.
-        bool infeasibility_check_fires = !log_barrier
-            && ((cfg.check_infeasibility_every > 0
-                 && ((it + 1) % cfg.check_infeasibility_every == 0))
-                || it + 1 == cfg.max_iter);
-        bool rho_check_fires = cfg.adapt_rho_every > 0
-            && ((it + 1) % cfg.adapt_rho_every == 0);
-        if (infeasibility_check_fires) {
-            snapshotCertificateDualsKernel<T><<<Nb, threads, 0, stream>>>(
-                d_previous_y_g, d_previous_y_f_0, d_previous_y_f_dyn,
-                d_previous_xi_g, d_y_g, d_y_f_0, d_y_f_dyn, d_xi_g,
-                total_Tm, n0, total_Nnx);
+    int completed = 0;
+    while (completed < cfg.max_iter) {
+        int chunk_iterations = 1;
+        if (inverse_chunk) {
+            chunk_iterations = cfg.max_iter - completed;
+            auto restrict_to_event = [&](int period) {
+                if (period > 0) {
+                    const int distance = period - completed % period;
+                    if (distance < chunk_iterations) chunk_iterations = distance;
+                }
+            };
+            restrict_to_event(cfg.check_termination_every);
+            restrict_to_event(cfg.adapt_rho_every);
+            if (!log_barrier) restrict_to_event(cfg.check_infeasibility_every);
         }
-        // 1. Compute gamma (RHS) and save x_old
-        computeGammaAndSaveXOldKernel<T><<<Nb, threads, 0, stream>>>(
-            d_gamma, d_x_old, d_x, d_z_g, d_y_g, d_y_f_0, d_y_f_dyn,
-            q, A0, A_minus, A_plus, G, c0, c_dyn,
-            sigma_k, rho_f_factor, d_rho_bar_work,
-            T_blocks, n, nx, n0, m, status_out);
+        const int iteration_end = completed + chunk_iterations;
+        const bool termination_check_fires =
+            (cfg.check_termination_every > 0
+             && iteration_end % cfg.check_termination_every == 0)
+            || iteration_end == cfg.max_iter;
+        // Hard-QP certificates only apply to projection, never log-barrier.
+        const bool infeasibility_check_fires = !log_barrier
+            && ((cfg.check_infeasibility_every > 0
+                 && iteration_end % cfg.check_infeasibility_every == 0)
+                || iteration_end == cfg.max_iter);
+        const bool rho_check_fires = cfg.adapt_rho_every > 0
+            && iteration_end % cfg.adapt_rho_every == 0;
+        if (inverse_chunk) {
+            fusedChunk<<<Nb, threads, total_tn*sizeof(T), stream>>>(
+                d_x, d_z_g, d_y_g, d_y_f_0, d_y_f_dyn, d_xi_g,
+                d_gamma, d_x_old, d_Gx, d_Cx0, d_Cx_dyn, d_z_g_old,
+                d_previous_y_g, d_previous_y_f_0, d_previous_y_f_dyn, d_previous_xi_g,
+                static_cast<const T*>(entry->d_inverse), q, A0, A_minus, A_plus, G,
+                l_bounds, u_bounds, c0, c_dyn,
+                sigma_k, alpha_k, rho_f_factor, d_rho_bar_work, slack_weight_init,
+                T_blocks, n, nx, n0, m, Nb,
+                cfg.use_slack, log_barrier_kappa_k, status_out,
+                chunk_iterations, infeasibility_check_fires);
+            CUDA_CHECK_THROW(cudaGetLastError());
+        } else {
+            if (infeasibility_check_fires) {
+                snapshotCertificateDualsKernel<T><<<Nb, threads, 0, stream>>>(
+                    d_previous_y_g, d_previous_y_f_0, d_previous_y_f_dyn,
+                    d_previous_xi_g, d_y_g, d_y_f_0, d_y_f_dyn, d_xi_g,
+                    total_Tm, n0, total_Nnx);
+            }
+            // 1. Compute gamma (RHS) and save x_old
+            computeGammaAndSaveXOldKernel<T><<<Nb, threads, 0, stream>>>(
+                d_gamma, d_x_old, d_x, d_z_g, d_y_g, d_y_f_0, d_y_f_dyn,
+                q, A0, A_minus, A_plus, G, c0, c_dyn,
+                sigma_k, rho_f_factor, d_rho_bar_work,
+                T_blocks, n, nx, n0, m, status_out);
 
-        // 2. cuDSS solve-only: S @ x_new = gamma
-        //    matX points directly to d_x — solution lands in d_x, no D→D memcpy
-        CUDSS_CHECK(cudssMatrixSetValues(entry->matB, (void*)d_gamma));
-        CUDSS_CHECK(cudssExecute(entry->handle, CUDSS_PHASE_SOLVE, entry->config,
-                                 entry->data, entry->matA, entry->matX, entry->matB));
+            // 2. cuDSS solve-only: S @ x_new = gamma
+            //    matX points directly to d_x — solution lands in d_x, no D→D memcpy
+            CUDSS_CHECK(cudssMatrixSetValues(entry->matB, (void*)d_gamma));
+            CUDSS_CHECK(cudssExecute(entry->handle, CUDSS_PHASE_SOLVE, entry->config,
+                                     entry->data, entry->matA, entry->matX, entry->matB));
 
-        // 3. Post-solve: constraints + over-relax + inequality proximal + dual
-        postSolve<<<Nb, threads, 0, stream>>>(
-            d_x, d_z_g, d_y_g, d_y_f_0, d_y_f_dyn,
-            d_Gx, d_Cx0, d_Cx_dyn, d_z_g_old, d_x_old,
-            A0, A_minus, A_plus, G, l_bounds, u_bounds, c0, c_dyn,
-            alpha_k, rho_f_factor, d_rho_bar_work,
-            T_blocks, n, nx, n0, m,
-            slack_weight_init, cfg.use_slack, log_barrier_kappa_k, d_xi_g, status_out);
+            // 3. Post-solve: constraints + over-relax + inequality proximal + dual
+            postSolve<<<Nb, threads, 0, stream>>>(
+                d_x, d_z_g, d_y_g, d_y_f_0, d_y_f_dyn,
+                d_Gx, d_Cx0, d_Cx_dyn, d_z_g_old, d_x_old,
+                A0, A_minus, A_plus, G, l_bounds, u_bounds, c0, c_dyn,
+                alpha_k, rho_f_factor, d_rho_bar_work,
+                T_blocks, n, nx, n0, m,
+                slack_weight_init, cfg.use_slack, log_barrier_kappa_k, d_xi_g, status_out);
+        }
 
         // 4. Residual, status, infeasibility, and rho checks.
         if (termination_check_fires || infeasibility_check_fires
@@ -1369,8 +1577,8 @@ static void launchADMMCudss(
                     status_out, d_iter_counts, terminal_residuals_out,
                     entry->d_converged_flag, eps_abs_k, eps_rel_k,
                     eps_prim_inf_k, eps_dual_inf_k,
-                    Nb, it + 1, termination_check_fires,
-                    infeasibility_check_fires, it + 1 == cfg.max_iter);
+                    Nb, iteration_end, termination_check_fires,
+                    infeasibility_check_fires, iteration_end == cfg.max_iter);
                 cudaStreamSynchronize(stream);
                 if (*entry->h_converged_flag >= 0) {
                     break;
@@ -1425,8 +1633,14 @@ static void launchADMMCudss(
 
                 CUDSS_CHECK(cudssExecute(entry->handle, CUDSS_PHASE_FACTORIZATION, entry->config,
                                          entry->data, entry->matA, entry->matX, entry->matB));
+                if (inverse_chunk) {
+                    // Every rho refactorization invalidates all inverse blocks.
+                    CUDSS_CHECK(cudssExecute(entry->handle, CUDSS_PHASE_SOLVE, entry->config,
+                                             entry->data, entry->matA, entry->matX, entry->matB));
+                }
             }
         }
+        completed = iteration_end;
     }
 
     // ---- Copy outputs ----

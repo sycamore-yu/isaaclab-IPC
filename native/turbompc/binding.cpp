@@ -15,7 +15,7 @@ using at::Tensor;
 uint64_t CreateAdmmCudssWorkspace();
 int EnsureAdmmCudssWorkspaceCapacity(turbompc::FfiDeviceAllocator&, uint64_t,
                                     int32_t, int32_t, int32_t, int32_t,
-                                    int32_t, int32_t, int32_t);
+                                    int32_t, int32_t, int32_t, AdmmLinearSolver);
 int DestroyAdmmCudssWorkspace(turbompc::FfiDeviceAllocator&, uint64_t);
 const char* AdmmCudssLastError();
 uint64_t CreateCudssSparseKktWorkspace(const int32_t*, const int32_t*,
@@ -59,6 +59,12 @@ static ADMMCudssConfig parse_config(const py::dict& p) {
   TORCH_CHECK(handling == 0 || handling == 1, "Unknown constraint handling");
   c.constraint_handling = static_cast<ConstraintHandling>(handling);
   c.use_slack = py::cast<bool>(p["use_slack"]);
+  const std::string linear_solver = p.contains("linear_solver")
+      ? py::cast<std::string>(p["linear_solver"]) : "cudss_vector";
+  TORCH_CHECK(linear_solver == "cudss_vector" || linear_solver == "cudss_inverse_chunk",
+              "Unknown ADMM linear solver: ", linear_solver);
+  c.linear_solver = linear_solver == "cudss_vector"
+      ? AdmmLinearSolver::CudssVector : AdmmLinearSolver::CudssInverseChunk;
   TORCH_CHECK(c.max_iter > 0 && c.check_termination_every > 0 &&
               c.check_infeasibility_every > 0 && c.adapt_rho_every >= 0,
               "Invalid ADMM iteration settings");
@@ -132,7 +138,7 @@ class AdmmWorkspace {
       std::lock_guard<std::mutex> lock(lifecycle_mutex_);
       TORCH_CHECK(handle_, "ADMM workspace is closed");
       TORCH_CHECK(EnsureAdmmCudssWorkspaceCapacity(allocator, handle_, b, t, n,
-                                                  nx, n0, m, 8) == 0,
+                                                  nx, n0, m, 8, cfg.linear_solver) == 0,
                   AdmmCudssLastError());
       LaunchADMMCudssF64(
         allocator, handle_, stream,
@@ -227,6 +233,8 @@ class KktWorkspace {
 };
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.attr("supported_admm_linear_solvers") =
+      py::make_tuple("cudss_vector", "cudss_inverse_chunk");
   py::class_<AdmmWorkspace>(m, "AdmmWorkspace")
       .def(py::init<int>()).def("solve", &AdmmWorkspace::solve)
       .def("close", &AdmmWorkspace::close, py::call_guard<py::gil_scoped_release>());

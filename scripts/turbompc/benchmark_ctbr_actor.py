@@ -35,7 +35,12 @@ def run(args):
         warm_start_controls=values["ctbr_warm_start"],
     )
     obs = TensorDict(inputs, batch_size=[args.batch], device="cuda:0")
-    actor = CTBRMPCActor(obs, {"actor": ["policy"]}, "actor", 4, cost_nodes=args.nodes, compile_kernels=True).to(
+    linear_solver = getattr(args, "linear_solver", None)
+    actor_options = {} if linear_solver is None else {"qp_linear_solver": linear_solver}
+    actor = CTBRMPCActor(
+        obs, {"actor": ["policy"]}, "actor", 4,
+        cost_nodes=args.nodes, compile_kernels=True, **actor_options,
+    ).to(
         "cuda:0"
     )
     actor.fixed_cost = args.fixed_cost
@@ -111,6 +116,10 @@ def main():
     parser.add_argument("--faces", type=int, default=128)
     parser.add_argument("--case", choices=("open", "terminal_wall"), default="open")
     parser.add_argument("--fixed-cost", action="store_true")
+    parser.add_argument(
+        "--linear-solver", choices=("cudss_vector", "cudss_inverse_chunk"),
+        help="Select the ADMM linear solver explicitly; otherwise use the CTBR Actor default.",
+    )
     parser.add_argument("--warmup", type=int, default=3)
     parser.add_argument("--repeats", type=int, default=20)
     parser.add_argument("--output", type=Path, required=True)

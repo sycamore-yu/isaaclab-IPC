@@ -22,6 +22,7 @@ from isaaclab_tasks.utils.hydra import resolve_task_config
 from tensordict import TensorDict
 
 import isaaclab_ipc.tasks  # noqa: F401
+from isaaclab_ipc.rl.ctbr_actor import CTBRMPCActor
 
 
 def _audit_snapshot(value):
@@ -489,6 +490,7 @@ def main():
         runner_config.max_iterations = agent_cfg["max_iterations"]
         runner = create_rsl_rl_runner(env, runner_config, str(args.output) if args.mode == "train" else None)
         runner.add_git_repo_to_log(__file__)
+        infos = None
         if args.checkpoint:
             infos = runner.load(str(args.checkpoint), map_location=device)
             if infos and "torch_rng" in infos and args.mode == "train":
@@ -497,6 +499,15 @@ def main():
                 np.random.set_state(infos["numpy_rng"])
             runner.current_learning_iteration += 1
         actor = runner.alg.get_policy()
+        if isinstance(actor, CTBRMPCActor):
+            checkpoint_actor_config = (
+                (infos or {}).get("runner_cfg", {}).get("actor", {}) if args.checkpoint else None
+            )
+            actor.record_checkpoint_linear_solver(checkpoint_actor_config, resolution="runner_configuration")
+            (args.output / "linear-solver-selection.json").write_text(json.dumps({
+                "checkpoint": str(args.checkpoint) if args.checkpoint else None,
+                **actor.solver_metadata()["linear_solver_selection"],
+            }, indent=2) + "\n")
         actor.fixed_cost = args.fixed_cost
         initial = {k: v.detach().clone() for k, v in actor.mlp.state_dict().items()}
         start = perf_counter()

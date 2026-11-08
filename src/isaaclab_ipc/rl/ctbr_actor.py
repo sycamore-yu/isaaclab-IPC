@@ -1,6 +1,7 @@
 """AC-MPC actor: observations -> 28N costs -> native nonlinear CTBR MPC."""
 
 from dataclasses import asdict, fields, replace
+from pathlib import Path
 
 import torch
 from rsl_rl.models import MLPModel
@@ -9,7 +10,11 @@ from rsl_rl.modules import MLP
 from isaaclab_ipc.assets.quadrotor import MASS
 from isaaclab_ipc.turbompc import ADMMConfig, SQPConfig, TorchMPC
 from isaaclab_ipc.turbompc.ctbr import CTBRConfig, CTBRQPBuilder
+from isaaclab_ipc.turbompc.native import _extension
 from isaaclab_ipc.turbompc.quadrotor import controls_to_actions
+
+
+DEFAULT_CTBR_QP_LINEAR_SOLVER = "cudss_inverse_chunk"
 
 
 class CTBRMPCActor(MLPModel):
@@ -25,6 +30,7 @@ class CTBRMPCActor(MLPModel):
         obs_normalization=False, distribution_cfg=None, cost_nodes=5, prediction_dt=0.1,
         model_config=None, compile_kernels=True, qp_iterations=4096, sqp_iterations=25,
         sqp_tolerance=1e-4, admm_tolerance=1e-5, sqp_linesearch="none",
+        qp_linear_solver=DEFAULT_CTBR_QP_LINEAR_SOLVER,
     ):
         if output_dim != 4 or obs_normalization:
             raise ValueError("CTBRMPCActor requires four physical actions and fixed feature scaling")
@@ -52,8 +58,17 @@ class CTBRMPCActor(MLPModel):
             max_iter=sqp_iterations, tolerance=sqp_tolerance, linesearch=sqp_linesearch,
             compile_kernels=compile_kernels, require_qp_convergence=False,
         )
-        self.admm_config = ADMMConfig(max_iter=qp_iterations, eps_abs=admm_tolerance, eps_rel=0.0)
+        self.admm_config = ADMMConfig(
+            max_iter=qp_iterations, eps_abs=admm_tolerance, eps_rel=0.0,
+            linear_solver=qp_linear_solver,
+        )
+        self.record_checkpoint_linear_solver(None, resolution="actor_configuration")
         self._model = self.ctbr_problem.dynamics()
+        if compile_kernels:
+            self._action_postprocess = torch.compile(
+                self._action_postprocess, fullgraph=True, dynamic=False,
+                options={"triton.cudagraphs": False},
+            )
         self._native_solver = None
         self.last_native_result = None
         self.last_result = None
@@ -91,6 +106,19 @@ class CTBRMPCActor(MLPModel):
             self.close()
             self.sqp_config = replace(self.sqp_config, linesearch=linesearch)
 
+    def _action_postprocess(self, controls, initial_state):
+        """Return a differentiable mean and physical diagnostics without gradients."""
+        mass = self.ctbr_problem.config.mass
+        mean = controls_to_actions(controls[:, 0], mass).float()
+        mean = mean.clamp(self.physical_action_lower, self.physical_action_upper)
+        with torch.no_grad():
+            applied = mean.double().clone()
+            applied[:, 0] *= mass
+            current = torch.cat((initial_state, applied), -1)
+            predicted = self._model(current)
+            acceleration = self._model.acceleration(current)
+        return mean, applied, predicted, acceleration
+
     def forward(self, obs, masks=None, hidden_state=None, stochastic_output=False):
         costs = None if self.fixed_cost else self.mlp(self.get_latent(obs))
         data, guess = self.ctbr_problem(obs, costs)
@@ -98,17 +126,12 @@ class CTBRMPCActor(MLPModel):
         self.last_native_result = result
         self.native_solve_calls += 1
         controls = result.controls
-        mean = controls_to_actions(controls[:, 0], self.ctbr_problem.config.mass).float()
-        mean = mean.clamp(self.physical_action_lower, self.physical_action_upper)
+        mean, applied, predicted, acceleration = self._action_postprocess(
+            controls, data.initial_state,
+        )
         self.distribution.update(mean)
         valid = obs["sfc_valid"].flatten().bool()
         solved = (result.status == 0) & valid
-        with torch.no_grad():
-            applied = mean.double().clone()
-            applied[:, 0] *= self.ctbr_problem.config.mass
-            current = torch.cat((data.initial_state, applied), -1)
-            predicted = self._model(current)
-            acceleration = self._model.acceleration(current)
         self.last_result = dict(
             model="ctbr",
             state=data.initial_state.detach(),
@@ -149,6 +172,21 @@ class CTBRMPCActor(MLPModel):
             self._native_solver = None
         self.last_native_result = None
 
+    def record_checkpoint_linear_solver(self, checkpoint_actor_config, *, resolution):
+        """Record selection provenance without changing a checkpoint or solver."""
+        present = checkpoint_actor_config is not None
+        field_present = present and "qp_linear_solver" in checkpoint_actor_config
+        recorded = checkpoint_actor_config.get("qp_linear_solver") if present else None
+        effective = self.admm_config.linear_solver
+        self._linear_solver_selection = {
+            "effective": effective,
+            "resolution": resolution,
+            "checkpoint_present": present,
+            "checkpoint_field_present": field_present,
+            "checkpoint_linear_solver": recorded,
+            "differs_from_recorded_checkpoint": effective != recorded if field_present else None,
+        }
+
     def solver_metadata(self):
         cfg = self.ctbr_problem.config
         return {
@@ -165,11 +203,13 @@ class CTBRMPCActor(MLPModel):
             "cost_coordinates": "reference_centered",
             "hard_constraints": ["input_bounds", "velocity_bounds", "sfc"],
             "native_solve_calls": self.native_solve_calls,
+            "native_extension_path": str(Path(_extension().__file__).resolve()) if self.native_solve_calls > 0 else None,
             "torch_version": torch.__version__,
             "torch_cuda": torch.version.cuda,
             "model": asdict(cfg),
             "sqp": asdict(self.sqp_config),
             "admm": asdict(self.admm_config),
+            "linear_solver_selection": dict(self._linear_solver_selection),
             "polish": None,
         }
 

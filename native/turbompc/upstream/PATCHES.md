@@ -25,3 +25,42 @@ Results recorded before the new IR2 build remain IR0 evidence. Rebuild the
 native extension before measuring the corrected path; build manifests record
 the source hashes and binary used. Do not describe this adapted Torch
 memory/stream binding file as byte-identical to upstream.
+
+## Explicit ADMM linear-solve backend
+
+The public default remains `cudss_vector`: one GENERAL/FULL cuDSS vector
+solve per ADMM iteration, with the original kernels, stopping tolerances,
+certificate checks, rho adaptation and host synchronization order.
+
+`cudss_inverse_chunk` is an explicit float64 option. For each QP factorization,
+cuDSS solves a column-major stacked identity with `TN` right-hand sides. Each
+independent batch matrix contributes a `TN`-by-`TN` inverse block. The same
+descriptors and workspace-owned buffers live from analysis to destruction.
+Every rho refactorization refreshes all inverse blocks before further ADMM
+iterations. No inverse is reused across QPs, and no matrix-type change,
+refinement step, tolerance change or fallback is added.
+
+One batch block then fuses the existing Gamma, inverse GEMV and post-solve
+device helpers. A chunk ends at the next termination, infeasibility, rho or
+iteration-budget event. Certificate duals are saved before the final body of
+the chunk; `x_old` is saved before every body. Completed rows preserve their
+terminal values. Projection, slack and log-barrier semantics are retained;
+log-barrier still has no hard-QP infeasibility certificate. The shared host
+code performs the original residual/status check and then rho adaptation.
+
+Workspace capacity includes the backend mode, dimensions and scalar type.
+Only the inverse backend allocates its two `B*TN*TN` buffers. Mode or capacity
+changes destroy the old descriptors before freeing their buffers. Python
+requires float64 CUDA tensors and verifies the extension capability tuple
+`supported_admm_linear_solvers` before creating an inverse workspace. A
+legacy extension remains usable for vector solves, but cannot silently
+accept an unsupported inverse request. The KKT backward solver and IR2 are
+unchanged.
+
+The isolated N5 prototype and event-boundary evidence are retained in
+`results/acmpc-native-pathcover-v1/cudss-inverse-chunk-v35-study/`. The
+production implementation uses generic `TN` formulas; the prototype's N5
+whitelist is removed. Production tests cover backend switching, independent
+outputs and streams, generic QPs, N2/N5/N10 CTBR problems and the actual CTBR
+low-diagonal/high-rho linear system. Prototype performance is separate from
+the production P0 and end-to-end acceptance gates.

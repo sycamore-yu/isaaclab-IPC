@@ -4,6 +4,11 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 
+enum class AdmmLinearSolver : int32_t {
+    CudssVector = 0,
+    CudssInverseChunk = 1,
+};
+
 // Configuration for the host-loop ADMM + cuDSS direct-solve kernel.
 struct ADMMCudssConfig {
     int32_t max_iter;            // Maximum ADMM iterations
@@ -24,6 +29,7 @@ struct ADMMCudssConfig {
     double  rho_max;             // Clamp for adaptive rho
     double  log_barrier_kappa;   // Log-barrier weight (0 for projection)
     bool    use_slack;           // use_slack_variables flag
+    AdmmLinearSolver linear_solver = AdmmLinearSolver::CudssVector;
 };
 
 // ---- f32 launcher ----

@@ -77,6 +77,11 @@ class ADMMConfig:
     log_barrier_kappa: float = 0.0
     use_slack: bool = False
     slack_weight: float = 0.0
+    linear_solver: str = "cudss_vector"
+
+    def __post_init__(self):
+        if self.linear_solver not in ("cudss_vector", "cudss_inverse_chunk"):
+            raise ValueError(f"Unknown ADMM linear solver: {self.linear_solver!r}")
 
 
 @dataclass(frozen=True)
@@ -151,7 +156,12 @@ class NativeADMM:
             raise ValueError("Use one NativeADMM instance per CUDA device")
         stream = torch.cuda.current_stream(self._device).cuda_stream
         if stream not in self._workspaces:
-            self._workspaces[stream] = _extension().AdmmWorkspace(self._device.index)
+            extension = _extension()
+            if self.config.linear_solver == "cudss_inverse_chunk" and self.config.linear_solver not in getattr(
+                extension, "supported_admm_linear_solvers", ()
+            ):
+                raise RuntimeError("The loaded TurboMPC extension does not support cudss_inverse_chunk; rebuild it")
+            self._workspaces[stream] = extension.AdmmWorkspace(self._device.index)
         workspace = self._workspaces[stream]
         if warm_start is None:
             warm = [

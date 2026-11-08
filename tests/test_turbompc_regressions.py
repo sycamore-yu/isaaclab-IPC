@@ -4,6 +4,7 @@ from dataclasses import fields, replace
 from pathlib import Path
 
 import numpy as np
+import pytest
 import torch
 
 import isaaclab_ipc.turbompc as turbo
@@ -57,7 +58,8 @@ def _tracking_qp():
     )
 
 
-def test_admm_workspace_reuse_across_two_streams_preserves_prior_outputs():
+@pytest.mark.parametrize("linear_solver", ["cudss_vector", "cudss_inverse_chunk"])
+def test_admm_workspace_reuse_across_two_streams_preserves_prior_outputs(linear_solver):
     qp = _tracking_qp()
     reversed_qp = replace(qp, q=-qp.q)
     caller = torch.cuda.current_stream(qp.q.device)
@@ -67,7 +69,9 @@ def test_admm_workspace_reuse_across_two_streams_preserves_prior_outputs():
     # successive solves; do not insert caller waits between the two streams.
     first_stream.wait_stream(caller)
     second_stream.wait_stream(caller)
-    solver = turbo.NativeADMM(turbo.ADMMConfig(eps_abs=1e-9, eps_rel=1e-9, max_iter=4096))
+    solver = turbo.NativeADMM(
+        turbo.ADMMConfig(eps_abs=1e-9, eps_rel=1e-9, max_iter=4096, linear_solver=linear_solver)
+    )
     try:
         with torch.cuda.stream(first_stream):
             first = solver.solve(qp)

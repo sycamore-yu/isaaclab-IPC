@@ -66,6 +66,7 @@ class CTBRActorCfg(RslRlMLPModelCfg):
     sqp_tolerance = 1e-4
     sqp_linesearch = "none"
     admm_tolerance = 1e-5
+    qp_linear_solver = "cudss_inverse_chunk"
 
 
 @configclass

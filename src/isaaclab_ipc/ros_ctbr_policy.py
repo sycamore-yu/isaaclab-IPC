@@ -19,12 +19,12 @@ from tensordict import TensorDict
 from .assets.quadrotor import MASS
 from .benchmark_config import load_case
 from .ctbr_navigation import PathCoverNavigation, position_sfc_violation
-from .rl.ctbr_actor import CTBRMPCActor
+from .rl.ctbr_actor import CTBRMPCActor, DEFAULT_CTBR_QP_LINEAR_SOLVER
 from .rl.ctbr_observation import goal_ctbr_observation
 from .turbompc.ctbr import CTBRConfig
 
 
-def load_ctbr_checkpoint(path):
+def load_ctbr_checkpoint(path, *, qp_linear_solver=None):
     checkpoint = torch.load(path, map_location="cpu", weights_only=False)
     actor_cfg = copy.deepcopy(checkpoint.get("infos", {}).get("runner_cfg", {}).get("actor", {}))
     class_name = actor_cfg.pop("class_name", None)
@@ -32,6 +32,10 @@ def load_ctbr_checkpoint(path):
         raise ValueError(f"Expected a native 28N CTBR checkpoint; received {class_name!r}")
     model = checkpoint["actor_state_dict"]["_extra_state"]["model"]
     actor_cfg["model_config"] = model
+    if qp_linear_solver is not None:
+        actor_cfg["qp_linear_solver"] = qp_linear_solver
+    else:
+        actor_cfg.setdefault("qp_linear_solver", DEFAULT_CTBR_QP_LINEAR_SOLVER)
     return checkpoint, actor_cfg, CTBRConfig(**model)
 
 
@@ -81,7 +85,7 @@ class CTBRController:
     """Shared actor and frontend contracts; no ROS objects or hidden PPO state."""
 
     def __init__(self, benchmark, *, policy, frontend="pathcover", checkpoint=None,
-                 device="cuda:0", max_planes=128, reference_speed=3.0):
+                 device="cuda:0", max_planes=128, reference_speed=3.0, qp_linear_solver=None):
         started = perf_counter()
         self.device = torch.device(device)
         self.reference_speed = float(reference_speed)
@@ -89,9 +93,15 @@ class CTBRController:
         self.frontend_name = frontend
         self.max_planes = 0 if frontend == "none" else max_planes
         saved, actor_cfg = None, {}
+        checkpoint_actor_config = None
         self.config = CTBRConfig(mass=MASS)
         if checkpoint:
-            saved, actor_cfg, self.config = load_ctbr_checkpoint(checkpoint)
+            saved, actor_cfg, self.config = load_ctbr_checkpoint(checkpoint, qp_linear_solver=qp_linear_solver)
+            checkpoint_actor_config = saved.get("infos", {}).get("runner_cfg", {}).get("actor", {})
+        else:
+            actor_cfg["qp_linear_solver"] = (
+                DEFAULT_CTBR_QP_LINEAR_SOLVER if qp_linear_solver is None else qp_linear_solver
+            )
         self.navigation = None
         if frontend == "pathcover":
             self.navigation = PathCoverNavigation(1, self.config,
@@ -111,6 +121,12 @@ class CTBRController:
         self.actor = CTBRMPCActor(sample, {"actor": ["policy"]}, "actor", 4, **actor_cfg).to(self.device)
         if saved is not None:
             self.actor.load_state_dict(saved["actor_state_dict"], strict=True)
+        selection_source = (
+            "runtime_override" if qp_linear_solver is not None else
+            "checkpoint" if checkpoint_actor_config is not None and "qp_linear_solver" in checkpoint_actor_config else
+            "ctbr_default"
+        )
+        self.actor.record_checkpoint_linear_solver(checkpoint_actor_config, resolution=selection_source)
         if policy == "acmpc" and saved is None:
             raise ValueError("Learned AC-MPC requires a checkpoint")
         self.actor.fixed_cost = policy == "fixed-ctbr"
@@ -196,7 +212,7 @@ def main(args=None):
                             checkpoint="", frontend="pathcover", device="cuda:0",
                             output_directory="results/marsim-ctbr", simulated_time=True,
                             frequency=100.0, replan_frequency=10.0, reference_speed=3.0,
-                            capture_reference_plans=False)
+                            capture_reference_plans=False, qp_linear_solver="")
             for key, value in defaults.items():
                 self.declare_parameter(key, value)
             self.options = p = {key: self.get_parameter(key).value for key in defaults}
@@ -206,7 +222,8 @@ def main(args=None):
                 raise ValueError("The CTBR contract is 100 Hz actuation and 10 Hz replanning")
             torch.set_num_threads(1)
             self.controller = CTBRController(p["benchmark"], policy=p["policy"], frontend=p["frontend"],
-                checkpoint=p["checkpoint"] or None, device=p["device"], reference_speed=p["reference_speed"])
+                checkpoint=p["checkpoint"] or None, device=p["device"], reference_speed=p["reference_speed"],
+                qp_linear_solver=p["qp_linear_solver"] or None)
             directory = Path(p["output_directory"])
             directory.mkdir(parents=True, exist_ok=True)
             self.directory = directory

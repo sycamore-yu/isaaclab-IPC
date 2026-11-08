@@ -78,7 +78,8 @@ def gpu_snapshot():
 def source_hashes():
     names = ("ctbr.py", "quadrotor.py", "dynamics.py", "solver.py", "native.py", "adjoint.py")
     return {
-        name: hashlib.sha256((ROOT / "src/isaaclab_ipc/turbompc" / name).read_bytes()).hexdigest() for name in names
+        **{name: hashlib.sha256((ROOT / "src/isaaclab_ipc/turbompc" / name).read_bytes()).hexdigest() for name in names},
+        "rl/ctbr_actor.py": hashlib.sha256((ROOT / "src/isaaclab_ipc/rl/ctbr_actor.py").read_bytes()).hexdigest(),
     }
 
 
@@ -97,13 +98,15 @@ def run(args):
     builder = CTBRQPBuilder(CTBRConfig(cost_nodes=args.nodes), compile_kernels=args.compile).to("cuda:0")
     model = builder.dynamics()
     sqp = SQPConfig(
-        max_iter=args.sqp_iterations, tolerance=args.sqp_tolerance, linesearch="merit", compile_kernels=args.compile
+        max_iter=args.sqp_iterations, tolerance=args.sqp_tolerance,
+        linesearch=getattr(args, "sqp_linesearch", "merit"), compile_kernels=args.compile,
     )
     admm = ADMMConfig(
         max_iter=args.qp_iterations,
         eps_abs=args.admm_tolerance,
         eps_rel=0.0,
         check_termination_every=args.check_termination_every,
+        linear_solver=getattr(args, "linear_solver", "cudss_vector"),
     )
     solver = TorchMPC(
         model, sqp, admm, constraints=builder.path_constraints() if args.acceleration_constraints else None
@@ -249,7 +252,9 @@ def main():
     parser.add_argument("--acceleration-constraints", action="store_true")
     parser.add_argument("--sqp-iterations", type=int, default=25)
     parser.add_argument("--sqp-tolerance", type=float, default=1e-4)
+    parser.add_argument("--sqp-linesearch", choices=("none", "merit"), default="none")
     parser.add_argument("--qp-iterations", type=int, default=4096)
+    parser.add_argument("--linear-solver", choices=("cudss_vector", "cudss_inverse_chunk"), default="cudss_vector")
     parser.add_argument("--admm-tolerance", type=float, default=1e-5)
     parser.add_argument("--check-termination-every", type=int, default=25)
     parser.add_argument("--warmup", type=int, default=3)

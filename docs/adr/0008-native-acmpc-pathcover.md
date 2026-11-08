@@ -206,6 +206,20 @@ Reuse native TurboMPC CUDA/cuDSS and its PyTorch adjoint. Keep dynamics and
 warm-start rollout on the GPU, batch environments, and compile fixed-shape
 tensor calculations. Do not recreate the JAX bridge or replace the solver.
 
+For small CTBR systems, an explicit `cudss_inverse_chunk` linear-solve mode
+reuses the same cuDSS GENERAL factorization to solve a fixed multiple-RHS
+identity matrix. Refresh the resulting batch-local inverse after every new QP
+or rho factorization. Apply it in FP64 inside a fused ADMM body until the next
+existing termination, infeasibility, or rho event. Preserve the single-step
+certificate snapshots, terminal rows, host checks, iteration limits and KKT
+IR2 derivative. This changes floating-point evaluation, so the new production
+mode needs its own numerical, gradient and PPO gates. The public TurboMPC
+default remains `cudss_vector`; CTBR selects its mode explicitly. Export and
+check native capabilities so an older library cannot silently ignore the new
+configuration. Workspace capacity includes the selected mode. Record an old
+checkpoint's training configuration separately from its resolved inference
+mode. Frozen-input gains do not establish the end-to-end planning budget.
+
 In 3D GCOPTER's main L-BFGS solve, retain the absolute gradient condition
 `||g||_inf / max(1, ||x||_inf) < 1e-5` and also allow
 `(||g||_inf / max(1, ||x||_inf)) / max(1, |J|) < 1e-7` for finite `J`.
