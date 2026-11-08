@@ -217,6 +217,11 @@ inline Closest triangleBox(const Triangle& triangle, const Box& box) {
         const Vec3 witness = triangleBoxWitness(triangle, box);
         return {0.0, witness, witness};
     }
+    // Exactly repeated vertices represent one point. Keep SAT/contact handling,
+    // validation and the downstream support certificate unchanged.
+    if ((triangle[0].array() == triangle[1].array()).all()
+        && (triangle[0].array() == triangle[2].array()).all())
+        return pointBox(triangle[0], box);
     Closest best;
     for (const auto& p : triangle) take(best, pointBox(p, box));
     const auto corners = vertices(box);
@@ -382,6 +387,30 @@ inline double boxSupportUpper(const Vec3& normal, const Box& box, const Vec3& ra
     const double support = detail::dotUpper(normal, corner);
     return zero ? support : detail::up(support + detail::ellipsoidSupportUpper(normal, radii));
 }
+
+// The normal and body radii are invariant across all remaining boxes of a cut.
+// Retain the original directed dot/add rounding for each box.
+class PreparedBoxSupport {
+    Vec3 normal_;
+    double ellipsoid_support_ = 0.0;
+    bool zero_;
+public:
+    PreparedBoxSupport(const Vec3& normal, const Vec3& radii)
+        : normal_(normal), zero_((radii.array() == 0.0).all()) {
+        if (!normal.allFinite() || !radii.allFinite()
+            || (!zero_ && !(radii.array() > 0.0).all()))
+            throw std::invalid_argument("Box support requires a finite normal and all-positive or zero radii");
+        if (!zero_) ellipsoid_support_ = detail::ellipsoidSupportUpper(normal_, radii);
+    }
+    double upper(const Box& box) const {
+        detail::validate(box);
+        Vec3 corner;
+        for (int i = 0; i < 3; ++i) corner[i] = normal_[i] >= 0.0 ? box.upper[i] : box.lower[i];
+        const double support = detail::dotUpper(normal_, corner);
+        return zero_ ? support : detail::up(support + ellipsoid_support_);
+    }
+};
+
 inline bool pointFree(const Vec3& p, const Box& box, const Vec3& radii) {
     return detail::clearance(std::array<Vec3, 1>{p}, box, radii).free;
 }

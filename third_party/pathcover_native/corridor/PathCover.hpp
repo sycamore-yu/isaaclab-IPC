@@ -132,6 +132,8 @@ inline void RISP(const std::vector<Eigen::Matrix<T, dim, 1>> &obstacle_pts,
         }
     };
 
+    const bool rounded_body = body_radii.maxCoeff() > T(0);
+
     // Compact indices instead of copying and moving every XYZ point on each cut.
     std::vector<std::size_t> remaining(obstacle_pts.size());
     std::iota(remaining.begin(), remaining.end(), 0);
@@ -162,7 +164,7 @@ inline void RISP(const std::vector<Eigen::Matrix<T, dim, 1>> &obstacle_pts,
                 const auto plane = seedHullPlane(*seed_region, centre, half, alpha, body_radii);
                 normal = plane.first;
                 offset = plane.second;
-            } else if (body_radii.maxCoeff() > T(0)) {
+            } else if (rounded_body) {
                 const std::vector<Eigen::Matrix<T, 3, 1>> point_region(3, seed);
                 const auto plane = seedHullPlane(point_region, centre, half, alpha, body_radii);
                 normal = plane.first;
@@ -172,18 +174,22 @@ inline void RISP(const std::vector<Eigen::Matrix<T, dim, 1>> &obstacle_pts,
         normals.push_back(normal);
         offsets.push_back(offset);
         const auto absolute_normal = normal.cwiseAbs().eval();
+        std::optional<pathcover_clearance::PreparedBoxSupport> cut_support;
+        if constexpr (dim == 3) {
+            if (rounded_body) cut_support.emplace(
+                -normal.template cast<double>(), body_radii.template cast<double>());
+        }
         remaining.erase(std::remove_if(remaining.begin(), remaining.end(),
             [&](std::size_t index) {
                 if constexpr (dim == 3) {
-                    if (body_radii.maxCoeff() > T(0)) {
+                    if (rounded_body) {
                         const auto widths = halfwidth(index);
                         const pathcover_clearance::Box box{
                             (obstacle_pts[index] - widths).template cast<double>(),
                             (obstacle_pts[index] + widths).template cast<double>()};
                         // Removal needs the same conservative support certificate
                         // as the selected cut, without another closest-pair solve.
-                        return -pathcover_clearance::boxSupportUpper(
-                            -normal.template cast<double>(), box, body_radii.template cast<double>()) > double(offset);
+                        return -cut_support->upper(box) > double(offset);
                     }
                 }
                 return normal.dot(obstacle_pts[index]) - absolute_normal.dot(halfwidth(index)) > offset;

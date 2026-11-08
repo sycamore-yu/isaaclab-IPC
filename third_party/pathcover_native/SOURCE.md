@@ -774,6 +774,30 @@ license; embedded geometry utilities retain their original notices.
     allocation replay or complete frontend performance. Evidence:
     `grid-projection-v29-benchmark.json`, including all samples and source limits.
 
+54. RISP prepares the body-ellipsoid support once for each generated cut, then
+    reuses that value while removing remaining raw boxes. Each box still uses
+    the same validation, sign-selected corner, directed dot-product rounding
+    and final outward addition as `boxSupportUpper`. The normal and body axes
+    are invariant within that loop; no separation threshold or removal order
+    changes. After the original triangle/AABB SAT has established separation,
+    three exactly equal vertices use the existing point/AABB closest pair.
+    Validation, contact handling and the downstream support certificate remain
+    unchanged. Near-equal vertices do not enter this shortcut.
+    The isolated comparison preserved output bit patterns and rejection classes
+    on 146 point and 146 support cases. Three captured Newton V29 inputs also
+    reproduced the saved normalized SFC/local goal, and all candidates preserved
+    raw/reduced planes, seeds and obstacle-removal order byte for byte. With
+    three warmups and twenty interleaved measurements per input, the combined
+    pathCover component's medians changed from 18.109/49.183/29.945 ms to
+    8.288/22.847/14.365 ms for calls 1/13/30. These timings cover RISP, path
+    advancement and Qhull reduction; they exclude mapping, search, motion-seed
+    selection, output normalization and MINCO. They are not full frontend or
+    physical-task latency results. The implementation adds no timers or counters.
+    Evidence: `risp-constants-v30-study.json`, with the complete arithmetic,
+    geometry and timing records under `build/pathcover_native/risp-constants-v30`.
+    Permanent prepared-support and exact repeated-point contracts supplement
+    the existing clearance/geometry tests.
+
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online
 execution-trajectory reintegration or recovery state machine is added.
