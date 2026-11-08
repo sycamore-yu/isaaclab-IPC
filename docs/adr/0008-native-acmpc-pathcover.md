@@ -450,6 +450,18 @@ certificate; an approximate nearest distance alone cannot accept a segment.
 Binary64 normal-adjacent steps and conservative cached support classification
 reduce arithmetic cost without weakening that certificate.
 
+Within one endpoint connection, reuse the result of a repeated segment query
+from the fixed endpoint to the same actual fine-grid ancestor. Carry the node
+identifier from parent reconstruction; never infer it from rounded coordinates.
+Only simplification queries with the original endpoint as their first vertex
+may use the per-call unknown/false/true table. The actual endpoint and final
+coarse-cell center have no cacheable identifier. Keep direction, exact geometry,
+Dijkstra updates, anchor order and path length arithmetic unchanged. The table
+does not survive the connection, so it cannot reuse an answer from another map
+or endpoint. A real 236-anchor input has 476 repeated queries and preserves all
+anchors and paths bitwise; its measured complete-connection reduction is 8.587 ms
+at the paired median. That one-input result still requires physical evaluation.
+
 Use GCOPTER relative cost tolerance `1e-5`. The previous `1e-4` stop produced
 one actual initial pitch-rate violation among 944 complete Dense references.
 All 944 frozen inputs pass the unchanged physical-quality comparison at the

@@ -10,6 +10,7 @@ SOURCE = r"""
 #include "pathcover_endpoint.h"
 #include "pathcover_grid.h"
 #include "corridor/PathCover.hpp"
+#include <cstring>
 #include <iostream>
 
 using V = Eigen::Vector3d;
@@ -135,6 +136,47 @@ int main() {
     const auto bridge=connect(V(.15,.18,.18),bridge_fine,bridge_coarse,1.0);
     require(bridge.anchors.size()==2,26);
     require(bridge.anchors[0].coarse_index.x()==1 && bridge.anchors[1].coarse_index.x()==3,27);
+
+    // Shared endpoint prefixes cache both outcomes only for actual fine nodes.
+    // Reuse the isolated same-cell fine/coarse fixture; coarse points carry -1.
+    {
+        auto raw=makeGrid({I(0,0,10)});
+        std::vector<I> inflated;
+        for(int z=-2;z<=2;++z) for(int y=-2;y<=2;++y) for(int x=-2;x<=2;++x)
+            inflated.push_back(I(0,0,10)+I(x,y,z));
+        auto raster=makeGrid(inflated);
+        FineGeometry cache_fine(raster,.1,V(-1,-1,0),V(1,1,2),&raw,V::Constant(.08));
+        const V start(.19,-.35,1.05), fine_target=cache_fine.center(I(1,2,10)),
+                detour=cache_fine.center(I(2,2,10)), coarse_target(.19,.29,1.05);
+        require(!cache_fine.segmentFree(start,fine_target)
+                && cache_fine.segmentFree(start,coarse_target),28);
+        require(cache_fine.centerFree(I(1,2,10)),29);
+        require(((fine_target.array()/.1).floor()
+                 == (coarse_target.array()/.1).floor()).all(),30);
+        const auto samePath=[](const std::vector<V>& a,const std::vector<V>& b) {
+            if(a.size()!=b.size()) return false;
+            for(std::size_t i=0;i<a.size();++i)
+                if(std::memcmp(a[i].data(),b[i].data(),3*sizeof(double))!=0) return false;
+            return true;
+        };
+        const std::vector<V> branch{start,detour,fine_target};
+        const std::vector<int> branch_ids{-1,1,0};
+        std::vector<int8_t> known(2,-1);
+        const auto direct=simplify(branch,cache_fine);
+        const auto first=simplify(branch,cache_fine,&branch_ids,&known);
+        require(samePath(direct,first) && known[0]==0 && known[1]==1,31);
+        // The cached false is start->fine_target, not detour->fine_target.
+        // A repeated prefix must reuse false and true without changing its path.
+        const auto repeated=simplify(branch,cache_fine,&branch_ids,&known);
+        require(samePath(direct,repeated) && known[0]==0 && known[1]==1,32);
+        const std::vector<V> path{start,detour,fine_target,coarse_target};
+        const std::vector<int> ids{-1,1,0,-1};
+        const auto uncached=simplify(path,cache_fine);
+        const auto cached=simplify(path,cache_fine,&ids,&known);
+        require(samePath(uncached,cached),33);
+        require(cached.size()==2 && samePath(cached,{start,coarse_target}),34);
+        require(known[0]==0 && known[1]==1,35);
+    }
     std::cout << "fine geometry, bounded links, ceiling and bent connection passed; Dense anchors "
               << connected.anchors.size() << ", visited " << connected.visited_cells << "\n";
 }

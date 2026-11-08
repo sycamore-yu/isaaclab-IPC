@@ -221,13 +221,27 @@ struct Connections {
     bool endpoint_in_coarse_free_cell = false;
 };
 
-inline std::vector<Point> simplify(const std::vector<Point>& path, const FineGeometry& fine) {
+inline std::vector<Point> simplify(const std::vector<Point>& path, const FineGeometry& fine,
+                                   const std::vector<int>* fine_node_ids = nullptr,
+                                   std::vector<int8_t>* endpoint_visibility = nullptr) {
     std::vector<Point> result;
     if (path.empty()) return result;
     result.push_back(path.front());
+    // Only an actual fine-node tag is eligible. Endpoint/coarse vertices carry
+    // -1; never infer this tag by rounding coordinates or reverse the segment.
+    const auto visible = [&](std::size_t from, std::size_t to) {
+        if (from == 0 && fine_node_ids && endpoint_visibility
+            && (*fine_node_ids)[to] >= 0) {
+            auto& known = (*endpoint_visibility)[(*fine_node_ids)[to]];
+            if (known < 0)
+                known = fine.segmentFree(path[from], path[to]) ? 1 : 0;
+            return known != 0;
+        }
+        return fine.segmentFree(path[from], path[to]);
+    };
     for (std::size_t i = 0; i + 1 < path.size();) {
         std::size_t next = path.size() - 1;
-        while (!fine.segmentFree(path[i], path[next])) {
+        while (!visible(i, next)) {
             if (next == i + 1) {
                 throw std::logic_error("Endpoint connector contains an invalid fine-grid edge");
             }
@@ -359,13 +373,22 @@ inline Connections connect(const Point& endpoint, const FineGeometry& fine,
     }
     // Reconstruct only one shortest local-grid route per coarse anchor, then
     // remove unnecessary turns using the selected exact geometry segment test.
+    // Each connect owns this result table; no map/endpoint state survives.
+    std::vector<int8_t> endpoint_visibility(anchor_nodes.empty() ? 0 : count, -1);
     for (const auto& anchor : anchor_nodes) {
         std::vector<Point> reverse;
-        for (int node = anchor.node; node >= 0; node = parents[node]) reverse.push_back(fine.center(globalIndex(node)));
+        std::vector<int> reverse_nodes;
+        for (int node = anchor.node; node >= 0; node = parents[node]) {
+            reverse.push_back(fine.center(globalIndex(node)));
+            reverse_nodes.push_back(node);
+        }
         std::vector<Point> path{endpoint};
+        std::vector<int> path_nodes{-1};
         path.insert(path.end(), reverse.rbegin(), reverse.rend());
+        path_nodes.insert(path_nodes.end(), reverse_nodes.rbegin(), reverse_nodes.rend());
         path.push_back(coarse.center(anchor.coarse_index));
-        path = simplify(path, fine);
+        path_nodes.push_back(-1);
+        path = simplify(path, fine, &path_nodes, &endpoint_visibility);
         double length = 0.0;
         for (std::size_t i = 1; i < path.size(); ++i) length += (path[i] - path[i-1]).norm();
         result.anchors.push_back({anchor.coarse_index, std::move(path), length});

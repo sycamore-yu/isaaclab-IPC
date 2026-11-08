@@ -1093,6 +1093,44 @@ license; embedded geometry utilities retain their original notices.
     `gcopter-lazy-flatness-v36/contracts-summary.json` and
     `gcopter-lazy-flatness-v36/certificate-and-contracts.md`.
 
+70. V37 reuses repeated endpoint-to-fine-node visibility results while simplifying
+    the anchor paths from one bounded endpoint connection. The endpoint is fixed
+    for that call. Only the first segment of a simplified path can use the table;
+    keys are actual node IDs carried from the unchanged parent chain. Endpoint
+    and coarse-center vertices carry -1 and never use a rounded-coordinate key.
+    Both true and false results are retained. The table is local to connect;
+    geometry, safety distance, neighbours, search order, anchor ordering, path
+    lengths and termination are unchanged. No compiler option changes accompany
+    this reuse. The existing segment predicate reads fixed geometry and uses
+    local segment-box arithmetic, without history-dependent support hints.
+
+    A new independent V36 diagnostic capture of seq230 supplied complete raw,
+    inflated and coarse occupancy. This was not a historical saved-map replay.
+    Nine export checks passed; all 79 common non-timing fields matched the formal
+    run. Reconstructing the exact occupied integer sets produced the original
+    236/1 anchors and 6118 visited cells. The selected two-point start prefix
+    matched the captured returned path bitwise. The internal bitmap storage
+    window was reconstructed because the public API did not export its layout.
+    All reconstructed baseline/candidate anchor order, cells, paths and lengths
+    matched bitwise, as did visited counts and ordinary-endpoint flags.
+
+    The baseline executed 1347 simplify segment queries. Of 792 eligible prefix
+    queries, 476 repeated an existing fine-node target: 53 true and 423 false.
+    Coordinate-bit and result mismatches were both zero. Three synthetic complete
+    connector comparisons, the fine/coarse tag distinction and the unchanged
+    permanent endpoint C++ contract passed. Twenty interleaved complete start
+    plus goal connect pairs reduced p50 from 32.204791 to 23.615257 ms and p95
+    from 32.454423 to 23.716130 ms. All 20 pairs improved; the paired median saving
+    was 8.586677 ms (26.671%). The two warmup pairs and all measured outputs were
+    bitwise identical. All per-call table and node-ID allocations were timed;
+    fixture I/O and bitmap reconstruction were excluded. The baseline round-18
+    tail of 35.560643 ms remains in the statistics. These local measurements do
+    not establish full-run planning p95. The existing permanent test now also
+    checks true/false prefix reuse, direction scope and an uncached coarse point
+    in the same fine cell; its integrated execution remains pending here.
+    Evidence: `endpoint-prefix-v37/report.{json,md}`, raw stdout and completion
+    records, plus `build/pathcover-endpoint-prefix-v37/candidate.patch`.
+
 V33 was published from `86ca04f` with native SHA256
 `b64deaa459be21f1d2aa65786341263e26caf6919d18bac61e4fc35777347b8d`.
 Newton passed 35/35 MPC solves and 36/36 complete references. Dense completed
