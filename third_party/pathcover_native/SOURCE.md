@@ -926,12 +926,88 @@ license; embedded geometry utilities retain their original notices.
     budget. Evidence: `gcopter-perf-v31/{report.md,benchmark.json,failure-contract.json}`
     and the continuous-max success/failure diagnostic contracts.
 
-Items 55–60 record selected V31 changes and their local evidence, not publication
-or complete V31 acceptance. The last measured Dense end-to-end planning p95 is
-still V30's 282.285 ms. The positive local-RISP extent and tighter stopping also
-change CTBR training factories; V31 A0 is to be trained again. The audited V29
-checkpoint keeps its historical training provenance and is not relabeled V31.
-See `docs/acmpc-native-validation.md` for stage and run boundaries.
+61. V32 removes repeated endpoint visibility work without changing the local
+    graph or its ordering. Simplification tests each candidate segment once;
+    an anchor candidate is geometrically checked only when its length can improve
+    the already valid anchor. Neighbor expansion still runs for every popped
+    node. Three synthetic connector fixtures retained every anchor, parent-derived
+    path, length and visited count bitwise. Two nonempty cases reduced p50 from
+    8.451/4.245 to 7.372/3.532 ms; the empty-anchor case increased from 3.544 to
+    3.574 ms and is retained as a negative result. FineGeometry also reuses item
+    55's directed adjacent-value helper for its raster bounds. With the first
+    change already present, p50 changed from 7.257/3.532/3.537 to
+    6.080/3.183/3.235 ms, with the same exact outputs. Zero, subnormal and special
+    values keep the original nextafter behavior. These fixtures are not a Dense
+    map replay. Evidence: `endpoint-reuse-v32-study.json` and
+    `endpoint-bitstep-v32-study.json`; the latter retains its initial harness
+    compilation failure and the corrected shared-header harness.
+
+62. The V32 build uses `-mpopcnt` only for `voxel_bit_grid.cpp`. This requires an
+    x86 CPU with POPCNT, verified on the measured Xeon Silver 4210R. Other
+    translation units and floating-point compiler options retain their original
+    targets. The per-source option is part of `configuration.json`, so an older
+    bitmap object cannot be mistaken for the optimized build. On the archived
+    Dense V28 inflated bitmap (154,880 words), twenty interleaved CPU pairs gave
+    p50 2.712 to 1.281 ms for extent, padded copy and clipped merge combined.
+    Windows, counts and complete bitmap hashes agreed. This comparison neither
+    executes dilation nor reconstructs a historical raw map. See
+    `map-pipeline-v32/report.md` and `popcnt-bitmap-benchmark.json` in that directory.
+
+63. In S3 continuous-position mode, V32 evaluates P/V/A/J jointly by Horner at
+    the existing quadrature nodes. Derivative coefficients are prepared once per
+    piece, and the original coefficient-gradient basis is built only when the
+    existing exact-zero-contribution branch does not return early. Actual
+    coefficient-premultiplication overflow or a nonfinite Horner result uses
+    the original expression. No numerical magnitude threshold is added.
+    Horner can also avoid an overflow of an original intermediate power, so
+    equivalence for all IEEE-754 inputs is not asserted. Objective terms,
+    quadrature, continuous SFC extrema, bounds and optimizer stopping stay fixed.
+    Three frozen Dense V31 problems (691/712/649) reproduced the baseline exactly;
+    candidate full-reference quality passed all three. Twenty paired optimize
+    measurements per problem gave median candidate/baseline ratios
+    0.857/0.899/0.867. Floating evaluation changes optimization paths: objective
+    relative changes were -1.42e-6, +2.18e-5 and -5.52e-4, not bitwise equivalence.
+    Fixed-input and full-MINCO finite differences, active dynamic penalties and
+    an actual derivative-coefficient overflow case are recorded in
+    `quadrature-v32/report.json`. Final-iterate SFC finite differences that crossed
+    the narrow smoothing interval are retained separately from the isolated
+    smooth-gradient checks. These are local numerical and timing results.
+
+64. V32 skips a reverse-XY relaxation when the predecessor's retained distance
+    is already at most the popped distance. Validated edge and potential costs
+    are nonnegative, so that candidate cannot improve the predecessor. Other
+    candidates retain their original expression, queue and neighbor order.
+    On one archived Dense V19 potential field, all 26,400 XY distances and all
+    3,494 discovered DMP states, the 249-node path and its cost were bitwise
+    identical. Twenty interleaved complete rebuilds gave p50/p95
+    8.512/8.530 to 8.008/8.043 ms. This includes validation, projection, seeds,
+    allocation and reverse search; it is not V31 online performance. Evidence:
+    `dmp-v32/xy-pre-rejection-study.{json,md}`.
+
+65. V32 lets the existing grid projector and raw-box compressor reserve their
+    device/pinned buffers geometrically. Each of their four ensure functions
+    uses max(required, twice the previous capacity), with the multiplication
+    limited by SIZE_MAX/sizeof(T). Logical counts, streams, kernels, transfers
+    and outputs are unchanged. Retained capacity stays below twice the largest
+    request; the existing allocate-before-free order also increases occasional
+    peak memory. Ten paired artificial twelve-window growth sequences reduced
+    total p50 from 112.345 to 78.900 ms, device allocations from 112 to 49 and
+    pinned allocations from 39 to 18. All 288 measured/warm step outputs matched.
+    The single-step tail worsened: across 120 measured updates per arm, p95 rose
+    from 16.705 to 19.563 ms and the maximum from 17.501 to 22.167 ms. Larger
+    boundary allocations caused that regression. Historical Dense capacity
+    crossings were not captured; cumulative savings do not establish an online
+    p95 improvement. V32 must measure the real task with this candidate. See
+    `map-pipeline-v32/report.md` and its capacity-growth JSON records. No device
+    view, stream handoff or new memory fallback is introduced.
+
+V31 was published from `e8cc9e5`. Newton passed 35/35 MPC solves and 36/36 complete
+references; Dense completed 2/2 waypoints with 959/959 solves and complete
+references passing the existing quality thresholds. Dense planning p95 was
+123.692329763 ms, so the 100 ms gate still failed. V32 local changes above do not
+establish a new end-to-end result. The audited V29 checkpoint retains its old
+training provenance; fresh matched A0/A2 training is still required. See
+`docs/acmpc-native-validation.md` for stage and run boundaries.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online

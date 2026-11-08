@@ -254,8 +254,10 @@ Retain the rejected uniform L-BFGS tolerance change and its 19 failures among
 Batch position-plane projections while preserving the original three-term dot
 order and face-order cost/gradient accumulation. Reuse one buffer per piece;
 do not allocate per quadrature node. This independent arithmetic optimization
-retains the frozen numerical outputs. Keep the existing portable CPU build flags;
-the measured native-instruction target did not improve the main workload.
+retains the frozen numerical outputs. Keep the existing floating-point CPU build
+flags; the measured broad native-instruction target did not improve the main
+workload. V32 separately enables integer POPCNT for the bitmap translation unit
+on the verified x86 host and records that requirement in the build manifest.
 
 Remove the old CTBR reference governor, jerk recovery coupling and duplicate
 online execution-trajectory acceptance from the new route. Solver residuals,
@@ -444,6 +446,15 @@ trajectory. Keep the continuous position objective, dynamic quadrature,
 gradients and finite-value checks in every objective evaluation. Preserve
 failure diagnostics over the same visited pieces. The integral position mode
 retains its existing quadrature path.
+
+In S3 continuous-position mode, evaluate P/V/A/J jointly by Horner and defer
+derivative-basis construction past the existing exact-zero-contribution branch.
+Use the original expression if a newly precomputed derivative coefficient or
+the Horner result is nonfinite. This is an arithmetic optimization, not a new
+acceptance threshold. Different floating-point reduction order can change the
+nonconvex optimizer path and intermediate-overflow behavior. Preserve the actual
+finite-value checks and independently validate the resulting complete references.
+The integral mode and continuous SFC extremum calculation retain their old path.
 
 ## Validation
 

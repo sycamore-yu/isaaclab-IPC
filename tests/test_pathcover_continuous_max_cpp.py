@@ -159,6 +159,97 @@ void setup_diagnostic_problem(Solver& solver) {
     solver.setContinuousMaxPositionPenalty(true);
     solver.enableInitialForce(Eigen::Vector3d::UnitZ(),0,22.0725,.75*9.81);
 }
+Evaluation dynamic_penalty(const Coeff& c,double duration,bool drag=false,bool continuous=true) {
+    Evaluation result;
+    flatness::FlatnessMap map;
+    map.reset(.75,9.81,drag?.1:0.,drag?.12:0.,drag?.03:0.,.001);
+    Eigen::VectorXd times=Eigen::VectorXd::Constant(1,duration), bounds(5), weights(5);
+    Eigen::VectorXi indices=Eigen::VectorXi::Zero(1);
+    // These synthetic limits activate every dynamic penalty. Position weight
+    // is zero to isolate the quadrature whose evaluation order changed.
+    bounds << 1.,.02,.08,7.,7.5;
+    weights << 0.,100.,1e4,1e4,1e4;
+    const Solver::PolyhedraH polygons{box(-1.,3.)};
+    if (drag)
+        Solver::attachPenaltyFunctional<false>(times,c,indices,polygons,.01,64,
+            bounds,weights,map,result.metrics,1e-6,polygons,result.cost,result.time,result.coeff,continuous);
+    else
+        Solver::attachPenaltyFunctional<true>(times,c,indices,polygons,.01,64,
+            bounds,weights,map,result.metrics,1e-6,polygons,result.cost,result.time,result.coeff,continuous);
+    return result;
+}
+void dynamic_derivatives() {
+    Coeff c;
+    c.col(0) << 0,1.6,.3,.2,-.07,.02;
+    c.col(1) << .2,-.8,.6,-.15,.04,-.005;
+    c.col(2) << 1,.3,.1,.04,-.02,.002;
+    constexpr double duration=.7, step=1e-6;
+    for (bool drag : {false,true}) {
+        const auto center=dynamic_penalty(c,duration,drag);
+        require(center.metrics.finite && center.coeff.allFinite() && center.time.allFinite(),
+                "finite dynamic penalty rejected");
+        require(center.metrics.velocitySquared>1. && center.metrics.rateSquared>.02*.02 &&
+                center.metrics.tilt>.08 && center.metrics.maxThrust>7.5,
+                "dynamic fixture left a penalty inactive");
+        for (int trial=0;trial<4;++trial) {
+            Coeff direction;
+            for (int row=0;row<6;++row) for(int axis=0;axis<3;++axis)
+                direction(row,axis)=std::sin(.31+1.3*row+2.1*axis+.7*trial);
+            direction.normalize();
+            const double numeric=(dynamic_penalty(c+step*direction,duration,drag).cost-
+                                  dynamic_penalty(c-step*direction,duration,drag).cost)/(2*step);
+            near(numeric,center.coeff.cwiseProduct(direction).sum(),2e-6,
+                 "dynamic coefficient derivative");
+        }
+        const double numeric=(dynamic_penalty(c,duration+step,drag).cost-
+                              dynamic_penalty(c,duration-step,drag).cost)/(2*step);
+        near(numeric,center.time(0),2e-6,"dynamic explicit-time derivative");
+    }
+}
+void full_objective_derivatives() {
+    Solver solver;
+    setup_diagnostic_problem(solver);
+    Eigen::VectorXd x(solver.temporalDim+solver.spatialDim+1);
+    Eigen::Map<Eigen::VectorXd> tau(x.data(),solver.temporalDim);
+    Eigen::Map<Eigen::VectorXd> xi(x.data()+solver.temporalDim,solver.spatialDim);
+    solver.applyInitialForce(solver.initialForce.etaGuess);
+    Solver::setInitial(solver.shortPath,solver.allocSpeed,solver.pieceIdx,solver.points,solver.times);
+    require(solver.initializeTimeScale()>=0,"full derivative fixture initialization failed");
+    Solver::backwardT(solver.times,tau);
+    Solver::backwardP(solver.points,solver.vPolyIdx,solver.vPolytopes,xi);
+    x(x.size()-1)=solver.initialForce.etaGuess;
+    Eigen::VectorXd gradient(x.size());
+    const double cost=Solver::costFunctional(&solver,x,gradient);
+    require(std::isfinite(cost) && gradient.allFinite(),"full derivative fixture is nonfinite");
+    constexpr double step=1e-6;
+    for (int trial=0;trial<4;++trial) {
+        Eigen::VectorXd direction(x.size()),unused(x.size());
+        for(int i=0;i<direction.size();++i) direction(i)=std::sin(.8+.6*i+1.2*trial);
+        direction.normalize();
+        const double numeric=(Solver::costFunctional(&solver,x+step*direction,unused)-
+                              Solver::costFunctional(&solver,x-step*direction,unused))/(2*step);
+        near(numeric,gradient.dot(direction),2e-6,"full MINCO/free-force objective derivative");
+    }
+}
+void derivative_coefficient_overflow() {
+    Coeff c=Coeff::Zero();
+    c(0,2)=1.; c(5,0)=std::numeric_limits<double>::max()/20.;
+    require(!std::isfinite(60.*c(5,0)),"overflow fixture does not overflow derivative premultiplication");
+    // On this tiny interval the original time-scaled derivatives remain finite.
+    // Integral mode keeps that original expression; position weight is zero.
+    const auto original=dynamic_penalty(c,1e-80,false,false);
+    const auto selected=dynamic_penalty(c,1e-80,false,true);
+    require(original.metrics.finite && selected.metrics.finite &&
+            std::isfinite(original.cost) && std::isfinite(selected.cost) &&
+            original.coeff.allFinite() && selected.coeff.allFinite() &&
+            original.time.allFinite() && selected.time.allFinite(),
+            "new derivative premultiplication hid a finite original evaluation");
+    require(original.cost==selected.cost &&
+            (original.coeff.array()==selected.coeff.array()).all() &&
+            (original.time.array()==selected.time.array()).all() &&
+            (original.metrics.values().tail<5>().array()==selected.metrics.values().tail<5>().array()).all(),
+            "derivative-overflow branch did not retain the original expression");
+}
 double quadrature_sfc(const Trajectory<5>& trajectory, const Solver& solver,
                       const Solver::PolyhedraH& corridors) {
     // Independently evaluate the returned/trial polynomial through Piece::getPos.
@@ -204,8 +295,9 @@ void finalized_quadrature_diagnostics(bool iteration_limit) {
     const double shifted=quadrature_sfc(inspected,solver,solver.penaltyPolytopes);
     near(metrics.sfc,original,1e-12,"final SFC diagnostic differs from independent quadrature");
     require(shifted-original>.01,"fixture does not distinguish original and inward-offset planes");
-    // The unchanged integral evaluator remains an exact oracle for all six
-    // diagnostic fields on the same MINCO polynomial; its objective is ignored.
+    // The unchanged integral evaluator is an independent oracle on the same
+    // polynomial. Horner changes the rounding order of dynamic diagnostics;
+    // the final SFC diagnostic still uses the original quadrature expression.
     flatness::FlatnessMap map;
     map.reset(.75,9.81,0,0,0,.001);
     Solver::ConstraintMetrics integral_metrics;
@@ -216,8 +308,11 @@ void finalized_quadrature_diagnostics(bool iteration_limit) {
         solver.getPiecePolytopeIndices(),solver.penaltyPolytopes,solver.smoothEps,solver.integralRes,
         solver.magnitudeBd,solver.penaltyWt,map,integral_metrics,solver.positionSmoothEps,
         solver.hPolytopes,ignored_cost,grad_time,grad_coeff,false);
-    require((metrics.values().array()==integral_metrics.values().array()).all() &&
-            metrics.finite==integral_metrics.finite,"final QUALITY differs from original quadrature");
+    require(metrics.sfc==integral_metrics.sfc && metrics.finite==integral_metrics.finite,
+            "final SFC/finite diagnostic differs from original quadrature");
+    const auto actual=metrics.values(), expected=integral_metrics.values();
+    for(int i=1;i<actual.size();++i)
+        near(actual(i),expected(i),1e-12,"final dynamic QUALITY differs from original quadrature");
 }
 int main(int argc,char** argv) {
     try {
@@ -228,6 +323,9 @@ int main(int argc,char** argv) {
         else if(mode=="legacy") legacy_and_templates();
         else if(mode=="success_diagnostics") finalized_quadrature_diagnostics(false);
         else if(mode=="failure_diagnostics") finalized_quadrature_diagnostics(true);
+        else if(mode=="dynamic_derivatives") dynamic_derivatives();
+        else if(mode=="full_derivatives") full_objective_derivatives();
+        else if(mode=="derivative_overflow") derivative_coefficient_overflow();
         else throw std::runtime_error("unknown contract");
     } catch(const std::exception& error) {
         std::cerr<<error.what()<<'\n'; return 1;
@@ -261,7 +359,8 @@ def continuous_contract(tmp_path_factory):
 
 
 @pytest.mark.parametrize(
-    "mode", ["polynomials", "derivatives", "legacy", "success_diagnostics", "failure_diagnostics"]
+    "mode", ["polynomials", "derivatives", "legacy", "success_diagnostics", "failure_diagnostics",
+             "dynamic_derivatives", "full_derivatives", "derivative_overflow"]
 )
 def test_continuous_position_contract(continuous_contract, mode):
     completed = subprocess.run([str(continuous_contract), mode], capture_output=True, text=True)

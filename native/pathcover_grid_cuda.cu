@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -23,11 +24,14 @@ template<class T> struct DeviceBuffer {
     ~DeviceBuffer() { if (data) cudaFree(data); }
     void ensure(std::size_t count) {
         if (capacity >= count) return;
+        const std::size_t max_capacity = std::numeric_limits<std::size_t>::max() / sizeof(T);
+        const std::size_t reserve = capacity <= max_capacity / 2
+            ? std::max(count, 2 * capacity) : count;
         T* fresh = nullptr;
-        checked(cudaMalloc(reinterpret_cast<void**>(&fresh), count * sizeof(T)), "allocate grid projection buffer");
+        checked(cudaMalloc(reinterpret_cast<void**>(&fresh), reserve * sizeof(T)), "allocate grid projection buffer");
         if (data) cudaFree(data);
         data = fresh;
-        capacity = count;
+        capacity = reserve;
     }
 };
 
@@ -37,11 +41,14 @@ template<class T> struct PinnedBuffer {
     ~PinnedBuffer() { if (data) cudaFreeHost(data); }
     void ensure(std::size_t count) {
         if (capacity >= count) return;
+        const std::size_t max_capacity = std::numeric_limits<std::size_t>::max() / sizeof(T);
+        const std::size_t reserve = capacity <= max_capacity / 2
+            ? std::max(count, 2 * capacity) : count;
         T* fresh = nullptr;
-        checked(cudaMallocHost(reinterpret_cast<void**>(&fresh), count * sizeof(T)), "allocate pinned grid projection buffer");
+        checked(cudaMallocHost(reinterpret_cast<void**>(&fresh), reserve * sizeof(T)), "allocate pinned grid projection buffer");
         if (data) cudaFreeHost(data);
         data = fresh;
-        capacity = count;
+        capacity = reserve;
     }
 };
 

@@ -40,6 +40,9 @@ def main():
         "-O3", "-DNDEBUG", "-std=c++17", "-fPIC", "-fopenmp", "-pthread",
         "-DPATHCOVER_DIM=3", *(f"-I{path}" for path in includes),
     ]
+    source_flags = {
+        "third_party/pathcover_native/occupancy_inflation/src/voxel_bit_grid.cpp": ["-mpopcnt"],
+    }
     definitions = [] if args.cpu else ["-DNANOVOXMAP_WITH_CUDA", "-DOCCUPANCY_INFLATION_WITH_CUDA"]
     sources = [
         root / "native/pathcover_native.cpp",
@@ -66,6 +69,7 @@ def main():
     manifest = {
         "python": sys.version, "cuda_home": str(cuda), "cuda_arch": args.cuda_arch,
         "flags": flags, "definitions": definitions,
+        "source_flags": source_flags,
     }
     manifest_path = build / "configuration.json"
     changed = not manifest_path.exists() or json.loads(manifest_path.read_text()) != manifest
@@ -85,7 +89,8 @@ def main():
                 *(f"-I{path}" for path in includes), *definitions,
             ]
         else:
-            command = [os.environ.get("CXX", "g++"), *flags, *definitions]
+            command = [os.environ.get("CXX", "g++"), *flags,
+                       *source_flags.get(source.relative_to(root).as_posix(), []), *definitions]
         subprocess.run([*command, "-c", str(source), "-o", str(obj)], check=True)
         return obj
 

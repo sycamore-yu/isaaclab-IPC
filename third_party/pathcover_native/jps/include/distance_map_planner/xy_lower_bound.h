@@ -97,6 +97,7 @@ public:
                         if (!free(ux, uy)) continue;
                         if (dx && dy && (!free(ux, vy) || !free(vx, uy))) continue;
                         const int predecessor = ux + nx * uy;
+                        if (distances_[predecessor] <= cost) continue;
                         // Reverse relaxation pays the original forward
                         // destination v, not the predecessor u.
                         const double candidate = cost + std::sqrt(double(dx * dx + dy * dy))

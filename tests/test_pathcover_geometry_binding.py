@@ -160,3 +160,60 @@ def test_native_box_ellipsoid_cpu_cuda_geometry_match():
     assert results[0].endpoint_connection_visited_cells > 0
     for first, second in zip(results[0].corridors, results[1].corridors, strict=True):
         np.testing.assert_array_equal(first, second)
+
+
+def test_native_cuda_geometry_buffers_keep_logical_sizes_after_reset():
+    module = pytest.importorskip("isaaclab_ipc._pathcover_native")
+    torch = pytest.importorskip("torch")
+    if not module.cuda_built or not torch.cuda.is_available():
+        pytest.skip("native CUDA geometry comparison requires CUDA")
+    cfg = config("box_ellipsoid")
+    planners = [native(replace(cfg, use_cuda=use_cuda,
+                               cuda_min_grid_voxels=0).native_options()) for use_cuda in (False, True)]
+    # Keep the negative-X corner fixture and add separated hits at fine X=19.
+    # The workspace clips inflated bits inside both partial 64-bit X words.
+    y, z = np.meshgrid(np.arange(240, 300, 4), np.arange(0, 40, 4), indexing="ij")
+    wall = (np.stack((np.full_like(y, 19), y, z), axis=-1).reshape(-1, 3) + .5) * cfg.resolution
+    medium = np.vstack((SOURCE_POINT, wall[wall[:, 1] < 28.]))
+    large = np.vstack((SOURCE_POINT, wall))
+    empty = np.empty((0, 3))
+    cases = (
+        ("small", SOURCE_POINT, True, True),
+        ("medium", medium, True, True),
+        ("large", large, True, True),
+        ("shrink", SOURCE_POINT, True, True),
+        ("unchanged", SOURCE_POINT, False, False),
+        ("empty", empty, True, False),
+        ("after_empty", SOURCE_POINT, False, True),
+    )
+    snapshots = {}
+    for name, cloud, reset, changed in cases:
+        actual = []
+        for planner in planners:
+            if reset:
+                # reset clears map state while retaining the CUDA buffer owners.
+                planner.reset()
+            planner.update_cloud(cloud, P0)
+            geometry = planner.geometry_obstacles()
+            actual.append({
+                "centers": geometry["centers"],
+                "halfwidths": geometry["halfwidths"],
+                "inflated": planner.inflated_cloud(),
+                "fine": planner.obstacle_centers(),
+                "coarse": planner.search_obstacle_centers(),
+            })
+        for key in actual[0]:
+            np.testing.assert_array_equal(actual[0][key], actual[1][key], err_msg=f"{name}: {key}")
+        for field in ("occupied_voxels", "inflated_voxels", "geometry_boxes"):
+            assert getattr(planners[0].last_update, field) == getattr(planners[1].last_update, field), name
+        assert planners[0].last_update.gpu_grid_projection is False
+        assert planners[0].last_update.gpu_box_compression is False
+        assert planners[1].last_update.gpu_grid_projection is changed, name
+        assert planners[1].last_update.gpu_box_compression is changed, name
+        snapshots[name] = actual[1]
+    assert len(snapshots["large"]["centers"]) > len(snapshots["medium"]["centers"]) > 1
+    for name in ("shrink", "unchanged", "after_empty"):
+        for key in snapshots["small"]:
+            np.testing.assert_array_equal(snapshots[name][key], snapshots["small"][key], err_msg=f"{name}: {key}")
+    for values in snapshots["empty"].values():
+        assert values.shape == (0, 3)

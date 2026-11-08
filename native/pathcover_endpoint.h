@@ -151,10 +151,10 @@ public:
         // tangency. Every possible hit is decided by the raw narrow phase.
         const bool raster_free = visitOccupied(first, last, [&](const Index& index) {
             for (int axis = 0; axis < 3; ++axis) {
-                const double lo = std::nextafter(static_cast<double>(index[axis]) * resolution_,
-                                                -std::numeric_limits<double>::infinity());
-                const double hi = std::nextafter(static_cast<double>(index[axis] + 1) * resolution_,
-                                                std::numeric_limits<double>::infinity());
+                const double lo = pathcover_clearance::detail::down(
+                    static_cast<double>(index[axis]) * resolution_);
+                const double hi = pathcover_clearance::detail::up(
+                    static_cast<double>(index[axis] + 1) * resolution_);
                 if (segment_upper[axis] < lo || segment_lower[axis] > hi) return true;
             }
             return false;
@@ -221,9 +221,11 @@ inline std::vector<Point> simplify(const std::vector<Point>& path, const FineGeo
     result.push_back(path.front());
     for (std::size_t i = 0; i + 1 < path.size();) {
         std::size_t next = path.size() - 1;
-        while (next > i + 1 && !fine.segmentFree(path[i], path[next])) --next;
-        if (!fine.segmentFree(path[i], path[next])) {
-            throw std::logic_error("Endpoint connector contains an invalid fine-grid edge");
+        while (!fine.segmentFree(path[i], path[next])) {
+            if (next == i + 1) {
+                throw std::logic_error("Endpoint connector contains an invalid fine-grid edge");
+            }
+            --next;
         }
         if ((path[next] - result.back()).squaredNorm() > 0.0) result.push_back(path[next]);
         i = next;
@@ -311,15 +313,19 @@ inline Connections connect(const Point& endpoint, const FineGeometry& fine,
             const Point target = coarse.center(coarse_index);
             const bool target_in_window = (target.array() >= window_lower.array()).all()
                 && (target.array() <= window_upper.array()).all();
-            if (target_in_window && fine.segmentFree(point, target)) {
+            if (target_in_window) {
                 const double length = cost + (target - point).norm();
                 const int anchor_id = coarse.linear(coarse_index);
                 const auto found = anchor_indices.find(anchor_id);
-                if (found == anchor_indices.end()) {
-                    anchor_indices.emplace(anchor_id, anchor_nodes.size());
-                    anchor_nodes.push_back({coarse_index, id, length});
-                } else if (length < anchor_nodes[found->second].length) {
-                    anchor_nodes[found->second] = {coarse_index, id, length};
+                // Only a strictly shorter candidate can replace a valid anchor.
+                if ((found == anchor_indices.end() || length < anchor_nodes[found->second].length)
+                    && fine.segmentFree(point, target)) {
+                    if (found == anchor_indices.end()) {
+                        anchor_indices.emplace(anchor_id, anchor_nodes.size());
+                        anchor_nodes.push_back({coarse_index, id, length});
+                    } else {
+                        anchor_nodes[found->second] = {coarse_index, id, length};
+                    }
                 }
             }
         }

@@ -1784,13 +1784,60 @@ namespace trajectory_server
                 // One buffer per piece, reused at every quadrature node.
                 Eigen::ArrayXd projectedPositions(continuousMaxPosition ? 0 : K);
                 metrics.positionPieces = i + 1;
+                // One quintic evaluator for the selected continuous S3 mode.
+                // Precompute only derivative coefficient multiplications; no
+                // polynomial degree, quadrature node or objective is changed.
+                bool useHorner = false;
+                Eigen::Matrix<double, 3, 4> horner5, horner4, horner3;
+                Eigen::Matrix3d horner2;
+                Eigen::Matrix<double, 3, 2> horner1;
+                if constexpr (S == 3)
+                {
+                    if (continuousMaxPosition && c.allFinite())
+                    {
+                        for (int axis = 0; axis < 3; ++axis)
+                        {
+                            horner5.row(axis) << c(5, axis), 5.0 * c(5, axis),
+                                20.0 * c(5, axis), 60.0 * c(5, axis);
+                            horner4.row(axis) << c(4, axis), 4.0 * c(4, axis),
+                                12.0 * c(4, axis), 24.0 * c(4, axis);
+                            horner3.row(axis) << c(3, axis), 3.0 * c(3, axis),
+                                6.0 * c(3, axis), 6.0 * c(3, axis);
+                            horner2.row(axis) << c(2, axis), 2.0 * c(2, axis), 2.0 * c(2, axis);
+                            horner1.row(axis) << c(1, axis), c(1, axis);
+                        }
+                        // Retain the original multiplication order when a new
+                        // derivative-coefficient premultiplication overflows.
+                        useHorner = horner5.allFinite() && horner4.allFinite()
+                            && horner3.allFinite() && horner2.allFinite() && horner1.allFinite();
+                    }
+                }
                 for (int j = 0; j <= integralResolution; j++)
                 {
-                    fillDerivativeBasis<false>(j * step, beta0, beta1, beta2, beta3, beta4);
-                    pos = c.transpose() * beta0;
-                    vel = c.transpose() * beta1;
-                    acc = c.transpose() * beta2;
-                    jer = c.transpose() * beta3;
+                    const double nodeTime = j * step;
+                    bool basisReady = true;
+                    if (useHorner)
+                    {
+                        Eigen::Matrix<double, 3, 4> jets = horner5 * nodeTime + horner4;
+                        jets = jets * nodeTime + horner3;
+                        jets.template leftCols<3>() = jets.template leftCols<3>() * nodeTime + horner2;
+                        jets.template leftCols<2>() = jets.template leftCols<2>() * nodeTime + horner1;
+                        jets.col(0) = jets.col(0) * nodeTime + c.row(0).transpose();
+                        if (jets.allFinite())
+                        {
+                            pos = jets.col(0), vel = jets.col(1);
+                            acc = jets.col(2), jer = jets.col(3);
+                            basisReady = false;
+                        }
+                    }
+                    if (basisReady)
+                    {
+                        fillDerivativeBasis<false>(nodeTime, beta0, beta1, beta2, beta3, beta4);
+                        pos = c.transpose() * beta0;
+                        vel = c.transpose() * beta1;
+                        acc = c.transpose() * beta2;
+                        jer = c.transpose() * beta3;
+                    }
 
                     if constexpr (ZeroDragZeroYaw)
                     {
@@ -1908,6 +1955,12 @@ namespace trajectory_server
                                              totalGradPsi, totalGradPsiD);
                         }
                     }
+
+                    // The existing zero-contribution branch above needs no
+                    // coefficient adjoints. Active/nonfinite contributions keep
+                    // the original derivative basis and snap calculation.
+                    if (!basisReady)
+                        fillDerivativeBasis<false>(nodeTime, beta0, beta1, beta2, beta3, beta4);
 
                     // flatGradientZero already guarantees an exact zero jerk
                     // adjoint and finite forward values. On that branch the

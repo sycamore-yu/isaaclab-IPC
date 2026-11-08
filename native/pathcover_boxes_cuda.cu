@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <climits>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -24,11 +25,14 @@ template <class T> struct DeviceBuffer {
     ~DeviceBuffer() { if (ptr) cudaFree(ptr); }
     void ensure(std::size_t n) {
         if (capacity >= n) return;
+        const std::size_t max_capacity = std::numeric_limits<std::size_t>::max() / sizeof(T);
+        const std::size_t reserve = capacity <= max_capacity / 2
+            ? std::max(n, 2 * capacity) : n;
         T* fresh = nullptr;
-        checked(cudaMalloc(reinterpret_cast<void**>(&fresh), n * sizeof(T)), "cudaMalloc");
+        checked(cudaMalloc(reinterpret_cast<void**>(&fresh), reserve * sizeof(T)), "cudaMalloc");
         if (ptr) cudaFree(ptr);
         ptr = fresh;
-        capacity = n;
+        capacity = reserve;
     }
 };
 
@@ -38,11 +42,14 @@ template <class T> struct PinnedBuffer {
     ~PinnedBuffer() { if (ptr) cudaFreeHost(ptr); }
     void ensure(std::size_t n) {
         if (capacity >= n) return;
+        const std::size_t max_capacity = std::numeric_limits<std::size_t>::max() / sizeof(T);
+        const std::size_t reserve = capacity <= max_capacity / 2
+            ? std::max(n, 2 * capacity) : n;
         T* fresh = nullptr;
-        checked(cudaMallocHost(reinterpret_cast<void**>(&fresh), n * sizeof(T)), "cudaMallocHost");
+        checked(cudaMallocHost(reinterpret_cast<void**>(&fresh), reserve * sizeof(T)), "cudaMallocHost");
         if (ptr) cudaFreeHost(ptr);
         ptr = fresh;
-        capacity = n;
+        capacity = reserve;
     }
 };
 
