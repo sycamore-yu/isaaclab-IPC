@@ -208,7 +208,7 @@ def test_frontend_and_ctbr_share_physical_parameters():
     default = pathcover_config_for_ctbr(model, {})
     assert default.max_velocity == 10.0 and default.nominal_velocity == 3.0
     assert default.tilt_max == math.pi / 2
-    assert default.max_corridors == 4 and default.safety_margin == 0.0
+    assert default.max_corridors == 3 and default.safety_margin == 0.0
     assert default.max_iterations == 2000
     assert default.pieces_per_polytope == 1
     assert default.position_penalty_aggregation == "continuous_max"
@@ -272,7 +272,7 @@ def test_marsim_keeps_cruise_target_distinct_from_physical_speed(benchmark, phys
     assert frontend.nominal_thrust_min == pytest.approx(2.0 / 0.716 * model.mass)
     assert frontend.thrust_max == pytest.approx(model.mass * model.specific_thrust_limits[1])
     assert frontend.tilt_max == math.pi / 2
-    assert frontend.max_corridors == 4 and frontend.safety_margin == 0.0
+    assert frontend.max_corridors == 3 and frontend.safety_margin == 0.0
     assert frontend.max_iterations == 2000
     assert frontend.pieces_per_polytope == 1
     assert frontend.position_penalty_aggregation == "continuous_max"

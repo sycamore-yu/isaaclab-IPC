@@ -64,6 +64,8 @@ CTBR 的 Newton 与 MARSIM 工厂使用零额外参考余量。机体间隙由�
 
 CTBR 两端的 GCOPTER 迭代上限为 2000，原停止阈值保持不变。真实 Dense 失败输入在原 1000 步上限处仍持续下降，并在第 1019 步满足原阈值。独立 PathCover 默认上限仍为 1000。该配置的正式任务与延迟以验证记录为准。
 
+CTBR 两端最多生成 3 个有序走廊，RISP 局部半宽为 8 m。前端沿原路径确定局部终点，再优化完整 MINCO 轨迹；N=5 和 0.4 s 预测窗口保持不变。独立 PathCover 默认仍为 6 个走廊。V40 的冻结输入质量和计算收益已通过筛选，完整物理任务仍按验证记录单独验收。
+
 ## 统一入口
 
 ### Isaac Lab / Newton
@@ -105,8 +107,8 @@ Newton 的策略周期为 0.1 s，电机反馈和物理周期为 1/300 s。训�
 ### MARSIM
 
 ```bash
-# 当前 worktree 已构建的独立动态执行器
-export IPC_MARSIM_RUNTIME="$PWD/build/marsim-rp-priority-v20"
+# 当前 worktree 的动态执行器和已修复 LiDAR 渲染器
+export IPC_MARSIM_RUNTIME="$PWD/build/marsim-shader-v39"
 source scripts/marsim_ros2_env.sh
 export DISPLAY=:11 ROS_AUTOMATIC_DISCOVERY_RANGE=SUBNET
 export TORCHINDUCTOR_CACHE_DIR="$PWD/build/torchinductor"
@@ -114,14 +116,14 @@ export TORCHINDUCTOR_CACHE_DIR="$PWD/build/torchinductor"
 # A1：原生 PathCover + 固定成本 CTBR
 .venv/bin/python scripts/run_marsim_ros2.py --mode dynamic --time-mode sim \
   --benchmark high_speed --policy fixed-ctbr --frontend pathcover \
-  --reference-speed 3 --capture-reference-plans --timeout 180 --domain 232 \
+  --reference-speed 3 --capture-reference-plans --timeout 180 --domain 230 \
   --render-prefix 'vglrun -d egl0' --output results/my-marsim-fixed
 
 # 学习成本 AC-MPC；检查点必须使用当前原生 Actor 格式
 .venv/bin/python scripts/run_marsim_ros2.py --mode dynamic --time-mode sim \
   --benchmark high_speed --policy acmpc --checkpoint results/my-pathcover-acmpc/checkpoint.pt \
   --frontend pathcover --reference-speed 3 --capture-reference-plans \
-  --timeout 180 --domain 233 --render-prefix 'vglrun -d egl0' \
+  --timeout 180 --domain 231 --render-prefix 'vglrun -d egl0' \
   --output results/my-marsim-acmpc
 ```
 

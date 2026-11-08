@@ -74,7 +74,7 @@ def pathcover_config_for_ctbr(model, overrides):
     from isaaclab_ipc.pathcover_native import PathCoverConfig
 
     options = dict(overrides)
-    options.setdefault("max_corridors", 4)
+    options.setdefault("max_corridors", 3)
     options.setdefault("max_iterations", 2000)
     options.setdefault("geometry_model", "box_ellipsoid")
     options.setdefault("risp_local_half_extent", 8.0 if options["geometry_model"] == "box_ellipsoid" else 0.0)

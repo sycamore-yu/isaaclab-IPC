@@ -19,16 +19,20 @@ code and evidence remain available; this branch develops the new AC-MPC route.
   JPS guide region, although a legal full-grid path exists. Upstream JPS remains
   available for the independent original-chain comparison; `search_radius`
   belongs only to that comparison.
-- CTBR factories retain at most four ordered RISP corridors. Native PathCover
+- CTBR factories retain at most three ordered RISP corridors. Native PathCover
   selects the last corridor's DMP exit as the local terminal position and solves
   a complete new zero-terminal-velocity/acceleration MINCO trajectory. This is
   a shorter planning horizon, not truncation of an already optimized curve.
   Standalone PathCover retains six corridors and explicit Newton overrides persist.
-  A matched 14-input study passes the same full-curve quality thresholds for both
-  horizons. Its ten changed inputs reduce quadrature-node work by 34.373% and
-  plane projection work by 25.371%, but seq578 increases work. The shortest new
-  reference is 1.413821 s, longer than the N5 0.4 s window. Complete navigation
-  and end-to-end latency still require physical evaluation.
+  The V40 max4/max3 study fixes 35 inputs before measuring either candidate.
+  Both arms pass all complete-reference checks, and every max3 curve covers the
+  N5 0.4 s window; the shortest lasts 0.905983 s. The 30 inputs near the recorded
+  planning p95 save 5.230 ms at the paired median in pure optimization. Four of
+  the 35 inputs get slower. This changes the local terminal and optimization
+  problem; it is not an arithmetic-equivalence claim or truncation of an old
+  trajectory. RISP and complete-task performance still require actual evaluation.
+  The earlier max6/max4 study remains historical evidence, including seq578's
+  increased optimizer work. Do not infer that fewer pieces always run faster.
 - The state is `[p_world(3), q_wxyz(4), v_world(3)]`. The control is collective
   force in N and body rates in rad/s. Execution divides force by vehicle mass.
 - `N` counts cost nodes, including the measured initial state, as in AC-MPC.

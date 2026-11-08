@@ -8,7 +8,7 @@
 当前 Flightmare 饱和分配保留可行请求的总推力，先最大化横滚与俯仰力矩的共同缩放系数，再选择最近的可行偏航力矩。原可行分配直接保留。电机延迟与 RK4 动态执行继续运行。第 8–11 节中的旧分配及结果属于历史版本，不替代使用同一执行器的 A0/A1/A2 比较。
 
 当前工作树为 `/home/tong/tongworkspace/free/.worktrees/isaaclab-IPC/acmpc-native-pathcover-v1`，分支为 `feat/acmpc-native-pathcover-v1`。
-已验收动态执行器位于 `build/marsim-rp-priority-v20`，通过 `IPC_MARSIM_RUNTIME` 选择。
+当前运行目录为 `build/marsim-shader-v39`，通过 `IPC_MARSIM_RUNTIME` 选择。它复用 V20 动态执行程序，并使用独立构建的修复版 LiDAR 渲染库。CTBR 的当前 3 走廊配置及阶段验收见原生验证记录。
 正式配置显式使用 `--mode dynamic --time-mode sim --reference-speed 3 --timeout 180`。
 `High-speed` 是场景名称，不表示名义速度为 10 m/s。
 
