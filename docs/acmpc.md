@@ -1,9 +1,43 @@
-# 历史学习成本 IPC
+# AC-MPC 训练与历史实现
 
 2026-11-07 的新主线使用完整原生 PathCover、28N 成本与 10D CTBR。
 当前接口见 [ADR-0008](adr/0008-native-acmpc-pathcover.md) 和 [统一入口](../README.md)。
-下文保留此前 9D jerk / 7 参数实现的历史记录。
+“历史学习成本 IPC”一节起保留此前 9D jerk / 7 参数实现的记录。
 其检查点、特征维度和恢复规则不适用于新主线。
+
+## 当前 28N 成本训练
+
+训练继续使用 `scripts/acmpc.py`、RSL-RL 和 PPO。
+`Isaac-ACMPC-CTBR-Direct` 提供空场景数值基线。
+A0/A2 比较使用同一 `Isaac-ACMPC-PathCover-Forest-Direct` 任务，
+A0 通过 `env.frontend=none env.max_planes=0` 关闭几何前端。
+完整配对命令见 [README](../README.md#isaac-lab--newton)。
+
+默认 N=5，Actor 将 69 维特征映射为 140 个逐节点成本参数。
+MPC 使用 10D CTBR，执行动作是比推力和机体角速度。
+节点数与步长通过 `env.ctbr_model.cost_nodes` 和 `env.ctbr_model.dt` 修改。
+Actor 从环境模型读取最终值；单独修改 Actor 节点数不会覆盖环境配置。
+
+rollout 保存状态、参考、SFC 和热启动控制快照。
+PPO 更新重新求解这些快照，不重新调用 JPS、RISP 或 GCOPTER。
+奖励依据实际导航进度、时间、动作平滑与终止结果，不额外加入轨迹模仿损失。
+
+`--checkpoint` 恢复模型、优化器和随机数状态，环境从新回合开始。
+它不恢复先前的物理状态或占据地图。
+每次运行必须提供新输出目录。
+`evaluate --fixed-cost` 使用固定成本；学习成本评估改用 `--checkpoint <路径>`。
+
+已审计的 V34 A0/A2 checkpoint 分别位于：
+
+- `results/p3-a0-forest-rp-v34-audit-v1/checkpoint.pt`。
+- `results/p3-a2-forest-rp-v34-audit-v1/checkpoint.pt`。
+
+两者均为 seed 0、16 个环境、每轮 16 步、32 次更新，共 8192 次交互。
+这是初始训练基线，不是训练收敛或多 seed 学习收益的证据。
+后续评测复用 checkpoint 时，分别记录训练版本、前端版本与 MPC 库。
+实际梯度、PPO 更新、重载和正式任务结果见 [验证记录](acmpc-native-validation.md)。
+
+## 历史学习成本 IPC
 
 默认走廊已改为 PathCover/RISP，见 [走廊说明](pathcover.md)。
 本页已完成的训练、场景结果及 RRD 均来自切换前的走廊版本。

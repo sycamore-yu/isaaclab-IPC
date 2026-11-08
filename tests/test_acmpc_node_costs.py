@@ -209,11 +209,13 @@ def test_frontend_and_ctbr_share_physical_parameters():
     assert default.max_velocity == 10.0 and default.nominal_velocity == 3.0
     assert default.tilt_max == math.pi / 2
     assert default.max_corridors == 4 and default.safety_margin == 0.0
+    assert default.max_iterations == 2000
     assert default.pieces_per_polytope == 1
     assert default.position_penalty_aggregation == "continuous_max"
     assert default.geometry_model == "box_ellipsoid"
     standalone = PathCoverConfig()
     assert standalone.max_corridors == 6 and standalone.safety_margin == 0.15
+    assert standalone.max_iterations == 1000
     assert standalone.position_penalty_aggregation == "integral"
     assert standalone.geometry_model == "inflated_voxels"
     assert default.penalty_weights == (1e5, 100.0, 1e4, 1e4, 1e4)
@@ -229,7 +231,7 @@ def test_frontend_and_ctbr_share_physical_parameters():
         "thrust_max": model.mass * model.specific_thrust_limits[1],
         "tilt_max": 0.8, "penalty_weights": (1e4, 1e3, 1e4, 1e4, 1e4),
         "max_corridors": 6, "safety_margin": 0.15, "position_penalty_aggregation": "integral",
-        "geometry_model": "inflated_voxels",
+        "geometry_model": "inflated_voxels", "max_iterations": 500,
     })
     assert stress.nominal_velocity == 6.0 and stress.thrust_min == 0.0
     assert stress.nominal_thrust_min == 0.0
@@ -238,6 +240,7 @@ def test_frontend_and_ctbr_share_physical_parameters():
     assert stress.max_corridors == 6 and stress.safety_margin == 0.15
     assert stress.position_penalty_aggregation == "integral"
     assert stress.geometry_model == "inflated_voxels"
+    assert stress.max_iterations == 500
     conservative = pathcover_config_for_ctbr(model, {
         "thrust_min": 2.0 / 0.716 * model.mass, "thrust_max": 10.0 / 0.716 * model.mass,
         "tilt_max": 0.7854,
@@ -270,6 +273,7 @@ def test_marsim_keeps_cruise_target_distinct_from_physical_speed(benchmark, phys
     assert frontend.thrust_max == pytest.approx(model.mass * model.specific_thrust_limits[1])
     assert frontend.tilt_max == math.pi / 2
     assert frontend.max_corridors == 4 and frontend.safety_margin == 0.0
+    assert frontend.max_iterations == 2000
     assert frontend.pieces_per_polytope == 1
     assert frontend.position_penalty_aggregation == "continuous_max"
     assert frontend.geometry_model == "box_ellipsoid"

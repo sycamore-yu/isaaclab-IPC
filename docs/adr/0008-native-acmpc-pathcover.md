@@ -501,6 +501,15 @@ the end-to-end Dense planning budget; actual frontend and task gates still apply
 
 ## Validation
 
+Use a 2000-iteration GCOPTER cap in both CTBR frontend factories; retain the
+standalone PathCover default of 1000. Keep the objective, history length, gradient
+and relative-cost tolerances unchanged. A recorded Dense input reached the old
+cap while still making progress, then met the same stopping test at iteration
+1019 with a valid complete reference. This is a finite-budget configuration
+change, not acceptance of an incomplete iterate. Reuse the unchanged native
+binary and identify the new runtime configuration separately from its build.
+The larger cap still requires complete-task and all-attempt latency evaluation.
+
 P0: frozen-input forward comparison, finite-difference cost gradients, complete
 PPO update, checkpoint reload, N2/N5 and B1/B16/B64/B256 timings.
 

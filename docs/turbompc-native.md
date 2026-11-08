@@ -6,6 +6,28 @@
 下文关于旧 CTBR Actor 默认修正与恢复的描述属于历史实现。
 当前配置、IR2 构建和实测数据见 [原生 AC-MPC 验证](acmpc-native-validation.md)。
 
+## 当前 CTBR 默认路径
+
+CTBR 默认使用 `cudss_inverse_chunk`，通用 ADMM 的公开默认仍保留 vector 路径。
+cuDSS 沿用原 QP 分解，并求解单位矩阵右端项。
+固定矩阵期间使用 float64 矩阵向量积，按原检查、rho 更新和预算边界合并迭代。
+每次 QP 或 rho 变化都会更新相应结果。
+反向 KKT 继续使用 IR2；该路径不降低原收敛预算或约束精度。
+
+动力学、雅可比、QP/SQP 张量、伴随准备与 Actor 后处理使用固定形状 `torch.compile`。
+热启动在 GPU 上移位并积分；原生 ADMM 和主机终止判断仍在编译区域之外。
+当前路径没有启用完整求解器 CUDA Graph 捕获。
+
+当前 worktree 的 `build/turbompc/native/cu130` 链接到 `native-v35/cu130`。
+也可通过 `TURBOMPC_NATIVE_BUILD_DIR` 显式选择已构建目录。
+真实 Python/CUDA 工具链路径和独立候选构建命令见 [README](../README.md#依赖与构建)。
+共享 `.venv` 不需要重新安装依赖。
+
+V35 完整 P0 的 17 个阶段及 26 项集成合同通过。
+N=5、B=256 的原生前向 p95 为 18.980340 ms，前后向总计 p95 为 28.583600 ms。
+首次编译单列；这些数字不包含 PathCover 或物理执行。
+完整数据位于 `results/p0-v35-validation/`，后续复用必须保持记录中的源码与原生库身份。
+
 本目录实现结构化多重打靶 MPC。原生求解路径只使用 PyTorch、CUDA 和 cuDSS；
 JAX 仅用于独立对照。
 
