@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+#include "../../../native/pathcover_clearance.h"
 
 namespace PathCover {
 
@@ -23,10 +24,28 @@ template<typename T>
 inline std::pair<Eigen::Matrix<T, 3, 1>, T> seedHullPlane(
     const std::vector<Eigen::Matrix<T, 3, 1>> &points,
     const Eigen::Matrix<T, 3, 1> &centre,
-    const Eigen::Matrix<T, 3, 1> &half, T alpha) {
+    const Eigen::Matrix<T, 3, 1> &half, T alpha,
+    const Eigen::Matrix<T, 3, 1> &body_radii = Eigen::Matrix<T, 3, 1>::Zero()) {
     using V = Eigen::Matrix<T, 3, 1>;
     if (points.size() != 3) {
         throw std::invalid_argument("Initial seed hull needs three points");
+    }
+    if (body_radii.maxCoeff() > T(0)) {
+        const pathcover_clearance::Triangle triangle{
+            points[0].template cast<double>(), points[1].template cast<double>(),
+            points[2].template cast<double>()};
+        const pathcover_clearance::Box box{
+            (centre - half).template cast<double>(), (centre + half).template cast<double>()};
+        const auto clearance = pathcover_clearance::triangleClosest(
+            triangle, box, body_radii.template cast<double>());
+        const double gap = clearance.seed_support - clearance.obstacle_support;
+        if (!clearance.free || !(gap > 1e-10)) {
+            throw SeedRegionCollision("PathCover initial motion seed intersects occupied box-ellipsoid geometry");
+        }
+        // The helper normal points from the obstacle towards the seed. RISP
+        // uses the opposite inequality, with its original dimensionless alpha.
+        return {-clearance.normal.template cast<T>(),
+            T(-clearance.seed_support + (1.0 - double(alpha)) * gap)};
     }
     std::vector<V> axes;
     axes.reserve(16);

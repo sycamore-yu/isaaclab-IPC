@@ -54,6 +54,7 @@ def main():
         sources += [
             root / "native/pathcover_distance_map.cu",
             root / "native/pathcover_boxes_cuda.cu",
+            root / "native/pathcover_grid_cuda.cu",
             vendor / "nanovoxmap/src/nanovoxmap_cuda.cu",
             vendor / "occupancy_inflation/src/inflation_cuda.cu",
         ]

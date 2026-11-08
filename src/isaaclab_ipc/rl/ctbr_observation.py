@@ -1,5 +1,7 @@
 """Frozen CTBR policy/MPC observations shared by Newton and MARSIM."""
 
+import math
+
 import numpy as np
 import torch
 
@@ -104,6 +106,43 @@ def make_ctbr_observation(
     # stride. Canonicalize the owning snapshot to avoid recompiling MPC for
     # physical-state slices or the first (unshifted) control reference.
     return {name: value.clone(memory_format=torch.contiguous_format) for name, value in values.items()}
+
+
+@torch.no_grad()
+def goal_ctbr_observation(
+    ctbr_state, body_rates, goal, *, ctbr_config, reference_speed=3.0,
+    max_planes=0, warm_start_controls=None,
+):
+    """A0 fixed-clock line reference; the goal feature remains the mission goal.
+
+    N+1 positions determine N forward-difference velocity targets, including a
+    partial last interval before holding at the goal. Initial measured velocity
+    is not replaced. Velocity changes, zero acceleration and heading targets
+    are soft MPC references, not a continuous or dynamically feasible plan.
+    """
+    if not math.isfinite(reference_speed) or reference_speed <= 0:
+        raise ValueError("reference_speed must be finite and positive")
+    state = ctbr_state.double()
+    batch, nodes = len(state), ctbr_config.cost_nodes
+    goal = goal.double()
+    if goal.shape == (3,):
+        goal = goal.expand(batch, -1)
+    delta = goal - state[:, :3]
+    distance = delta.norm(dim=-1, keepdim=True)
+    direction = delta / torch.where(distance > 0, distance, torch.ones_like(distance))
+    times = torch.arange(nodes + 1, dtype=state.dtype, device=state.device) * ctbr_config.dt
+    progress = torch.minimum(reference_speed * times[None], distance)
+    positions = state[:, None, :3] + direction[:, None] * progress[..., None]
+    positions = torch.where(progress[..., None] >= distance[:, None], goal[:, None], positions)
+    velocities = direction[:, None] * ((progress[:, 1:] - progress[:, :-1]) / ctbr_config.dt)[..., None]
+    pva = torch.cat((positions[:, :-1], velocities, torch.zeros_like(velocities)), -1)
+    yaw = torch.atan2(delta[:, 1], delta[:, 0])[:, None]
+    planes = state.new_zeros((batch, nodes, max_planes, 4))
+    mask = torch.zeros(planes.shape[:-1], dtype=torch.bool, device=state.device)
+    return make_ctbr_observation(
+        state, body_rates, goal, pva, yaw, planes, mask, ctbr_config=ctbr_config,
+        warm_start_controls=warm_start_controls,
+    )
 
 
 @torch.no_grad()

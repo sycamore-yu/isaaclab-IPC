@@ -57,6 +57,7 @@ def assert_corridor_excludes_boxes(corridor, centers, half_extent):
 
 def test_official_reference_defaults_resolve_to_concrete_mass_scaled_values():
     cfg = PathCoverConfig(mass=0.9)
+    assert cfg.geometry_model == "inflated_voxels"
     assert cfg.nominal_velocity == 3.0
     assert cfg.thrust_min == pytest.approx(2.0 / 0.716 * 0.9)
     assert cfg.nominal_thrust_min == cfg.thrust_min
@@ -72,6 +73,40 @@ def test_official_reference_defaults_resolve_to_concrete_mass_scaled_values():
     assert options["nominal_thrust_min"] == cfg.thrust_min
     assert options["thrust_max"] == cfg.thrust_max
     assert options["reference_body_rate_margin"] == 0.01
+
+
+@pytest.mark.parametrize("radius, radius_z", [(0.2, None), (0.2, 0.1), (0.0, 0.0)])
+def test_continuous_geometry_preserves_explicit_body_shape(radius, radius_z):
+    cfg = PathCoverConfig(geometry_model="box_ellipsoid", robot_radius=radius, robot_radius_z=radius_z)
+    options = cfg.native_options()
+    assert options["geometry_model"] == "box_ellipsoid"
+    assert options["robot_radius"] == radius
+    assert options["robot_radius_z"] == (radius if radius_z is None else radius_z)
+    assert PathCoverConfig(**options).geometry_model == "box_ellipsoid"
+    options.pop("geometry_model")
+    assert PathCoverConfig(**options).geometry_model == "inflated_voxels"
+
+
+@pytest.mark.parametrize("radius, radius_z", [(0.2, 0.0), (0.0, 0.2), (-0.2, 0.1), (np.nan, 0.1), (0.2, np.inf)])
+def test_continuous_geometry_rejects_unsupported_body_shapes(radius, radius_z):
+    with pytest.raises(ValueError, match="positive body radii or all-zero"):
+        PathCoverConfig(geometry_model="box_ellipsoid", robot_radius=radius, robot_radius_z=radius_z)
+
+
+def test_geometry_model_is_explicit():
+    with pytest.raises(ValueError, match="geometry_model"):
+        PathCoverConfig(geometry_model="sphere")
+
+
+def test_official_full_chain_does_not_reinterpret_continuous_body_geometry(monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    from compare_pathcover_upstream import serialized_input
+
+    cfg = PathCoverConfig(geometry_model="box_ellipsoid")
+    with pytest.raises(ValueError, match="requires inflated_voxels geometry"):
+        serialized_input(np.empty((0, 3)), np.zeros((3, 3)), np.zeros(3), cfg)
 
 
 @pytest.mark.parametrize("physical, nominal, maximum", [

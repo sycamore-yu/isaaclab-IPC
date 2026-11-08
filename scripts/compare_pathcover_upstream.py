@@ -90,6 +90,8 @@ def captured_input(source):
 
 
 def serialized_input(cloud, initial, goal, cfg):
+    if cfg.geometry_model != "inflated_voxels":
+        raise ValueError("Unmodified official PathCover comparison requires inflated_voxels geometry")
     if cfg.position_penalty_aggregation != "integral":
         raise ValueError("Unmodified official PathCover has no continuous_max position cost")
     options = cfg.native_options()

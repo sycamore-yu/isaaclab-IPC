@@ -28,6 +28,7 @@
 #ifdef OCCUPANCY_INFLATION_WITH_CUDA
 #include "pathcover_distance_map.h"
 #include "pathcover_boxes_cuda.h"
+#include "pathcover_grid_cuda.h"
 #endif
 
 namespace py = pybind11;
@@ -72,7 +73,7 @@ struct Options {
     std::size_t cuda_min_grid_voxels;
     unsigned int random_seed;
     bool use_cuda, dmp_xy_heuristic;
-    std::string position_penalty_aggregation;
+    std::string position_penalty_aggregation, geometry_model;
     Eigen::VectorXd penalty_weights;
     explicit Options(const py::dict &values) {
         lower = values["bounds_lower"].cast<Vec3>();
@@ -82,6 +83,16 @@ struct Options {
         endpoint_connection_radius = values["endpoint_connection_radius"].cast<double>();
         radius = values["robot_radius"].cast<double>();
         radius_z = values["robot_radius_z"].cast<double>();
+        geometry_model = values.contains("geometry_model")
+            ? values["geometry_model"].cast<std::string>() : "inflated_voxels";
+        if (geometry_model != "inflated_voxels" && geometry_model != "box_ellipsoid") {
+            throw std::invalid_argument("PathCover geometry_model must be inflated_voxels or box_ellipsoid");
+        }
+        if (geometry_model == "box_ellipsoid"
+            && (!std::isfinite(radius) || !std::isfinite(radius_z)
+                || !((radius > 0.0 && radius_z > 0.0) || (radius == 0.0 && radius_z == 0.0)))) {
+            throw std::invalid_argument("PathCover box_ellipsoid body radii must be all positive or all zero");
+        }
         max_velocity = values["max_velocity"].cast<double>();
         nominal_velocity = values["nominal_velocity"].cast<double>();
         mass = values["mass"].cast<double>();
@@ -130,6 +141,7 @@ struct MappingStats {
     double mapping_ms = 0.0, inflation_ms = 0.0, grid_ms = 0.0;
     std::size_t occupied_voxels = 0, inflated_voxels = 0, geometry_boxes = 0;
     bool gpu_mapping = false, gpu_inflation = false, gpu_box_compression = false;
+    bool gpu_grid_projection = false;
 };
 
 struct InitialBoundary {
@@ -195,6 +207,7 @@ static py::dict initialBoundaryDict(const InitialBoundary &value) {
 
 struct PlanResult {
     std::string position_penalty_aggregation;
+    std::string geometry_model;
     Points path;
     Points selected_initial_motion_seed;
     bool initial_motion_seed_adjusted = false;
@@ -246,6 +259,7 @@ class NativeFrontend {
 #ifdef OCCUPANCY_INFLATION_WITH_CUDA
     std::unique_ptr<pathcover_cuda::DistanceMap> distance_cuda_;
     std::unique_ptr<pathcover_cuda::BoxCompressor> boxes_cuda_;
+    std::unique_ptr<pathcover_cuda::GridProjector> grid_cuda_;
     std::vector<std::array<int, 4>> distance_mask_;
 #endif
     Eigen::Vector3i dimensions_, grid_origin_index_;
@@ -351,6 +365,9 @@ public:
         if (options_.use_cuda) {
             distance_cuda_ = std::make_unique<pathcover_cuda::DistanceMap>();
             boxes_cuda_ = std::make_unique<pathcover_cuda::BoxCompressor>();
+            if (options_.geometry_model == "box_ellipsoid") {
+                grid_cuda_ = std::make_unique<pathcover_cuda::GridProjector>();
+            }
             for (const auto& entry : dmp_->potentialMask(options_.search_resolution)) {
                 distance_mask_.push_back({entry.first.x(), entry.first.y(), entry.first.z(), entry.second});
             }
@@ -390,34 +407,74 @@ public:
         last_update_.inflated_voxels = stats.inflated_voxels;
         const auto grid_begin = Clock::now();
         last_update_.gpu_box_compression = false;
+        last_update_.gpu_grid_projection = false;
         if (stats.changed) {
-            // Exact union of inflated fine cells. Integer runs are merged without
-            // filling gaps; no point-cloud serialization or second inflation.
+            // Search keeps the exact inflated raster in both geometry modes.
+            // Merged raw boxes are a separate geometry cache in box_ellipsoid.
             const auto& fine_grid = inflater_.outputGrid();
-            std::vector<pathcover_boxes::Box> boxes;
+            auto compress = [&](const occupancy_inflation::VoxelBitGrid& source) {
 #ifdef OCCUPANCY_INFLATION_WITH_CUDA
-            if (options_.use_cuda && !fine_grid.empty()
+                if (options_.use_cuda && !source.empty()
+                    && source.wordCount() * occupancy_inflation::kWordBits >= options_.cuda_min_grid_voxels) {
+                    last_update_.gpu_box_compression = true;
+                    return boxes_cuda_->compress(source);
+                }
+#endif
+                return pathcover_boxes::compress(source);
+            };
+            std::vector<pathcover_boxes::Box> boxes;
+            VoxelGrid::resetOccupancy(grid_->map_, occupied_indices_);
+#ifdef OCCUPANCY_INFLATION_WITH_CUDA
+            if (grid_cuda_ && !fine_grid.empty()
                 && fine_grid.wordCount() * occupancy_inflation::kWordBits >= options_.cuda_min_grid_voxels) {
-                boxes = boxes_cuda_->compress(fine_grid);
-                last_update_.gpu_box_compression = true;
+                const auto cloud_occupancy = grid_cuda_->project(
+                    fine_grid, grid_resolution_ratio_, grid_origin_index_, dimensions_);
+                // The kernel returns only cloud occupancy. Existing virtual
+                // boundaries never enter the reset list and are never cleared.
+                for (std::size_t i = 0; i < cloud_occupancy.size(); ++i) {
+                    if (cloud_occupancy[i] && grid_->map_[i] == 0) {
+                        grid_->map_[i] = 100;
+                        occupied_indices_.push_back(static_cast<int>(i));
+                    }
+                }
+                last_update_.gpu_grid_projection = true;
             } else
 #endif
             {
-                boxes = pathcover_boxes::compress(fine_grid);
+                boxes = compress(fine_grid);
+                pathcover_grid::coarsenOccupiedBoxes(
+                    boxes, fine_grid.window(), grid_resolution_ratio_, grid_origin_index_, dimensions_,
+                    grid_->map_, occupied_indices_);
             }
-            VoxelGrid::resetOccupancy(grid_->map_, occupied_indices_);
-            pathcover_grid::coarsenOccupiedBoxes(
-                boxes, fine_grid.window(), grid_resolution_ratio_, grid_origin_index_, dimensions_,
-                grid_->map_, occupied_indices_);
+            if (options_.geometry_model == "box_ellipsoid") boxes = compress(inflater_.seedGrid());
             geometry_box_centers_.clear();
             geometry_box_halfwidths_.clear();
             geometry_box_centers_.reserve(boxes.size());
             geometry_box_halfwidths_.reserve(boxes.size());
             for (const auto& box : boxes) {
-                geometry_box_centers_.push_back(
-                    (box.lower.cast<double>() + box.upper.cast<double>()) * (0.5 * options_.resolution));
-                geometry_box_halfwidths_.push_back(
-                    (box.upper - box.lower).cast<double>() * (0.5 * options_.resolution));
+                if (options_.geometry_model == "inflated_voxels") {
+                    // Preserve the historical diagnostic and RISP arithmetic.
+                    geometry_box_centers_.push_back(
+                        (box.lower.cast<double>() + box.upper.cast<double>()) * (0.5 * options_.resolution));
+                    geometry_box_halfwidths_.push_back(
+                        (box.upper - box.lower).cast<double>() * (0.5 * options_.resolution));
+                } else {
+                    const Vec3 lower = box.lower.cast<double>() * options_.resolution;
+                    const Vec3 upper = box.upper.cast<double>() * options_.resolution;
+                    const Vec3 center = (lower + upper) * 0.5;
+                    Vec3 half = (center - lower).cwiseMax(upper - center);
+                    // Outward representational rounding only: center +/- half
+                    // must enclose the same integer box endpoints, without a
+                    // new physical clearance or a packed-float round trip.
+                    for (int axis = 0; axis < 3; ++axis) {
+                        if (center[axis] - half[axis] > lower[axis]
+                            || center[axis] + half[axis] < upper[axis]) {
+                            half[axis] = std::nextafter(half[axis], std::numeric_limits<double>::infinity());
+                        }
+                    }
+                    geometry_box_centers_.push_back(center);
+                    geometry_box_halfwidths_.push_back(half);
+                }
             }
             map_dirty_ = true;
         }
@@ -444,6 +501,24 @@ public:
         Points output(centers.size(), 3);
         for (std::size_t i = 0; i < centers.size(); ++i) output.row(i) = centers[i];
         return output;
+    }
+
+    py::dict geometry_obstacles() const {
+        Points centers(geometry_box_centers_.size(), 3), halfwidths(geometry_box_halfwidths_.size(), 3);
+        for (std::size_t i = 0; i < geometry_box_centers_.size(); ++i) {
+            centers.row(i) = geometry_box_centers_[i];
+            halfwidths.row(i) = geometry_box_halfwidths_[i];
+        }
+        py::dict result;
+        result["model"] = options_.geometry_model;
+        result["centers"] = std::move(centers);
+        result["halfwidths"] = std::move(halfwidths);
+        if (options_.geometry_model == "box_ellipsoid") {
+            result["body_radii"] = py::make_tuple(options_.radius, options_.radius, options_.radius_z);
+        } else {
+            result["body_radii"] = py::make_tuple(0.0, 0.0, 0.0);
+        }
+        return result;
     }
 
     Points search_obstacle_centers() const {
@@ -477,6 +552,7 @@ public:
         if (!failed_problem_ && !pending_initial_boundary_) return py::none();
         py::dict value;
         value["position_penalty_aggregation"] = options_.position_penalty_aggregation;
+        value["geometry_model"] = options_.geometry_model;
         if (pending_initial_boundary_)
             value["initial_boundary"] = initialBoundaryDict(*pending_initial_boundary_);
         if (!failed_problem_) return value;
@@ -579,13 +655,24 @@ public:
         }
         PlanResult result;
         result.position_penalty_aggregation = options_.position_penalty_aggregation;
+        result.geometry_model = options_.geometry_model;
         result.initial_boundary = *pending_initial_boundary_;
         result.initial_speed = velocity.norm();
         result.speed_acceptance_limit = speedAcceptanceLimit(options_.max_velocity);
         const auto search_begin = Clock::now();
+        const bool raw_geometry = options_.geometry_model == "box_ellipsoid";
+        const Vec3 geometry_radii = raw_geometry
+            ? Vec3(options_.radius, options_.radius, options_.radius_z) : Vec3::Zero();
         const pathcover_endpoint::FineGeometry fine_geometry(
-            inflater_.outputGrid(), options_.resolution, center_lower_, center_upper_);
-        if (!fine_geometry.pointFree(position) || !fine_geometry.pointFree(goal)) {
+            inflater_.outputGrid(), options_.resolution, center_lower_, center_upper_,
+            raw_geometry ? &inflater_.seedGrid() : nullptr, geometry_radii);
+        const char* occupied_endpoint = !fine_geometry.pointFree(position) ? "start"
+            : (!fine_geometry.pointFree(goal) ? "goal" : nullptr);
+        if (occupied_endpoint) {
+            if (raw_geometry) {
+                throw PathCoverPlanningError(std::string("PathCover ") + occupied_endpoint
+                    + " intersects box-ellipsoid geometry");
+            }
             throw PathCoverPlanningError("PathCover start or goal lies in inflated occupancy");
         }
         std::vector<Vec3> path;
@@ -692,7 +779,8 @@ public:
         sdlp::permutation_rng.seed(options_.random_seed);
         try {
             PathCover::pathCover<double, 3>(geometry_box_centers_, path, bounds_A, bounds_b,
-                As, bs, seeds, decay, options_.horizon, options_.alpha, geometry_box_halfwidths_, seed_region);
+                As, bs, seeds, decay, options_.horizon, options_.alpha, geometry_box_halfwidths_, seed_region,
+                nullptr, nullptr, geometry_radii);
         } catch (const PathCover::SeedRegionCollision &error) {
             throw PathCoverPlanningError(error.what());
         }
@@ -865,9 +953,11 @@ PYBIND11_MODULE(_pathcover_native, m) {
         .def_readonly("geometry_boxes", &MappingStats::geometry_boxes)
         .def_readonly("gpu_mapping", &MappingStats::gpu_mapping)
         .def_readonly("gpu_inflation", &MappingStats::gpu_inflation)
-        .def_readonly("gpu_box_compression", &MappingStats::gpu_box_compression);
+        .def_readonly("gpu_box_compression", &MappingStats::gpu_box_compression)
+        .def_readonly("gpu_grid_projection", &MappingStats::gpu_grid_projection);
     py::class_<PlanResult>(m, "PlanResult")
         .def_readonly("position_penalty_aggregation", &PlanResult::position_penalty_aggregation)
+        .def_readonly("geometry_model", &PlanResult::geometry_model)
         .def_readonly("path", &PlanResult::path)
         .def_readonly("selected_initial_motion_seed", &PlanResult::selected_initial_motion_seed)
         .def_readonly("initial_motion_seed_adjusted", &PlanResult::initial_motion_seed_adjusted)
@@ -917,6 +1007,7 @@ PYBIND11_MODULE(_pathcover_native, m) {
              py::arg("initial_thrust_axis") = py::none(), py::call_guard<py::gil_scoped_release>())
         .def("inflated_cloud", &NativeFrontend::inflated_cloud, py::call_guard<py::gil_scoped_release>())
         .def("obstacle_centers", &NativeFrontend::obstacle_centers, py::call_guard<py::gil_scoped_release>())
+        .def("geometry_obstacles", &NativeFrontend::geometry_obstacles)
         .def("search_obstacle_centers", &NativeFrontend::search_obstacle_centers, py::call_guard<py::gil_scoped_release>())
         .def("map_fingerprint", &NativeFrontend::map_fingerprint, py::call_guard<py::gil_scoped_release>())
         .def("potential_map", &NativeFrontend::potential_map, py::call_guard<py::gil_scoped_release>())

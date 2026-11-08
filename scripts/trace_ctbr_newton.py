@@ -57,6 +57,7 @@ def main():
             result = original_plan(frontend, points_world, current_state, goal, **kwargs)
         except BaseException:
             frozen["gcopter_problem"] = frontend.failed_problem()
+            frozen["geometry_obstacles"] = frontend.geometry_obstacles()
             frozen["frontend_config"] = asdict(frontend.config)
             torch.save(frozen, args.output / "failed-frontend-call.pt")
             raise

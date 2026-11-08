@@ -113,7 +113,8 @@ inline void RISP(const std::vector<Eigen::Matrix<T, dim, 1>> &obstacle_pts,
                  const HalfWidths &voxel_half_extent = T(0),
                  const std::vector<Eigen::Matrix<T, dim, 1>> *seed_region = nullptr,
                  Eigen::Matrix<T, -1, dim> *raw_A = nullptr,
-                 Eigen::Matrix<T, -1, 1> *raw_b = nullptr) {
+                 Eigen::Matrix<T, -1, 1> *raw_b = nullptr,
+                 const Eigen::Matrix<T, dim, 1> &body_radii = Eigen::Matrix<T, dim, 1>::Zero()) {
     assert(alpha > T(0) && alpha < T(1) && "RISP: alpha must lie in (0, 1)");
 
     // Uniform voxels and exact merged boxes share the same support arithmetic.
@@ -158,7 +159,12 @@ inline void RISP(const std::vector<Eigen::Matrix<T, dim, 1>> &obstacle_pts,
         T offset = normal.dot(seed) + (T(1) - alpha) * normal.squaredNorm();
         if constexpr (dim == 3) {
             if (protect_region) {
-                const auto plane = seedHullPlane(*seed_region, centre, half, alpha);
+                const auto plane = seedHullPlane(*seed_region, centre, half, alpha, body_radii);
+                normal = plane.first;
+                offset = plane.second;
+            } else if (body_radii.maxCoeff() > T(0)) {
+                const std::vector<Eigen::Matrix<T, 3, 1>> point_region(3, seed);
+                const auto plane = seedHullPlane(point_region, centre, half, alpha, body_radii);
                 normal = plane.first;
                 offset = plane.second;
             }
@@ -168,6 +174,18 @@ inline void RISP(const std::vector<Eigen::Matrix<T, dim, 1>> &obstacle_pts,
         const auto absolute_normal = normal.cwiseAbs().eval();
         remaining.erase(std::remove_if(remaining.begin(), remaining.end(),
             [&](std::size_t index) {
+                if constexpr (dim == 3) {
+                    if (body_radii.maxCoeff() > T(0)) {
+                        const auto widths = halfwidth(index);
+                        const pathcover_clearance::Box box{
+                            (obstacle_pts[index] - widths).template cast<double>(),
+                            (obstacle_pts[index] + widths).template cast<double>()};
+                        // Removal needs the same conservative support certificate
+                        // as the selected cut, without another closest-pair solve.
+                        return -pathcover_clearance::boxSupportUpper(
+                            -normal.template cast<double>(), box, body_radii.template cast<double>()) > double(offset);
+                    }
+                }
                 return normal.dot(obstacle_pts[index]) - absolute_normal.dot(halfwidth(index)) > offset;
             }),
             remaining.end());
@@ -229,7 +247,8 @@ inline void pathCover(const std::vector<Eigen::Matrix<T, Dim, 1>> &obstacle_pts,
                       const HalfWidths &voxel_half_extent = T(0),
                       const std::vector<Eigen::Matrix<T, Dim, 1>> &initial_seed_region = {},
                       std::vector<Eigen::Matrix<T, -1, Dim>> *raw_As = nullptr,
-                      std::vector<Eigen::Matrix<T, -1, 1>> *raw_bs = nullptr) {
+                      std::vector<Eigen::Matrix<T, -1, 1>> *raw_bs = nullptr,
+                      const Eigen::Matrix<T, Dim, 1> &body_radii = Eigen::Matrix<T, Dim, 1>::Zero()) {
 
     if (path.empty() || max_horizon < 1) {
         throw std::invalid_argument("PathCover needs a path and a positive corridor horizon");
@@ -247,7 +266,7 @@ inline void pathCover(const std::vector<Eigen::Matrix<T, Dim, 1>> &obstacle_pts,
         RISP<T, Dim>(obstacle_pts, point, A_bound, b_bound,
                      current_A, current_b, decay, alpha, voxel_half_extent,
                      A.empty() && !initial_seed_region.empty() ? &initial_seed_region : nullptr,
-                     raw_As ? &raw_A : nullptr, raw_bs ? &raw_b : nullptr);
+                     raw_As ? &raw_A : nullptr, raw_bs ? &raw_b : nullptr, body_radii);
         A.push_back(current_A);
         b.push_back(current_b);
         if (raw_As) raw_As->push_back(raw_A);

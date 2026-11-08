@@ -10,9 +10,11 @@
 #include <queue>
 #include <stdexcept>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "occupancy_inflation/voxel_bit_grid.h"
+#include "pathcover_clearance.h"
 
 namespace pathcover_endpoint {
 
@@ -23,17 +25,24 @@ using Index = Eigen::Vector3i;
 // No packed-float serialization or second body inflation is involved.
 class FineGeometry {
     const occupancy_inflation::VoxelBitGrid& grid_;
+    const occupancy_inflation::VoxelBitGrid* source_grid_;
     double resolution_;
     Point lower_, upper_;
+    Point body_radii_;
 
 public:
     FineGeometry(const occupancy_inflation::VoxelBitGrid& grid, double resolution,
-                 const Point& lower, const Point& upper)
-        : grid_(grid), resolution_(resolution), lower_(lower), upper_(upper) {}
+                 const Point& lower, const Point& upper,
+                 const occupancy_inflation::VoxelBitGrid* source_grid = nullptr,
+                 const Point& body_radii = Point::Zero())
+        : grid_(grid), source_grid_(source_grid), resolution_(resolution),
+          lower_(lower), upper_(upper), body_radii_(body_radii) {}
 
     double resolution() const { return resolution_; }
     const Point& lower() const { return lower_; }
     const Point& upper() const { return upper_; }
+    const Point& bodyRadii() const { return body_radii_; }
+    bool usesBoxEllipsoid() const { return source_grid_ != nullptr; }
     Point center(const Index& index) const {
         return (index.cast<double>().array() + 0.5).matrix() * resolution_;
     }
@@ -42,13 +51,15 @@ public:
             && (point.array() <= upper_.array()).all();
     }
     bool centerFree(const Index& index) const {
+        if (source_grid_) return pointFree(center(index));
         return insideWorkspace(center(index)) && !grid_.testGlobal(index);
     }
 
     template<class Visitor>
-    bool visitOccupied(Index first, Index last, Visitor&& visitor) const {
-        if (grid_.empty()) return true;
-        const auto& window = grid_.window();
+    static bool visitGridOccupied(const occupancy_inflation::VoxelBitGrid& grid,
+                                  Index first, Index last, Visitor&& visitor) {
+        if (grid.empty()) return true;
+        const auto& window = grid.window();
         first = first.cwiseMax(window.base);
         last = last.cwiseMin(window.maxIndex());
         if ((first.array() > last.array()).any()) return true;
@@ -57,7 +68,7 @@ public:
         const int last_word = local_last.x() / occupancy_inflation::kWordBits;
         for (int z = local_first.z(); z <= local_last.z(); ++z) {
             for (int y = local_first.y(); y <= local_last.y(); ++y) {
-                const auto* row = grid_.data() + window.rowOffset(y, z);
+                const auto* row = grid.data() + window.rowOffset(y, z);
                 for (int word = first_word; word <= last_word; ++word) {
                     uint64_t bits = row[word];
                     if (word == first_word) bits &= ~uint64_t{0} << (local_first.x() % 64);
@@ -74,6 +85,17 @@ public:
             }
         }
         return true;
+    }
+
+    template<class Visitor>
+    bool visitOccupied(Index first, Index last, Visitor&& visitor) const {
+        return visitGridOccupied(grid_, first, last, std::forward<Visitor>(visitor));
+    }
+
+    template<class Visitor>
+    bool visitSourceOccupied(Index first, Index last, Visitor&& visitor) const {
+        return visitGridOccupied(source_grid_ ? *source_grid_ : grid_, first, last,
+                                 std::forward<Visitor>(visitor));
     }
 
     std::vector<Point> occupiedCenters() const {
@@ -109,14 +131,46 @@ public:
 
     bool segmentFree(const Point& begin, const Point& end) const {
         if (!insideWorkspace(begin) || !insideWorkspace(end)) return false;
-        // The one-index lower halo includes boxes touching a grid face. It only
-        // broadens enumeration; the exact slab predicate decides intersection.
-        const Index first = (begin.cwiseMin(end).array() / resolution_).floor().cast<int>().matrix()
+        // The one-index halo includes boxes touching a grid face. It only
+        // broadens enumeration; it does not enlarge the occupied geometry.
+        const Point segment_lower = begin.cwiseMin(end), segment_upper = begin.cwiseMax(end);
+        const Index first = (segment_lower.array() / resolution_).floor().cast<int>().matrix()
             - Index::Ones();
-        const Index last = (begin.cwiseMax(end).array() / resolution_).floor().cast<int>().matrix()
+        const Index last = (segment_upper.array() / resolution_).floor().cast<int>().matrix()
             + Index::Ones();
-        return visitOccupied(first, last, [&](const Index& index) {
-            return !segmentIntersectsBox(begin, end, center(index), resolution_ * 0.5);
+        if (!source_grid_) {
+            return visitOccupied(first, last, [&](const Index& index) {
+                return !segmentIntersectsBox(begin, end, center(index), resolution_ * 0.5);
+            });
+        }
+        // New-mode raster bounds enclose the integer lattice endpoints rather
+        // than reconstructing center +/- half, which can shrink at closed
+        // contact. One outward ULP also covers products such as 7 * .1 > .7.
+        // A segment-AABB overlap is deliberately only a conservative broad
+        // phase; avoiding slab divisions here preserves that inclusion at a
+        // tangency. Every possible hit is decided by the raw narrow phase.
+        const bool raster_free = visitOccupied(first, last, [&](const Index& index) {
+            for (int axis = 0; axis < 3; ++axis) {
+                const double lo = std::nextafter(static_cast<double>(index[axis]) * resolution_,
+                                                -std::numeric_limits<double>::infinity());
+                const double hi = std::nextafter(static_cast<double>(index[axis] + 1) * resolution_,
+                                                std::numeric_limits<double>::infinity());
+                if (segment_upper[axis] < lo || segment_lower[axis] > hi) return true;
+            }
+            return false;
+        });
+        if (raster_free) return true;
+        // The raster is a conservative broad phase. Narrow-phase clearance is
+        // measured against raw occupied boxes plus the body ellipsoid once.
+        const Index raw_first = ((segment_lower - body_radii_).array()
+            / resolution_).floor().cast<int>().matrix() - Index::Ones();
+        const Index raw_last = ((segment_upper + body_radii_).array()
+            / resolution_).floor().cast<int>().matrix() + Index::Ones();
+        return visitSourceOccupied(raw_first, raw_last, [&](const Index& index) {
+            const pathcover_clearance::Box box{
+                index.cast<double>() * resolution_,
+                (index + Index::Ones()).cast<double>() * resolution_};
+            return pathcover_clearance::segmentFree(begin, end, box, body_radii_);
         });
     }
 
@@ -279,8 +333,11 @@ inline Connections connect(const Point& endpoint, const FineGeometry& fine,
                 continue;
             }
             const double candidate = cost + (fine.center(next) - point).norm();
-            // An axis edge between two free fine-cell centers lies in those
-            // two cells. Both endpoints are also inside the convex workspace.
+            // Raw boxes use this same lattice and the ellipsoid is axis aligned.
+            // Any nonempty cross-section along this axis contains the raw box's
+            // interval (at least one cell wide). A one-cell center-to-center edge
+            // cannot cross that section with both endpoints free. This proof
+            // does not apply to endpoint, anchor, or simplified long segments.
             if (candidate < distance[next_id]) {
                 parents[next_id] = id;
                 distance[next_id] = candidate;
@@ -289,7 +346,7 @@ inline Connections connect(const Point& endpoint, const FineGeometry& fine,
         }
     }
     // Reconstruct only one shortest local-grid route per coarse anchor, then
-    // remove unnecessary turns using the same exact fine-AABB segment test.
+    // remove unnecessary turns using the selected exact geometry segment test.
     for (const auto& anchor : anchor_nodes) {
         std::vector<Point> reverse;
         for (int node = anchor.node; node >= 0; node = parents[node]) reverse.push_back(fine.center(globalIndex(node)));

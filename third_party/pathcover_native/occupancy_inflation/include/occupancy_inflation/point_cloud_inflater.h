@@ -225,6 +225,11 @@ class PointCloudInflater {
     return params_.publish_surface_only ? surface_ : inflated_;
   }
 
+  /** @brief Complete raw occupied snapshot consumed by the last inflation.
+   * The read-only view is invalidated by the next mutating operation.
+   */
+  const VoxelBitGrid &seedGrid() const { return seed_; }
+
   /** @brief Voxels in the inflated map, shell or not. */
   std::size_t inflatedCount() const { return occupied_count_; }
   /** @brief Voxels in the seed map, i.e. points serializeSeeds() will write. */

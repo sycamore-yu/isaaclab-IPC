@@ -38,6 +38,16 @@ code and evidence remain available; this branch develops the new AC-MPC route.
 - Costs are learned about a reference. In absolute solver coordinates the
   linear coefficient is `q_abs = q_local - D * z_ref`. Scaling is selected for
   numerical conditioning and documented separately from the author baseline.
+- A0 uses a shared Newton/MARSIM fixed-clock line reference at `reference_speed`,
+  initially 3 m/s. Sample N+1 positions from the current measured position toward
+  the mission goal, stopping the position samples at that goal. Their forward
+  differences give N velocity targets, including a partial arrival interval.
+  Preserve the real mission goal feature, measured x0 and saved warm controls.
+  The velocity changes, zero acceleration and heading are soft references, not
+  a continuous dynamically feasible trajectory. This requires no geometric
+  planner or free-time variables. The earlier repeated distant-goal reference
+  failed nonlinear SQP even with fixed costs on the saved 100 m input. A shared
+  reference contract changes A0 training inputs, so retrain its checkpoint.
 - At `t_now + k*dt`, sample the native polynomial and its owning corridor.
   Exact corridor junctions use both adjacent sets of faces. Use acceleration
   and yaw to construct reference attitude. Do not assume zero roll and pitch.
@@ -45,7 +55,9 @@ code and evidence remain available; this branch develops the new AC-MPC route.
   face as a hard constraint. GCOPTER's soft penalties alone are not a proof of
   constraint satisfaction; record sampled violations during validation.
 - CTBR factories use zero additional GCOPTER position margin. Robot clearance
-  remains in occupancy inflation and the returned raw SFCs. The earlier additional
+  is represented by the occupied voxel boxes plus the body ellipsoid when
+  constructing the returned SFCs. Inflated raster cells remain a conservative
+  search representation. The earlier additional
   0.15 m inward penalty offset could conflict with braking near a corridor face;
   removing it does not enlarge those SFCs or change the physical collision radius.
   Standalone PathCover retains the official YAML's 0.15 m reference margin, and
@@ -268,17 +280,61 @@ Only positive-volume overlap occupies a coarse cell. Recognize commensurate
 resolution ratios at configuration time; do not route geometry through packed
 float centres. Packed points remain a diagnostic representation.
 
-Use authoritative fine occupancy for RISP and motion-seed geometry; retain the
-conservatively coarsened map for DMP. Coalesce adjacent occupied integer voxels
-into disjoint rectangular boxes with exactly the same union. RISP uses each
-box's three half extents. Its randomized cuts can change with grouping, but the
-obstacle volume must not change. Remove redundant half spaces using the existing
-dual convex hull procedure. This preserves the polytope, not the sum of soft
-penalties outside it.
+CTBR factories select `geometry_model=box_ellipsoid`. Use the original occupied
+NanoVoxMap voxel volumes, coalesced into boxes with exactly the same union, plus
+the body ellipsoid for endpoints, motion seeds and RISP. The body clearance is a
+single Minkowski addition. Keep the rasterized inflated map for conservative
+coarse DMP search. Its occupied cells are not the continuous geometry predicate.
+Standalone and historical configurations without the field retain
+`geometry_model=inflated_voxels`.
 
-Reuse those exact integer boxes to project coarse occupancy. Merge matching X
-intervals across consecutive rows before the remaining Z sort, preserving final
-box order and RISP input. Compute 3D legal-neighbour masks together with the CUDA
+The ellipsoid axes stay aligned with the world frame; the current CTBR body is
+a 0.2 m sphere. For positive body semiaxes, scale space to a unit sphere. Point, segment,
+triangle and tetrahedron distances to an axis-aligned box then give the relevant
+intersection predicates. RISP subtracts the ellipsoid support from the nearest
+box support when constructing a separating plane. Initial seed selection still
+keeps p0/p1 fixed. For each raw box, the union of candidate triangles over an
+interval of the thrust-tip parameter is their four-point convex hull. Prefix
+and suffix intersection bisections enclose that box's complete forbidden
+interval; merge the per-box intervals before selecting a free tip. Contact is
+blocked. Preserve an already valid warm seed exactly. Endpoint virtual edges,
+coarse anchors and visibility simplification use the same segment predicate.
+Adjacent six-axis fine centers retain their original fast edge test: every
+nonempty axis section of a raw lattice box plus an axis-aligned ellipsoid has
+length at least one fine cell, so it cannot cross that edge without containing
+an endpoint. This property does not apply to arbitrary edges. All-zero semiaxes
+reduce to boxes; partially zero
+semiaxes are explicitly unsupported in this mode, not replaced by epsilon radii.
+
+This removes a demonstrated rasterization artifact in V28 Dense. At 44.8 s the
+measured start was inside an inflated fine cell, although its distance to the
+only contributing raw occupied voxel box was 0.316371 m for a 0.2 m body radius.
+The old plan still contained the measured position; the newly observed cell
+blocked the next planning call. No occupied input voxel is cleared by the new
+geometry. V28's 418 returned references passed the complete curve checks, but
+that run completed 0/2 waypoints and its all-attempt planning p95 was 104.857 ms.
+New geometry therefore still requires task and performance validation.
+
+RISP randomized cuts can change with box grouping, while the raw occupied union
+must not change. Remove redundant half spaces using the existing dual convex
+hull procedure. This preserves the polytope, not the sum of soft penalties
+outside it. Record actual geometry mode and expose cached obstacle boxes plus
+body radii for failure diagnostics outside the timed successful control path.
+
+The historical geometry reuses its exact inflated boxes to project coarse
+occupancy. In the new CUDA geometry path, project the inflated bit-grid directly:
+one coarse-cell thread reads precisely the overlapping fine-cell intervals using
+the same integer positive-volume rule. Preserve virtual boundary cells when
+merging the returned cloud occupancy. This avoids constructing inflated boxes
+that the new RISP no longer consumes; compress the raw boxes only once. The
+explicit CPU path retains the same coarse-cell result. Record the actual
+`gpu_grid_projection` observation. A frozen Dense grid with 1,832,342 fine cells
+produced identical 369,600 coarse bytes with the direct CUDA, old CUDA-box, and
+CPU volume paths. Direct projection reduced local p50 from 6.272604 to 2.388317 ms
+in that comparison, excluding the new raw-box compression and other stages.
+
+Merge matching X intervals across consecutive rows before the remaining Z sort,
+preserving final box order and RISP input. Compute 3D legal-neighbour masks together with the CUDA
 distance field. The masks depend only on original occupancy and map boundaries;
 regional search restrictions and CLOSED states stay in the search. Install the
 potential and masks together, and clear masks when replacing a map through the

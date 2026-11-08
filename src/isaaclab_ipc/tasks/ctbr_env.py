@@ -15,7 +15,7 @@ import numpy as np
 import torch
 
 from isaaclab_ipc.assets.quadrotor import MASS, MAX_THRUST
-from isaaclab_ipc.rl.ctbr_observation import ctbr_feature_size, make_ctbr_observation, terminal_ctbr_observation
+from isaaclab_ipc.rl.ctbr_observation import ctbr_feature_size, goal_ctbr_observation, terminal_ctbr_observation
 from isaaclab_ipc.turbompc.ctbr import CTBRConfig
 from isaaclab_ipc.turbompc.quadrotor import body_rates_from_isaac, state_from_isaac
 
@@ -41,6 +41,7 @@ def _configure_ctbr(cfg, frontend):
     model = CTBRConfig(mass=MASS)
     cfg.ctbr_model = asdict(model)
     cfg.frontend = frontend
+    cfg.reference_speed = 3.0
     cfg.pathcover_config = {}
     cfg.max_planes = 0 if frontend == "none" else 128
     cfg.reward = NavigationRewardCfg()
@@ -74,7 +75,8 @@ def pathcover_config_for_ctbr(model, overrides):
 
     options = dict(overrides)
     options.setdefault("max_corridors", 4)
-    # Obstacle clearance is already encoded by occupancy inflation and raw SFCs.
+    options.setdefault("geometry_model", "box_ellipsoid")
+    # The original SFC already separates occupied boxes plus the body ellipsoid.
     options.setdefault("safety_margin", 0.0)
     options.setdefault("position_penalty_aggregation", "continuous_max")
     for name in ("mass", "gravity"):
@@ -243,6 +245,7 @@ class CTBRMPCEnv(IPCEnv):
             "gcopter_problems": [frontend.failed_problem() for frontend in self.navigation.frontends],
             "inflated_clouds": [frontend.inflated_cloud() for frontend in self.navigation.frontends],
             "obstacle_boxes": [frontend.obstacle_boxes() for frontend in self.navigation.frontends],
+            "geometry_obstacles": [frontend.geometry_obstacles() for frontend in self.navigation.frontends],
             "previous_plans": self.navigation.last_plans,
         }
         torch.save(snapshot, path)
@@ -281,16 +284,9 @@ class CTBRMPCEnv(IPCEnv):
             state = state_from_isaac(pose, twist, self.scene.env_origins)
             rates = body_rates_from_isaac(pose, twist)
             goals = self.goal.expand(self.num_envs, 3) if self.goal.ndim == 1 else self.goal
-            nodes = self.ctbr_config.cost_nodes
-            reference = state.new_zeros((self.num_envs, nodes, 9))
-            reference[..., :3] = goals[:, None]
-            delta = goals - state[:, :3]
-            yaw = torch.atan2(delta[:, 1], delta[:, 0])[:, None]
-            planes = state.new_zeros((self.num_envs, nodes, 0, 4))
-            mask = torch.zeros(planes.shape[:-1], dtype=torch.bool, device=self.device)
-            result = make_ctbr_observation(
-                state, rates, goals, reference, yaw, planes, mask,
-                ctbr_config=self.ctbr_config, warm_start_controls=self._warm_controls,
+            result = goal_ctbr_observation(
+                state, rates, goals, ctbr_config=self.ctbr_config,
+                reference_speed=self.cfg.reference_speed, warm_start_controls=self._warm_controls,
             )
             self.observation_times.append(1000 * (perf_counter() - tick))
         elif not self.cfg.automatic_reset and bool(self.reported.any()):

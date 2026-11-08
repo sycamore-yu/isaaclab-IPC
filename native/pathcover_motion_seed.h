@@ -152,7 +152,8 @@ inline Interval workspaceDomain(const Triangle& preferred, const TipSegment& tip
 }
 
 inline Selection select(const Triangle& preferred, const TipSegment& tips,
-                        const std::vector<Box>& boxes, const Point& lower, const Point& upper) {
+                        const std::vector<Box>& boxes, const Point& lower, const Point& upper,
+                        const Point& body_radii = Point::Zero()) {
     for (const auto& point : preferred) if (!point.allFinite()) {
         throw std::invalid_argument("Motion seed points must be finite");
     }
@@ -166,15 +167,22 @@ inline Selection select(const Triangle& preferred, const TipSegment& tips,
         throw std::invalid_argument("Preferred motion tip must lie on its supplied segment");
     }
     const Interval domain = workspaceDomain(preferred, tips, lower, upper);
+    const bool rounded = body_radii.maxCoeff() > 0.0;
+    auto separated_from_box = [&](const Triangle& points, const Box& box) {
+        if (!rounded) return separated(points, box);
+        const auto clearance = pathcover_clearance::triangleClosest(points, {box.lower, box.upper}, body_radii);
+        // Keep the existing numerical separation required by the RISP seed cut.
+        return clearance.free && clearance.seed_support - clearance.obstacle_support > 1e-10;
+    };
     auto free = [&](const Triangle& points) {
         if ((points[2].array() < lower.array()).any() || (points[2].array() > upper.array()).any()) return false;
-        for (const auto& box : boxes) if (!separated(points, box)) return false;
+        for (const auto& box : boxes) if (!separated_from_box(points, box)) return false;
         return true;
     };
     // Preserve every bit of a valid warm seed, including GPU arithmetic order.
     if (free(preferred)) return {preferred, preference, false};
     const Triangle fixed_edge{preferred[0], preferred[1], preferred[1]};
-    for (const auto& box : boxes) if (!separated(fixed_edge, box)) {
+    for (const auto& box : boxes) if (!separated_from_box(fixed_edge, box)) {
         throw NoFeasibleSeed("PathCover fixed motion seed edge intersects an occupied voxel");
     }
     auto at = [&](double alpha) {
@@ -187,8 +195,15 @@ inline Selection select(const Triangle& preferred, const TipSegment& tips,
     }
     std::vector<Interval> blocked;
     for (const auto& box : boxes) {
-        const auto interval = collisionInterval(preferred[0], preferred[1], tips, box, domain);
-        if (interval) blocked.push_back(*interval);
+        if (rounded) {
+            const auto interval = pathcover_clearance::collisionInterval(
+                preferred[0], preferred[1], tips, {box.lower, box.upper}, body_radii,
+                {domain.lower, domain.upper});
+            if (interval) blocked.push_back({interval->lower, interval->upper});
+        } else {
+            const auto interval = collisionInterval(preferred[0], preferred[1], tips, box, domain);
+            if (interval) blocked.push_back(*interval);
+        }
     }
     blocked = mergeIntervals(std::move(blocked));
     std::vector<Interval> available;
@@ -243,20 +258,33 @@ inline Selection select(const Triangle& preferred, const TipSegment& tips,
         minimum = minimum.cwiseMin(point); maximum = maximum.cwiseMax(point);
     }
     const double resolution = geometry.resolution();
-    const Eigen::Vector3i first = (minimum.array() / resolution).floor().cast<int>().matrix()
+    const Point radii = geometry.bodyRadii();
+    const Eigen::Vector3i first = ((minimum - radii).array() / resolution).floor().cast<int>().matrix()
         - Eigen::Vector3i::Ones();
-    const Eigen::Vector3i last = (maximum.array() / resolution).floor().cast<int>().matrix()
+    const Eigen::Vector3i last = ((maximum + radii).array() / resolution).floor().cast<int>().matrix()
         + Eigen::Vector3i::Ones();
     std::vector<Box> boxes;
-    geometry.visitOccupied(first, last, [&](const Eigen::Vector3i& index) {
+    geometry.visitSourceOccupied(first, last, [&](const Eigen::Vector3i& index) {
         const Point lower = index.cast<double>() * resolution;
         const Point upper = (index + Eigen::Vector3i::Ones()).cast<double>() * resolution;
-        if ((upper.array() >= minimum.array()).all() && (lower.array() <= maximum.array()).all()) {
+        Point expanded_lower = lower - radii, expanded_upper = upper + radii;
+        if (geometry.usesBoxEllipsoid() && (radii.array() > 0.0).all()) {
+            // Broad-phase addition/subtraction must enclose closed contact.
+            // The stored raw box and the narrow-phase radius stay unchanged.
+            for (int axis = 0; axis < 3; ++axis) {
+                expanded_lower[axis] = std::nextafter(expanded_lower[axis],
+                    -std::numeric_limits<double>::infinity());
+                expanded_upper[axis] = std::nextafter(expanded_upper[axis],
+                    std::numeric_limits<double>::infinity());
+            }
+        }
+        if ((expanded_upper.array() >= minimum.array()).all()
+            && (expanded_lower.array() <= maximum.array()).all()) {
             boxes.push_back({lower, upper});
         }
         return true;
     });
-    return select(preferred, tips, boxes, geometry.lower(), geometry.upper());
+    return select(preferred, tips, boxes, geometry.lower(), geometry.upper(), radii);
 }
 
 } // namespace pathcover_motion_seed

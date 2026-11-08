@@ -27,6 +27,9 @@ class PathCoverConfig:
     endpoint_connection_radius: float = 1.0
     robot_radius: float = 0.25
     robot_radius_z: float | None = None
+    # Historical standalone plans use rasterized inflated cells. CTBR uses the
+    # original occupied boxes plus the body ellipsoid for continuous geometry.
+    geometry_model: str = "inflated_voxels"
     # Physical reference speed diagnostic. The cruise-speed penalty can use a
     # lower nominal value; finite soft violations remain visible in plan metrics.
     max_velocity: float = 6.0
@@ -78,6 +81,14 @@ class PathCoverConfig:
     yaw_low_speed: float = 0.1
 
     def __post_init__(self):
+        if self.geometry_model not in ("inflated_voxels", "box_ellipsoid"):
+            raise ValueError("geometry_model must be inflated_voxels or box_ellipsoid")
+        if self.geometry_model == "box_ellipsoid":
+            radius_z = self.robot_radius if self.robot_radius_z is None else self.robot_radius_z
+            radii = (self.robot_radius, radius_z)
+            if (not all(math.isfinite(radius) and radius >= 0 for radius in radii)
+                    or (min(radii) == 0 and max(radii) != 0)):
+                raise ValueError("box_ellipsoid requires finite positive body radii or all-zero radii")
         if self.position_penalty_aggregation not in ("integral", "continuous_max"):
             raise ValueError("position_penalty_aggregation must be integral or continuous_max")
         if (not math.isfinite(self.body_rate_max)
@@ -280,8 +291,16 @@ class NativePathCoverFrontend:
         return self._native.inflated_cloud()
 
     def obstacle_boxes(self):
-        """Copy authoritative fine SFC AABBs as (centres[M,3], scalar half extent)."""
+        """Copy rasterized inflated cells as (centres[M,3], scalar half extent).
+
+        These cells are conservative search geometry. Use geometry_obstacles()
+        for the actual continuous corridor geometry in box_ellipsoid mode.
+        """
         return self._native.obstacle_centers(), 0.5 * self.config.resolution
+
+    def geometry_obstacles(self):
+        """Copy cached corridor obstacles and body radii for offline diagnostics."""
+        return self._native.geometry_obstacles()
 
     def search_obstacle_boxes(self):
         """Copy the conservatively coarsened DMP AABBs for search diagnostics."""
@@ -304,6 +323,7 @@ class NativePathCoverFrontend:
                 "initial_motion_seed": seed.copy(), "initial_motion_tip_segment": tip_segment.copy(),
                 "initial_thrust_axis": None if thrust_axis is None else thrust_axis.copy(),
                 "initial_boundary": dict(result.initial_boundary),
+                "geometry_model": result.geometry_model,
                 "position_penalty_aggregation": result.position_penalty_aggregation,
                 "corridors": tuple(result.corridors), "optimizer_status": result.optimizer_status,
                 "trial_durations": np.asarray(result.durations).copy(),
@@ -434,6 +454,7 @@ class NativePathCoverFrontend:
             "time_initialization_scale": initialization["scale"],
             "optimizer_status": result.optimizer_status, "objective": result.cost,
             "initial_boundary": initial_boundary,
+            "geometry_model": result.geometry_model,
             "position_penalty_aggregation": result.position_penalty_aggregation,
             "optimizer_quadrature_feasible": result.optimizer_quadrature_feasible,
             "constraint_metrics_semantics": (
@@ -459,6 +480,7 @@ class NativePathCoverFrontend:
             "geometry_boxes": last_map.geometry_boxes,
             "gpu_mapping": last_map.gpu_mapping, "gpu_inflation": last_map.gpu_inflation,
             "gpu_box_compression": last_map.gpu_box_compression,
+            "gpu_grid_projection": last_map.gpu_grid_projection,
             "gpu_distance_map": result.gpu_distance_map,
             "gpu_legal_moves": result.gpu_legal_moves,
             "speed_initial_m_s": result.initial_speed,

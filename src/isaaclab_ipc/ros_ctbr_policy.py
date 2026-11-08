@@ -20,7 +20,7 @@ from .assets.quadrotor import MASS
 from .benchmark_config import load_case
 from .ctbr_navigation import PathCoverNavigation, position_sfc_violation
 from .rl.ctbr_actor import CTBRMPCActor
-from .rl.ctbr_observation import make_ctbr_observation
+from .rl.ctbr_observation import goal_ctbr_observation
 from .turbompc.ctbr import CTBRConfig
 
 
@@ -35,17 +35,14 @@ def load_ctbr_checkpoint(path):
     return checkpoint, actor_cfg, CTBRConfig(**model)
 
 
-def goal_observation(state, body_rates, goal, config, *, max_planes=128, warm_start_controls=None):
-    """A0 uses the goal directly and has no geometric frontend constraints."""
-    batch, nodes = len(state), config.cost_nodes
-    pva = state.new_zeros((batch, nodes, 9))
-    pva[..., :3] = goal[:, None]
-    direction = goal[:, :2] - state[:, :2]
-    yaw = torch.atan2(direction[:, 1], direction[:, 0])[:, None].expand(-1, nodes)
-    planes = state.new_zeros((batch, nodes, max_planes, 4))
-    mask = torch.zeros(planes.shape[:-1], dtype=torch.bool, device=state.device)
-    return make_ctbr_observation(state, body_rates, goal, pva, yaw, planes, mask,
-                                 ctbr_config=config, warm_start_controls=warm_start_controls)
+def goal_observation(
+    state, body_rates, goal, config, *, reference_speed=3.0, max_planes=128, warm_start_controls=None,
+):
+    """A0 shares Newton's fixed-clock line reference and has no geometric frontend."""
+    return goal_ctbr_observation(
+        state, body_rates, goal, ctbr_config=config, reference_speed=reference_speed,
+        max_planes=max_planes, warm_start_controls=warm_start_controls,
+    )
 
 
 def benchmark_frontend_config(case, config, reference_speed=3.0, *, nominal_thrust_min=None):
@@ -65,6 +62,7 @@ def benchmark_frontend_config(case, config, reference_speed=3.0, *, nominal_thru
         search_resolution=0.25 if mapping["resolution"] < 0.25 else None,
         robot_radius=case["planner"]["super_planner"]["robot_r"],
         max_corridors=4, safety_margin=0.0, position_penalty_aggregation="continuous_max",
+        geometry_model="box_ellipsoid",
         max_velocity=physical_speed, nominal_velocity=min(reference_speed, physical_speed),
         mass=config.mass, gravity=config.gravity,
         thrust_min=config.mass * config.specific_thrust_limits[0],
@@ -85,6 +83,7 @@ class CTBRController:
                  device="cuda:0", max_planes=128, reference_speed=3.0):
         started = perf_counter()
         self.device = torch.device(device)
+        self.reference_speed = float(reference_speed)
         self.case = load_case(benchmark)
         self.frontend_name = frontend
         self.max_planes = 0 if frontend == "none" else max_planes
@@ -105,6 +104,7 @@ class CTBRController:
         rates = state.new_zeros((1, 3))
         warm_goal = state[:, :3] + state.new_tensor([.25, .1, .1])
         sample = TensorDict(goal_observation(state, rates, warm_goal, self.config,
+                                            reference_speed=self.reference_speed,
                                             max_planes=self.max_planes), batch_size=[1])
         actor_cfg.setdefault("model_config", asdict(self.config))
         self.actor = CTBRMPCActor(sample, {"actor": ["policy"]}, "actor", 4, **actor_cfg).to(self.device)
@@ -132,7 +132,8 @@ class CTBRController:
         acceleration_t, goal_t = physical[:, 13:16], physical[:, 16:19]
         if self.navigation is None:
             context = goal_observation(state_t, rates_t, goal_t, self.config,
-                max_planes=self.max_planes, warm_start_controls=self.warm_start)
+                reference_speed=self.reference_speed, max_planes=self.max_planes,
+                warm_start_controls=self.warm_start)
         else:
             context = self.navigation.observe(state_t, rates_t, acceleration_t, goal_t, {0: cloud}, now,
                                               warm_start_controls=self.warm_start)
@@ -323,6 +324,7 @@ def main(args=None):
                         frontend = self.controller.navigation.frontends[0]
                         failure.update(frontend_config=asdict(frontend.config),
                             inflated_cloud=frontend.inflated_cloud(),
+                            geometry_obstacles=frontend.geometry_obstacles(),
                             gcopter_problem=frontend.failed_problem(),
                             previous_plan=self.controller.navigation.last_plans[0])
                     torch.save(failure, self.directory / "failed-frontend-input.pt")

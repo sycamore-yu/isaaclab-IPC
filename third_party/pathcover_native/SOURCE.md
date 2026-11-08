@@ -715,6 +715,65 @@ license; embedded geometry utilities retain their original notices.
     clocks. Evidence: `formal-v27-analysis/continuous-max-position-panel.json`
     and `newton-quality-v27/continuous-max-bernstein-pruning/parity.json`.
 
+52. Geometry has an explicit `geometry_model` contract. Historical and standalone
+    configurations retain `inflated_voxels`; CTBR factories select
+    `box_ellipsoid`. The latter keeps the same conservative inflated coarse map
+    for search, but tests endpoints and the protected motion seed, and constructs
+    RISP planes, against raw NanoVoxMap occupied boxes plus the existing
+    world-axis-aligned body ellipsoid. An exact integer box partition preserves
+    the raw occupancy union; adding the ellipsoid distributes over that union.
+    Raw integer endpoints are converted once, with only outward representational
+    rounding if the center/half-width representation would otherwise shrink a
+    box. There is no additional physical inflation, occupancy clearing, or
+    endpoint recovery. The new mode accepts all-positive or all-zero body axes;
+    partial-zero axes are explicit input errors, not epsilon replacements.
+    Positive axes use a diagonal change of coordinates to a unit sphere, finite
+    simplex/AABB closest-feature calculations, and outward-rounded world support
+    certificates. Contact and unresolved numerical contact remain occupied.
+    RISP's original dimensionless alpha and numerical seed-separation gap remain
+    unchanged; removing another box uses its conservative support in the same
+    plane. Per-box motion-tip collision intervals are found through the swept
+    tetrahedron identity, then merged before selecting a free component. No
+    force sampling or new control equality is introduced. The fixed p0/p1 edge
+    must remain free, and a valid preferred seed remains bitwise unchanged.
+    Endpoint, coarse-anchor and simplified long edges use the selected geometry's
+    segment predicate. The new-mode raster broad phase uses integer lattice
+    endpoints rounded outward by one ULP and conservative segment-AABB overlap;
+    raw-box narrow phase decides closed contact. This avoids both center/half
+    reconstruction gaps and products such as 7 * 0.1 > 0.7 without adding a
+    physical margin. The old-mode slab arithmetic is unchanged.
+    Six-axis edges between free neighboring fine centers keep
+    the original fast path: for same-lattice raw boxes and an axis-aligned
+    ellipsoid, any nonempty axis cross-section contains a raw interval at least
+    one fine cell wide. Such an edge cannot cross it with both centers free.
+    Actual plan/failure mode and lazily exported `geometry_obstacles` distinguish
+    raw merged boxes/body axes from the historical inflated-voxel diagnostic.
+    The Dense V28 corner fixture has 116.371 mm raw-box/sphere clearance even
+    though its center is inside a rasterized inflated voxel. The failed capture
+    lacks the complete raw historical map; this one-box evidence is not a full
+    historical-map replay. Geometry contracts and fresh full-chain evaluation
+    are separate evidence. See `formal-v28-analysis/dense-endpoint-geometry-cause.md`
+    and the clearance/geometry adapter tests. No new-version performance or
+    physical success is implied by these local contracts.
+
+53. In `box_ellipsoid` mode, CUDA coarse-grid projection reads the inflated
+    logical bit-grid directly, avoiding an inflated-box compression that RISP
+    no longer consumes. Each coarse-cell thread applies the same rational
+    positive-volume overlap rule as the CPU reference. Only cloud occupancy is
+    returned; the host preserves virtual workspace cells and records only newly
+    occupied cloud indices for the existing reset. Raw-box compression remains
+    once per changed map for the new RISP geometry. This path follows the
+    existing `use_cuda` and `cuda_min_grid_voxels` controls. The old geometry mode
+    and explicit CPU path retain their prior projection. Actual execution is
+    reported by `gpu_grid_projection`; the full work remains within `grid_ms`,
+    without another overlapping timer. The V28 failed Dense inflated bitmap
+    reproduced all 369,600 coarse bytes and 197,149 occupied cells. On one local
+    20-pair experiment, the replaced inflated-box/projection component decreased
+    from 6.273/7.399 ms p50/p95 to 2.388/2.909 ms. That comparison rebuilt the
+    same bounded packed window for all methods; it is not historical inflater
+    allocation replay or complete frontend performance. Evidence:
+    `grid-projection-v29-benchmark.json`, including all samples and source limits.
+
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online
 execution-trajectory reintegration or recovery state machine is added.

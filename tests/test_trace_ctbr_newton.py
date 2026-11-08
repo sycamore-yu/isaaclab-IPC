@@ -54,7 +54,16 @@ def test_trace_freezes_new_initial_boundary_without_changing_plan_call(tmp_path,
             raise RuntimeError("known diagnostic failure")
         return result
 
-    frontend = SimpleNamespace(config=Config(), failed_problem=lambda: {"initial_boundary": boundary})
+    geometry_calls = []
+    geometry = {"model": "box_ellipsoid", "body_radii": np.array([.2, .2, .1]),
+                "centers": np.array([[1., 0., 1.]]), "halfwidths": np.array([[.05, .05, .05]])}
+
+    def geometry_obstacles():
+        geometry_calls.append(True)
+        return geometry
+
+    frontend = SimpleNamespace(config=Config(), failed_problem=lambda: {"initial_boundary": boundary},
+                               geometry_obstacles=geometry_obstacles)
     namespace = dict(np=np, torch=torch, asdict=asdict, deepcopy=deepcopy,
                      args=SimpleNamespace(output=tmp_path), reset_generations={}, original_plan=original_plan)
     exec(compile(ast.fix_missing_locations(factory), str(source), "exec"), namespace)
@@ -64,6 +73,9 @@ def test_trace_freezes_new_initial_boundary_without_changing_plan_call(tmp_path,
             traced(frontend, np.ones((1, 3)), state, np.array([8., 0., 1.]), **kwargs)
         stored = torch.load(tmp_path / "failed-frontend-call.pt", weights_only=False)
         assert stored["gcopter_problem"]["initial_boundary"] == boundary
+        assert stored["geometry_obstacles"]["model"] == "box_ellipsoid"
+        np.testing.assert_array_equal(stored["geometry_obstacles"]["body_radii"], geometry["body_radii"])
+        assert len(geometry_calls) == 1
         assert "frontend_plan" not in stored
     else:
         assert traced(frontend, np.ones((1, 3)), state, np.array([8., 0., 1.]), **kwargs) is result
@@ -74,6 +86,7 @@ def test_trace_freezes_new_initial_boundary_without_changing_plan_call(tmp_path,
             assert saved["frontend_plan"].metrics == result.metrics
             np.testing.assert_array_equal(saved["frontend_plan"].trajectory.coefficients, result.trajectory.coefficients)
             np.testing.assert_array_equal(saved["frontend_plan"].trajectory.durations, result.trajectory.durations)
+        assert not geometry_calls
     assert len(calls) == 1
     assert stored["current_state"]["yaw"] == state.yaw
     np.testing.assert_array_equal(stored["current_state"]["acceleration"], state.acceleration)
