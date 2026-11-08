@@ -1993,7 +1993,7 @@ namespace trajectory_server
                 {
                     if (continuousMaxPosition)
                     {
-                        const auto maximum = pathcover_continuous_position::maximum(c, T(i), hPolys[L]);
+                        const auto maximum = pathcover_continuous_position::maximum<true>(c, T(i), hPolys[L]);
                         if (!maximum.finite)
                         {
                             metrics.finite = false;
@@ -2002,7 +2002,8 @@ namespace trajectory_server
                             gradC.template block<CoeffRows, 3>(i * CoeffRows, 0).setConstant(cost);
                             return;
                         }
-                        if (smoothedL1(maximum.value, positionSmoothFactor, violaPosPena, violaPosPenaD))
+                        if (maximum.face >= 0 &&
+                            smoothedL1(maximum.value, positionSmoothFactor, violaPosPena, violaPosPenaD))
                         {
                             fillDerivativeBasis<false>(maximum.alpha * T(i), beta0, beta1, beta2, beta3, beta4);
                             vel = c.transpose() * beta1;

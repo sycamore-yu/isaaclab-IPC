@@ -149,16 +149,22 @@ public:
         // A segment-AABB overlap is deliberately only a conservative broad
         // phase; avoiding slab divisions here preserves that inclusion at a
         // tangency. Every possible hit is decided by the raw narrow phase.
-        const bool raster_free = visitOccupied(first, last, [&](const Index& index) {
-            for (int axis = 0; axis < 3; ++axis) {
-                const double lo = pathcover_clearance::detail::down(
-                    static_cast<double>(index[axis]) * resolution_);
-                const double hi = pathcover_clearance::detail::up(
-                    static_cast<double>(index[axis] + 1) * resolution_);
-                if (segment_upper[axis] < lo || segment_lower[axis] > hi) return true;
-            }
-            return false;
-        });
+        // The old per-voxel AABB predicate separates by axis. Trim each
+        // integer interval once using the same outward-rounded lattice bounds,
+        // then test its bitmap words without reconstructing occupied voxels.
+        Index raster_first = first, raster_last = last;
+        for (int axis = 0; axis < 3; ++axis) {
+            while (raster_first[axis] <= raster_last[axis]
+                   && pathcover_clearance::detail::up(
+                       static_cast<double>(raster_first[axis] + 1) * resolution_)
+                       < segment_lower[axis]) ++raster_first[axis];
+            while (raster_last[axis] >= raster_first[axis]
+                   && pathcover_clearance::detail::down(
+                       static_cast<double>(raster_last[axis]) * resolution_)
+                       > segment_upper[axis]) --raster_last[axis];
+        }
+        const bool raster_free = visitOccupied(raster_first, raster_last,
+                                               [](const Index&) { return false; });
         if (raster_free) return true;
         // The raster is a conservative broad phase. Narrow-phase clearance is
         // measured against raw occupied boxes plus the body ellipsoid once.

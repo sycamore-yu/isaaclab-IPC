@@ -1001,13 +1001,50 @@ license; embedded geometry utilities retain their original notices.
     `map-pipeline-v32/report.md` and its capacity-growth JSON records. No device
     view, stream handoff or new memory fallback is introduced.
 
-V31 was published from `e8cc9e5`. Newton passed 35/35 MPC solves and 36/36 complete
-references; Dense completed 2/2 waypoints with 959/959 solves and complete
-references passing the existing quality thresholds. Dense planning p95 was
-123.692329763 ms, so the 100 ms gate still failed. V32 local changes above do not
-establish a new end-to-end result. The audited V29 checkpoint retains its old
-training provenance; fresh matched A0/A2 training is still required. See
-`docs/acmpc-native-validation.md` for stage and run boundaries.
+66. V33 trims the endpoint raster query's integer intervals once using the same
+    outward-rounded lattice bounds as the previous per-occupied-voxel AABB
+    predicate. The predicate separates by axis; positive resolution makes each
+    accepted integer interval contiguous. The existing bit-grid visitor then
+    tests the masked words without reconstructing every occupied voxel. The
+    raw box/ellipsoid narrow phase, graph and queue remain unchanged. Across
+    three synthetic fixtures, 48,618 point/segment queries and all complete
+    connector outputs matched V32, including bitwise path lengths. Twenty
+    interleaved pairs per fixture gave median candidate/baseline ratios
+    0.850380, 0.873938 and 0.936480; each fixture improved in 20/20 pairs.
+    These are local connector results, not formal Dense timing. Existing
+    box/ellipsoid adapter regression passed. Evidence:
+    `endpoint-raster-v33-study.json` and `build/pathcover-endpoint-raster-v33/`.
+
+67. V33 adds a compile-time positive-penalty instantiation of the existing
+    continuous position maximum. Only the GCOPTER penalty loop uses it. Every
+    face retains coefficient and derivative finite checks; the existing
+    Bernstein bound may then omit a face proved strictly negative. The default
+    instantiation still computes the signed maximum for diagnostics. Zero and
+    positive candidates retain the original witness/tie and gradient path.
+    Derivative coefficients use fixed stack storage for the checks; a dynamic
+    vector is materialized only when the unchanged analytic root solver runs.
+    On three frozen V31 inputs using the V32 implementation as baseline, all
+    66 paired outputs (including warmup) were identical for trajectory,
+    objective, status and quality. Twenty timed pairs per case reduced complete
+    optimization p50 from 6.271/27.587/87.696 to 5.467/24.644/76.201 ms, with
+    every pair faster. These are replay timings, not new online measurements.
+    The 2,039-case maximum oracle, active-SFC checks and complete MINCO gradient
+    comparisons passed; the largest normalized finite-difference error was
+    4.38e-7. The permanent C++ contract file passed 10 tests with no skips.
+    Evidence is in `gcopter-v33/{report.md,benchmark.json,contracts-summary.json,
+    final-provenance.json}` and its permanent-contracts logs/XML.
+
+V32 was published from `f9e42b7` with native SHA256
+`41d8e0f55172602d70651f70dcf765625b46b0f72c6352b09a0f80c75580b161`.
+Newton passed 35/35 MPC solves and 36/36 complete references. Dense completed
+2/2 waypoints with 923/923 solves and references passing the existing quality
+thresholds. Dense planning p95 was 104.276563064 ms, so the 100 ms gate still
+failed. Raw SFC and actual body-r positive residuals remain in the report;
+passing the existing tolerances does not make those residuals zero. The V33
+local changes above do not establish a new end-to-end result. A radix-heap XY
+candidate was rejected after its complete paired median regressed. The audited
+V29 checkpoint retains its old training provenance; fresh matched A0/A2
+training is still required. See `docs/acmpc-native-validation.md` for boundaries.
 
 GCOPTER's continuous containment and dynamic bounds remain soft penalties.
 The offline validation measures their actual violations. No duplicated online

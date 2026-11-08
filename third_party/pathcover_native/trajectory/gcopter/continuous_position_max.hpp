@@ -64,9 +64,14 @@ inline double bernsteinEvaluationUpperBound(const std::array<double, 6> &a) {
 // separately; a strictly dominated whole face skips all its candidate times.
 // RootFinder's <=quartic route is analytic; its tol argument does not bound
 // the resulting error. This is a floating-point extremum, not an interval proof.
+// The penalty-only instantiation may omit strictly negative faces. If every
+// face is omitted, face == -1 denotes an inactive penalty; signed diagnostics
+// retain the default instantiation and its original negative maximum.
+template <bool PositivePenaltyOnly = false>
 inline Maximum maximum(const Eigen::Matrix<double, 6, 3> &c, double duration,
                        const Eigen::MatrixX4d &planes) {
     Maximum best;
+    if constexpr (PositivePenaltyOnly) best.value = 0.0;
     if (!(duration > 0.0) || !std::isfinite(duration) || !c.allFinite()
         || planes.rows() == 0 || !planes.allFinite()) {
         best.finite = false;
@@ -83,8 +88,9 @@ inline Maximum maximum(const Eigen::Matrix<double, 6, 3> &c, double duration,
                      + planes(face, 2) * c(k, 2)) * powers[k];
         }
         a[0] += planes(face, 3);
-        Eigen::VectorXd derivative(5);
-        for (int k = 0; k < 5; ++k) derivative(k) = (5 - k) * a[5 - k];
+        Eigen::Matrix<double, 5, 1> derivativeCoefficients;
+        for (int k = 0; k < 5; ++k)
+            derivativeCoefficients(k) = (5 - k) * a[5 - k];
         const auto take = [&](double alpha) {
             const double value = valueAt(a, alpha);
             if (!std::isfinite(value)) {
@@ -96,22 +102,24 @@ inline Maximum maximum(const Eigen::Matrix<double, 6, 3> &c, double duration,
                 best.face = face;
             }
         };
-        bool coefficients_finite = derivative.allFinite();
+        bool coefficients_finite = derivativeCoefficients.allFinite();
         for (const double value : a) coefficients_finite &= std::isfinite(value);
         if (!coefficients_finite) {
             best.finite = false;
             best.value = std::numeric_limits<double>::quiet_NaN();
             return best;
         }
-        // Strict separation preserves the original first-face/first-alpha tie
-        // rule and negative maxima. All finite checks above remain mandatory.
-        if (best.finite && best.face >= 0 &&
-            bernsteinEvaluationUpperBound(a) < best.value) {
+        // Strict separation retains zero/positive first-face/first-alpha ties.
+        // Every face still passes the original finite/overflow checks first.
+        const double threshold = PositivePenaltyOnly ? std::max(0.0, best.value) : best.value;
+        if (best.finite && (PositivePenaltyOnly || best.face >= 0) &&
+            bernsteinEvaluationUpperBound(a) < threshold) {
             continue;
         }
         take(0.0);
-        const double scale = derivative.cwiseAbs().maxCoeff();
+        const double scale = derivativeCoefficients.cwiseAbs().maxCoeff();
         if (scale != 0.0) {
+            Eigen::VectorXd derivative = derivativeCoefficients;
             derivative /= scale;
             const auto roots = RootFinder::solvePolynomial(derivative, 0.0, 1.0, 1e-12);
             for (const double alpha : roots) take(alpha);

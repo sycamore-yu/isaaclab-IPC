@@ -82,6 +82,50 @@ void polynomials() {
     require(!std::isfinite(pathcover_continuous_position::bernsteinEvaluationUpperBound(overflow)),
             "uncertain Bernstein bound did not retain roots");
 }
+void positive_penalty_maximum() {
+    const auto compare=[](const Coeff& c,double duration,const Eigen::MatrixX4d& h) {
+        const auto signed_max=maximum(c,duration,h), positive=maximum<true>(c,duration,h);
+        require(signed_max.finite==positive.finite,"penalty pruning changed finite classification");
+        if(!signed_max.finite) {
+            require(std::isnan(positive.value),"penalty pruning hid invalid arithmetic");
+        } else if(signed_max.value>=0.) {
+            require(std::memcmp(&signed_max.value,&positive.value,sizeof(double))==0 &&
+                    std::memcmp(&signed_max.alpha,&positive.alpha,sizeof(double))==0 &&
+                    signed_max.face==positive.face,"zero/positive maximum or first witness changed");
+        } else {
+            require(std::isfinite(positive.value) && positive.value<=0.,"negative face created a penalty");
+        }
+    };
+    Coeff c=Coeff::Zero(); c(0,2)=1.;
+    Eigen::MatrixX4d h(3,4); h << 0,1,0,0, 0,1,0,-1, 0,1,0,0;
+    for(double value:{-.3,-1e-13,-std::numeric_limits<double>::denorm_min(),-0.,0.,
+            std::numeric_limits<double>::denorm_min(),1e-13,1e-6,
+            std::nextafter(1e-6,0.),std::nextafter(1e-6,1.),.1}) {
+        c(0,1)=value; compare(c,1.,h);
+    }
+    c(0,1)=-.3;
+    const auto inactive=maximum<true>(c,1.,h);
+    require(inactive.face==-1 && inactive.value==0.,"strictly negative faces were not omitted");
+    const auto zero=penalty(c,1.,h,true);
+    require(zero.metrics.finite && zero.cost==0. && zero.time.isZero(0.) &&
+            zero.coeff.isZero(0.),"inactive sentinel reached a face or added a gradient");
+    for(double shift:{-.02,0.,1e-15,5e-5,.1}) {
+        c.col(1) << -.0625+shift,.5,-1.5,2.,-1.,0.; compare(c,1.,h);
+        c.col(1) << shift-1.,2.,-1.,0.,0.,0.; compare(c,1.,h);
+        c.col(1) << shift,.02,0.,0.,0.,0.; compare(c,.7,h);
+    }
+    // A safely negative first face must not hide overflow on a later face.
+    c.setZero(); c(0,2)=1.; c(5,1)=std::numeric_limits<double>::max()/3.;
+    Eigen::MatrixX4d later(2,4); later << 0,0,1,-10, 0,1,0,-10;
+    compare(c,1.,later);
+    c.setZero(); c(0,2)=1.; compare(c,1e80,h);
+    c(3,0)=std::numeric_limits<double>::quiet_NaN(); compare(c,1.,h);
+    c(3,0)=std::numeric_limits<double>::infinity(); compare(c,1.,h);
+    c.setZero(); c(0,2)=1.; c(0,1)=-10.;
+    later(1,3)=std::numeric_limits<double>::infinity(); compare(c,1.,later);
+    // An overflowing Bernstein guard retains the original evaluation path.
+    c.setZero(); c(0,1)=1e308; c(1,1)=-1e308; compare(c,1.,h);
+}
 void objective_and_derivatives() {
     // The exact positive maximum is strictly between adjacent 65-node samples.
     const double tstar=25.5/64., delta=5e-5;
@@ -319,6 +363,7 @@ int main(int argc,char** argv) {
         require(argc==2,"one contract name required");
         const std::string mode=argv[1];
         if(mode=="polynomials") polynomials();
+        else if(mode=="positive_penalty") positive_penalty_maximum();
         else if(mode=="derivatives") objective_and_derivatives();
         else if(mode=="legacy") legacy_and_templates();
         else if(mode=="success_diagnostics") finalized_quadrature_diagnostics(false);
@@ -359,7 +404,7 @@ def continuous_contract(tmp_path_factory):
 
 
 @pytest.mark.parametrize(
-    "mode", ["polynomials", "derivatives", "legacy", "success_diagnostics", "failure_diagnostics",
+    "mode", ["polynomials", "positive_penalty", "derivatives", "legacy", "success_diagnostics", "failure_diagnostics",
              "dynamic_derivatives", "full_derivatives", "derivative_overflow"]
 )
 def test_continuous_position_contract(continuous_contract, mode):
