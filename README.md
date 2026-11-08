@@ -28,6 +28,18 @@ Linux、Python 3.12、CUDA 13、Isaac Lab 3、Newton、Warp 和原生 TurboMPC C
 
 当前工作树已经准备运行环境、资产和原生库。MPC 默认目录 `build/turbompc/native/cu130` 指向已验收的 `build/turbompc/native-v35/cu130`。日常训练和评测直接使用下文入口。
 
+当前部署的运行源码与各构建来源分别记录：
+
+| 组成 | 实际来源 |
+| --- | --- |
+| V40 运行源码 | `270fd8ce90d432db61618d499f45fc34388f9626` |
+| TurboMPC 与完整 P0 | V35，`1ceaec1b6ad2081b25f1795a0055490bb29c55ba` |
+| PathCover 原生库 | V37，`a90f09734ccd51943b0ec5a7afa49fb9c9853c6b` |
+| MARSIM LiDAR 渲染库 | V39，`9584f12470215ff42d3c3cebfbeac6c3f2bd5d1f` |
+| A0 / A2 训练 checkpoint | V34，`5d4a84581693e80abf332c376211c45206457f3c` |
+
+后续验收文档提交不改变上述被测代码。文件 SHA、运行配置和 checkpoint 来源见验证记录。
+
 首次准备新环境时使用锁文件，并生成传感器与森林资产：
 
 ```bash
@@ -64,7 +76,7 @@ CTBR 的 Newton 与 MARSIM 工厂使用零额外参考余量。机体间隙由�
 
 CTBR 两端的 GCOPTER 迭代上限为 2000，原停止阈值保持不变。真实 Dense 失败输入在原 1000 步上限处仍持续下降，并在第 1019 步满足原阈值。独立 PathCover 默认上限仍为 1000。该配置的正式任务与延迟以验证记录为准。
 
-CTBR 两端最多生成 3 个有序走廊，RISP 局部半宽为 8 m。前端沿原路径确定局部终点，再优化完整 MINCO 轨迹；N=5 和 0.4 s 预测窗口保持不变。独立 PathCover 默认仍为 6 个走廊。V40 的冻结输入质量和计算收益已通过筛选，完整物理任务仍按验证记录单独验收。
+CTBR 两端最多生成 3 个有序走廊，RISP 局部半宽为 8 m。前端沿原路径确定局部终点，再优化完整 MINCO 轨迹；N=5 和 0.4 s 预测窗口保持不变。独立 PathCover 默认仍为 6 个走廊。V40 已完成 Newton 固定成本回归和 MARSIM 六场比较，具体门槛见下文验证表。走廊数量改变局部优化问题，不能解释为裁剪旧轨迹。
 
 ## 统一入口
 
@@ -101,6 +113,8 @@ export TORCHINDUCTOR_COMPILE_THREADS=2
 ```
 
 上述 A0/A2 使用相同的 Forest 与训练预算，各采集 8192 次交互。`Isaac-ACMPC-CTBR-Direct` 用于空场景数值与性能基线。输出目录必须是新目录；继续训练时添加 `--checkpoint <路径>`，环境从新回合开始。学习成本评估将 `--fixed-cost` 换为 `--checkpoint <路径>`。修改节点数使用 `env.ctbr_model.cost_nodes`，步长使用 `env.ctbr_model.dt`。
+
+这些命令按当前配置启动新训练。本轮正式评测复用 V34 的已审计 checkpoint：A0 始终无前端；A2 训练时最多 4 个走廊，V40 的 A1/A2 评测均最多 3 个走廊。本轮没有 cap3 重训。实际训练参数、checkpoint 路径和 SHA 见 [训练记录](docs/acmpc.md#当前-28n-成本训练)。
 
 Newton 的策略周期为 0.1 s，电机反馈和物理周期为 1/300 s。训练与 MARSIM 使用相同的 CTBR 观测和检查点语义。Avoid 任务保留突发移动障碍压力测试，其结果独立记录。
 
@@ -162,7 +176,22 @@ PYTHONPATH=src .venv/bin/python scripts/analyze_marsim_references.py \
 
 ## 验证
 
-当前分支的配置、实测值与未通过项见 [原生 AC-MPC 验证](docs/acmpc-native-validation.md)。历史文档的通过结论不代替新主线验收。
+2026-11-08 已完成当前六场比较。每配置、场景运行 1 次，seed 为 0；正式名义参考速度为 3 m/s。
+
+| 配置 | Dense：任务 / planning p95 | High-speed：任务 / planning p95 |
+| --- | --- | --- |
+| A0：无前端学习成本 | 碰撞，0/2 航点 / 32.00 ms | 碰撞，0/2 航点 / 25.63 ms |
+| A1：PathCover 固定成本 | 成功，2/2 航点 / 88.79 ms | 成功，2/2 航点 / 43.49 ms |
+| A2：PathCover 学习成本 | 成功，2/2 航点 / 91.70 ms | 成功，2/2 航点 / 48.22 ms |
+
+A1/A2 的 3203 次 MPC 全部成功，3203 份完整参考通过原离线质量门槛。
+四场均无碰撞、前端失败和 100 Hz 采样实际 SFC 正违反。
+Dense 的 A1/A2 分别有 17/964、16/878 次规划超过 100 ms；p95 达标不表示每次都满足预算。
+单 seed 短训练与单次任务不证明稳定学习收益。GPU 为共享设备；仿真时钟与墙钟分别记录。
+
+完整 P0 已通过数值、140 维成本梯度、PPO 更新和重载检查。
+N5、B256 原生前后向 p95 为 28.583600 ms，不包含 PathCover 和物理执行。
+当前配置、全部实测值与负结果见 [原生 AC-MPC 验证](docs/acmpc-native-validation.md#v40-正式验收)。
 
 原生 TurboMPC 的 SFC、隐式梯度、线性／CTBR 模型与 CUDA 后端共享同一套数值测试。
 

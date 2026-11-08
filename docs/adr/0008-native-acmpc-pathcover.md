@@ -30,7 +30,8 @@ code and evidence remain available; this branch develops the new AC-MPC route.
   planning p95 save 5.230 ms at the paired median in pure optimization. Four of
   the 35 inputs get slower. This changes the local terminal and optimization
   problem; it is not an arithmetic-equivalence claim or truncation of an old
-  trajectory. RISP and complete-task performance still require actual evaluation.
+  trajectory. This local benchmark does not establish complete-task performance.
+  Use the formal V40 task and latency evidence linked under [Validation](#validation).
   The earlier max6/max4 study remains historical evidence, including seq578's
   increased optimizer work. Do not infer that fewer pieces always run faster.
 - The state is `[p_world(3), q_wxyz(4), v_world(3)]`. The control is collective
@@ -464,7 +465,9 @@ Dijkstra updates, anchor order and path length arithmetic unchanged. The table
 does not survive the connection, so it cannot reuse an answer from another map
 or endpoint. A real 236-anchor input has 476 repeated queries and preserves all
 anchors and paths bitwise; its measured complete-connection reduction is 8.587 ms
-at the paired median. That one-input result still requires physical evaluation.
+at the paired median. This single-input benchmark does not establish physical
+success or end-to-end latency; use the formal V40 evidence linked under
+[Validation](#validation).
 
 Use GCOPTER relative cost tolerance `1e-5`. The previous `1e-4` stop produced
 one actual initial pitch-rate violation among 944 complete Dense references.
@@ -501,9 +504,15 @@ derivatives remain unchanged. This certificate assumes the existing binary64,
 round-to-nearest scalar build without fast-math or FMA contraction. A future
 compiler/ISA change must revalidate those arithmetic assumptions. The measured
 three-input reduction of about 11% in complete optimization time does not prove
-the end-to-end Dense planning budget; actual frontend and task gates still apply.
+the end-to-end Dense planning budget. Assess the deployed configuration with the
+formal V40 frontend and task evidence linked under [Validation](#validation).
 
 ## Validation
+
+The [validation record](../acmpc-native-validation.md) records the actual V40
+runtime identity and formal-run results. Report task completion, complete-reference
+quality and measured latency separately. Preserve failed and pending runs; a local
+benchmark cannot substitute for these measurements.
 
 Use a 2000-iteration GCOPTER cap in both CTBR frontend factories; retain the
 standalone PathCover default of 1000. Keep the objective, history length, gradient
@@ -512,7 +521,8 @@ cap while still making progress, then met the same stopping test at iteration
 1019 with a valid complete reference. This is a finite-budget configuration
 change, not acceptance of an incomplete iterate. Reuse the unchanged native
 binary and identify the new runtime configuration separately from its build.
-The larger cap still requires complete-task and all-attempt latency evaluation.
+Assess the larger cap using the complete-task, complete-reference and all-attempt
+latency results in the V40 validation record linked above.
 
 P0: frozen-input forward comparison, finite-difference cost gradients, complete
 PPO update, checkpoint reload, N2/N5 and B1/B16/B64/B256 timings.

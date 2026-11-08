@@ -27,10 +27,20 @@ PPO 更新重新求解这些快照，不重新调用 JPS、RISP 或 GCOPTER。
 每次运行必须提供新输出目录。
 `evaluate --fixed-cost` 使用固定成本；学习成本评估改用 `--checkpoint <路径>`。
 
-已审计的 V34 A0/A2 checkpoint 分别位于：
+已审计的 V34 A0/A2 训练提交为
+`5d4a84581693e80abf332c376211c45206457f3c`。
+V40 复用以下 checkpoint，没有重新训练：
 
-- `results/p3-a0-forest-rp-v34-audit-v1/checkpoint.pt`。
-- `results/p3-a2-forest-rp-v34-audit-v1/checkpoint.pt`。
+- A0：`results/p3-a0-forest-rp-v34-audit-v1/checkpoint.pt`。
+  SHA256：`05f2dc5b6542037d7cdef14d99c3903800368a7e79c5a34c247c2ddf731bde59`。
+- A2：`results/p3-a2-forest-rp-v34-audit-v1/checkpoint.pt`。
+  SHA256：`945b36d9d390faa1e1aacd982276cb243294f68eb1509bd7c4f1502e19b94024`。
+
+A0 在训练和 V40 评测中均使用 `frontend=none`，不使用走廊。
+A2 在 V34 训练时使用 `max_corridors=4`，V40 推理使用 `max_corridors=3`。
+这是前端配置变化，不能将 V40 评测写成原训练配置下的结果。
+以上训练来源和 checkpoint SHA256 已冻结在
+`results/acmpc-native-pathcover-v1/v40-controller-identity.json`。
 
 两者均为 seed 0、16 个环境、每轮 16 步、32 次更新，共 8192 次交互。
 这是初始训练基线，不是训练收敛或多 seed 学习收益的证据。

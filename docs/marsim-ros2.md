@@ -5,6 +5,11 @@
 当前原生 CTBR 主线的实际结果见 [原生 AC-MPC 验证](acmpc-native-validation.md)。
 训练和正式评测命令见 [README](../README.md#marsim)。历史 V15 固定成本的 High-speed 成功、Dense 失败及其延迟记录保留，不代表当前版本。
 
+V40 六场比较已完成。A1/A2 在 Dense 和 High-speed 均到达 2/2 航点。
+其 planning p95 分别为 A1 88.790715 / 43.485337 ms、A2 91.701845 / 48.218813 ms。
+3203 次 MPC 与 3203 份完整参考通过，实际 100 Hz 采样 SFC 正违反为 0。
+A0 两场均碰撞，作为无前端负基线保留。逐场时间、速度、慢调用和输入核对见 [V40 正式验收](acmpc-native-validation.md#v40-正式验收)。
+
 当前 Flightmare 饱和分配保留可行请求的总推力，先最大化横滚与俯仰力矩的共同缩放系数，再选择最近的可行偏航力矩。原可行分配直接保留。电机延迟与 RK4 动态执行继续运行。第 8–11 节中的旧分配及结果属于历史版本，不替代使用同一执行器的 A0/A1/A2 比较。
 
 当前工作树为 `/home/tong/tongworkspace/free/.worktrees/isaaclab-IPC/acmpc-native-pathcover-v1`，分支为 `feat/acmpc-native-pathcover-v1`。
@@ -693,13 +698,23 @@ SUPER dense 即使使用同步仿真时间仍在高于地面的 PCD 障碍处碰
 
 独立进行了原 `--time-mode wall` 的 SUPER dynamic high_speed 6 s 回归探针：里程计实测 **99.9996 Hz 墙钟**，收到 49 帧 LiDAR、227 条 PositionCommand 和 526 条 CTBR；程序按预设 6 s 墙钟截止，无异常退出。证据在 `wall-regression-super-high-6s/`。此短时探针用于确认墙钟接口保留，不计入完整往返任务成功率。
 
-## 两条正式 IPC 路径（统一 TurboMPC）
+## 历史两条 IPC 路径（统一 TurboMPC）
 
-本项目现在只维护固定成本 IPC 和学习成本 AC-MPC 两条算法路径。二者使用相同的 PathCover/RISP、原始 SFC、jerk 预测模型、约束以及 `TorchMPC` 原生 CUDA 求解器；ROS 策略通过 `--policy ipc` 或 `--policy acmpc --checkpoint ...` 选择成本。学习策略的 124D 输入和 7D 成本参数保持不变。
+本节保留 2026-11-04 至 2026-11-05 的 jerk 版本及其结果。
+当前 10D CTBR、28N 成本入口见 [README](../README.md) 和 [ADR-0008](adr/0008-native-acmpc-pathcover.md)。
+当时维护固定成本 IPC 和学习成本 AC-MPC 两条算法路径。
+二者使用相同的 PathCover/RISP、原始 SFC、jerk 预测模型、约束和 `TorchMPC` 原生 CUDA 求解器。
+该版本通过 `--policy ipc` 或 `--policy acmpc --checkpoint ...` 选择成本。
+其学习策略使用 124D 输入和 7D 成本参数。
 
-启动入口为 `scripts/run_marsim_ros2.py`；`sim` 控制周期为 0.01 s、MPC 以 0.1 s 仿真时间重规划。保留 `wall` 作为实时计算延迟实验。原有 SUPER 仅作外部比较，不属于项目算法路径。
+该历史版本的启动入口为 `scripts/run_marsim_ros2.py`。
+`sim` 控制周期为 0.01 s，MPC 以 0.1 s 仿真时间重规划。
+`wall` 用于实时计算延迟实验，原有 SUPER 仅作外部比较。
 
-新检查点通过 `rl/actor.py:MPCActor` 直接进入 TurboMPC。代码不再包含另一个独立的 PyTorch ADMM 生产实现。两条策略都要求 CUDA 原生扩展，使用 `scripts/marsim_ros2_env.sh` 设置本项目的默认构建路径。旧运行记录仍保留原始求解器版本与负结果，不重命名历史数据。
+该版本的检查点通过 `rl/actor.py:MPCActor` 进入 TurboMPC。
+当时已移除独立的 PyTorch ADMM 生产实现。
+两条策略都要求 CUDA 原生扩展，使用 `scripts/marsim_ros2_env.sh` 设置默认构建路径。
+以下运行记录保留原始求解器版本与负结果，不重命名历史数据。
 
 ### high_speed 首次 IPC 求解：SFC 时间分配
 
