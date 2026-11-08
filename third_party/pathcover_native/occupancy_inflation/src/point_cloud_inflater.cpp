@@ -203,6 +203,7 @@ void PointCloudInflater::reset() {
   surface_.release();
   std::vector<uint64_t>().swap(work_a_);
   std::vector<uint64_t>().swap(work_b_);
+  std::vector<SnapshotBlock>().swap(snapshot_blocks_);
   occupied_count_ = 0;
   seed_count_ = 0;
   surface_count_ = 0;
@@ -211,7 +212,7 @@ void PointCloudInflater::reset() {
 std::size_t PointCloudInflater::memoryBytes() const {
   return (seed_.wordCount() + inflated_.wordCount() + cur_.wordCount() +
           surface_.wordCount() + work_a_.capacity() + work_b_.capacity()) *
-         sizeof(uint64_t);
+         sizeof(uint64_t) + snapshot_blocks_.capacity() * sizeof(SnapshotBlock);
 }
 
 void PointCloudInflater::finishIncremental(InflationStats *stats) {
@@ -248,7 +249,11 @@ void PointCloudInflater::finishIncremental(InflationStats *stats) {
 void PointCloudInflater::finishOneShot(InflationStats *stats) {
   VoxelWindow tight;
   const std::size_t count = cur_.occupiedExtent(&tight);
+  finishOneShot(stats, tight, count);
+}
 
+void PointCloudInflater::finishOneShot(InflationStats *stats, const VoxelWindow &tight,
+                                       std::size_t count) {
   if (count == seed_count_ && cur_.isSubsetOf(seed_)) {
     stats->new_seed_voxels = 0;
     stats->seed_voxels = seed_count_;

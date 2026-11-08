@@ -1034,15 +1034,34 @@ license; embedded geometry utilities retain their original notices.
     Evidence is in `gcopter-v33/{report.md,benchmark.json,contracts-summary.json,
     final-provenance.json}` and its permanent-contracts logs/XML.
 
-V32 was published from `f9e42b7` with native SHA256
-`41d8e0f55172602d70651f70dcf765625b46b0f72c6352b09a0f80c75580b161`.
+68. V34 collects each nonempty NanoVoxMap block once while determining the
+    exact occupied bounds. Dense scatter reuses that per-call block snapshot,
+    and finishOneShot reuses the existing exact occupied count and bounds.
+    This removes a second hash-table traversal and dense extent/count scan.
+    Replacement, removal, equal-count moves, shrink and empty-map semantics
+    retain the original subset/swap path. The vector is rebuilt on every call;
+    reset releases it and memoryBytes includes its capacity. CUDA dilation,
+    projection, ordered boxes and search are unchanged. The two source files
+    match the previously measured V33 prototype exactly. Its four snapshot
+    contracts and 48 paired complete outputs passed; real production-source
+    integration passed the same four permanent tests with no skips. The large
+    artificial raw-map case saved a paired median 1.764 ms for inflation plus
+    grid, while a repeated real single-frame map saved 0.096 ms. Retained memory
+    increased by up to 1,310,720 B in those cases; negative timing pairs remain.
+    Neither input is a replay of the full historical raw map. Selection is
+    reconsidered after V33 missed the planning budget by 0.385 ms; V34 runtime
+    remains unmeasured here. See `map-pipeline-v33/report.md` and
+    `map-snapshot-v34-integration/` for the unchanged evidence and actual tests.
+
+V33 was published from `86ca04f` with native SHA256
+`b64deaa459be21f1d2aa65786341263e26caf6919d18bac61e4fc35777347b8d`.
 Newton passed 35/35 MPC solves and 36/36 complete references. Dense completed
 2/2 waypoints with 923/923 solves and references passing the existing quality
-thresholds. Dense planning p95 was 104.276563064 ms, so the 100 ms gate still
+thresholds. Dense planning p95 was 100.385284936 ms, so the 100 ms gate still
 failed. Raw SFC and actual body-r positive residuals remain in the report;
-passing the existing tolerances does not make those residuals zero. The V33
-local changes above do not establish a new end-to-end result. A radix-heap XY
-candidate was rejected after its complete paired median regressed. The audited
+passing the existing tolerances does not make those residuals zero. Every
+planning attempt remains in the latency statistics. A radix-heap XY candidate
+was rejected after its complete paired median regressed. The audited
 V29 checkpoint retains its old training provenance; fresh matched A0/A2
 training is still required. See `docs/acmpc-native-validation.md` for boundaries.
 

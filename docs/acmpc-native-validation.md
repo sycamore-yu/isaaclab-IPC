@@ -3046,7 +3046,7 @@ XY radix heap 候选未集成。全部 26,400 距离与 3,494 搜索状态逐位
 实际生产头下永久合同 **10 passed、0 skipped**，含原梯度和 planar/S4 编译检查。
 测量同期 CPU 3/GPU 有 MPC 诊断，未宣称机器空闲或正式规划性能通过。
 证据：`gcopter-v33/{report.md,permanent-contracts.xml,permanent-contracts-completion.json}`。
-V33 的正式构建、任务、参考质量及全量 planning p95 尚待验收。
+V33 的正式构建、任务和完整参考已完成；planning p95 仍未通过，见下文。
 
 #### V33 未采用的 map 与 MPC 候选
 
@@ -3089,5 +3089,58 @@ first 的 p95 为 17.914993→25.480905 ms，last 为 19.249371→20.382167 ms�
 性能门槛未通过，因此没有继续有限差分或 PPO 验证，也不宣称梯度已通过。
 证据：`ctbr-profile-v33/termination5/{study.json,study.md,report.json,completion.json}`。
 
-上述 map、CUDA Graph 和 check5 原型均未进入生产。
+上述 map、CUDA Graph 和 check5 原型均未进入 V33 生产版本。
 生产 TurboMPC 求解器、IR2 库、终止检查间隔 25 和全部收敛参数保持不变。
+
+### V33 正式结果：任务与完整参考通过，延迟超出 0.385 ms
+
+V33 提交为 `86ca04f3a8c81f59901d690612c54ec515269b15`。
+原生库 SHA256 为 `b64deaa459be21f1d2aa65786341263e26caf6919d18bac61e4fc35777347b8d`。
+103 个来源文件的汇总 SHA256 为 `4f3816956e14d662f0af11588cc73673ab4280bab21998bb8630116e1cfccb17`。
+2026-11-08 04:13:01–04:14:28 UTC 独立重建 12 个编译单元，未复用对象。
+实际候选库的 14 项绑定全部通过，0 skipped；04:17:06 UTC 发布。
+V32 归档保持不变，发布清单为 `pathcover-v33-release-manifest.json`。
+
+Newton 任务 1/1 成功，35/35 MPC solved，36/36 完整参考通过既有阈值。
+初始和终止参考全部纳入，没有复用旧参考分析结果。
+预测节点 SFC 最大原始残差为 −0.011259510 m，下一实测状态为 −0.140942355 m。
+完整参考 SFC 最大残差为 1.33227e−15 m；实际 |p/q/r| 峰值为
+0.173285270 / 1.069294657 / 0.453905004 rad/s。
+前端批量耗时 p95 为 51.614537 ms；actor/step 均值含首次编译，不用于稳态延迟结论。
+完整证据在 `results/p2-newton-forest-fixed-v33/full-reference-quality/`。
+
+Dense 使用 dynamic/sim、3 m/s 参考、V20 执行器和 ROS domain 231。
+任务于 04:20:46–04:23:20 UTC 运行，2/2 航点完成，923/923 MPC solved。
+碰撞、计算失败、发布输入超界和实际 100 Hz 采样 SFC 正违反均为 0。
+仿真时间 95.26 s，路径长度 231.034765 m，实际平均/最大速度 2.425157 / 3.006133 m/s。
+全部 923 次规划的 mean/p50/p95/max 为
+78.245286 / 75.912887 / **100.385285** / 576.413667 ms。
+51/923 次超过 100 ms，所有慢调用保留，因此性能门槛仍失败。
+
+完整参考精确匹配 923/923 条，缺失和重复均为 0；7 条窗口结束后的计划单列。
+参考 SFC 最大原始残差为 5.64637048e−7 m；预测节点为 4.97845877e−6 m。
+参考 |p/q/r| 峰值为 2.479992137 / 2.987487526 / 1.500094388 rad/s。
+r 的原始正超量 9.4388e−5 rad/s 保留，低于既有离线 0.001 rad/s 容差。
+初始固定位置/速度、姿态及末端 PVA 检查通过，未出现未定义姿态。
+起止设备快照均未发现其他 GPU 计算进程；这不证明全程独占。
+结果在 `formal-v33-analysis/a1-dense-v33-{brief,references,reference-quality-brief,tail}.{json,md}`。
+首次生成 run brief 因缺少 tail 输入退出 1；补充既有计时汇总后退出 0，原失败日志保留。
+
+V33 没有进入 High-speed 或新 A0/A2 训练。
+V34 重新选入此前已测的 map 单次快照收集，原因是当前剩余预算差缩小。
+该选择复用 4 项原型契约和 48 对输出一致证据，不把局部收益视为正式达标。
+新版本仍须在真实整合源码上通过契约、独立构建、绑定、Newton 和 Dense 门槛。
+
+### V34 地图单次快照收集：生产源码已整合
+
+仅修改 `point_cloud_inflater.h` 和 `point_cloud_inflater.cpp`。
+两者 SHA256 与此前已测原型逐字相同；未重跑局部性能基准。
+2026-11-08 04:26:18–04:26:41 UTC 在 CPU 3 上运行既有快照测试。
+实际结果为 **4 passed、0 skipped、22.33 s**，退出码 0。
+测试使用 GCC 13.3、原有 `-O2 -std=c++17` 编译命令、单线程数值库和隐藏 CUDA。
+空图、删除、同数量移动、缩小、位图及下游 DMP 契约通过。
+新增快照每次重新收集，`reset()` 释放容量，`memoryBytes()` 计入容量。
+原型两类输入的增量容量分别为 81,920 B 和 1,310,720 B。
+这些输入分别是单帧重复构图与人工 raw 图，不是历史 Dense 原始地图序列。
+正式构建、实际候选绑定和端到端任务尚待运行。
+证据：`map-snapshot-v34-integration/{integration.json,contracts-completion.json,contracts.xml}`。

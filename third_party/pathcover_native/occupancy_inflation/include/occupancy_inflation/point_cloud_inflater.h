@@ -278,6 +278,7 @@ class PointCloudInflater {
   std::size_t maxWords() const { return params_.max_grid_voxels / kWordBits; }
   void finishIncremental(InflationStats *stats);
   void finishOneShot(InflationStats *stats);
+  void finishOneShot(InflationStats *stats, const VoxelWindow &tight, std::size_t count);
   void rebuildSurface(InflationStats *stats);
   bool dilateInto(const VoxelBitGrid &src, const VoxelWindow &tight,
                   InflationStats *stats);
@@ -356,6 +357,11 @@ class PointCloudInflater {
   VoxelBitGrid surface_;
   std::vector<uint64_t> work_a_;
   std::vector<uint64_t> work_b_;
+  struct SnapshotBlock {
+    Eigen::Vector3i base;
+    std::array<uint64_t, 8> words;
+  };
+  std::vector<SnapshotBlock> snapshot_blocks_;
 
   std::size_t occupied_count_ = 0;
   std::size_t seed_count_ = 0;
@@ -543,6 +549,7 @@ void PointCloudInflater::inflateOccupancySnapshot(
         "inflateOccupancySnapshot requires an unfiltered integer seed snapshot");
   }
   local.filtered_points = local.input_points;
+  snapshot_blocks_.clear();
 
   Eigen::Vector3i lower = Eigen::Vector3i::Constant(std::numeric_limits<int>::max());
   Eigen::Vector3i upper = Eigen::Vector3i::Constant(std::numeric_limits<int>::min());
@@ -558,6 +565,7 @@ void PointCloudInflater::inflateOccupancySnapshot(
       last_z = z;
     }
     if (xy == 0) return;
+    snapshot_blocks_.push_back({base, words});
     uint64_t x_bits = xy | (xy >> 32);
     x_bits |= x_bits >> 16;
     x_bits |= x_bits >> 8;
@@ -594,8 +602,10 @@ void PointCloudInflater::inflateOccupancySnapshot(
   }
 
   uint64_t *destination = cur_.data();
-  source.forEachOccupiedBlock([&](const Eigen::Vector3i &base,
-                                 const std::array<uint64_t, 8> &words) {
+  // Reuse the complete snapshot collected with its bounds; avoid another map traversal.
+  for (const auto &block : snapshot_blocks_) {
+    const auto &base = block.base;
+    const auto &words = block.words;
     const int lx = base.x() - win.base.x();
     const std::size_t word_x = static_cast<std::size_t>(lx) / kWordBits;
     const unsigned shift = static_cast<unsigned>(lx) % kWordBits;
@@ -612,8 +622,11 @@ void PointCloudInflater::inflateOccupancySnapshot(
         destination[offset] |= row << shift;
       }
     }
-  });
-  finishOneShot(&local);
+  }
+  VoxelWindow tight;
+  tight.base = lower;
+  tight.dims = upper - lower + Eigen::Vector3i::Ones();
+  finishOneShot(&local, tight, local.input_points);
   done();
 }
 
