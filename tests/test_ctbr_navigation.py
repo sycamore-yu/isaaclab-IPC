@@ -54,7 +54,10 @@ def test_observed_position_uses_active_corridor_and_junction():
 
 
 @pytest.mark.parametrize("separate_nominal_target", [False, True])
-def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch, separate_nominal_target):
+@pytest.mark.parametrize("constraint_mode", ["polytope", "progress"])
+def test_batch_selection_planning_failure_and_snapshot_ownership(
+    monkeypatch, separate_nominal_target, constraint_mode,
+):
     from isaaclab_ipc import pathcover_native
     from isaaclab_ipc.turbompc.ctbr import CTBRConfig
 
@@ -114,7 +117,10 @@ def test_batch_selection_planning_failure_and_snapshot_ownership(monkeypatch, se
     monkeypatch.setattr(pathcover_native, "NativePathCoverFrontend", Frontend)
     config = (pathcover_native.PathCoverConfig(thrust_min=0., nominal_thrust_min=2.5)
               if separate_nominal_target else None)
-    navigation = PathCoverNavigation(3, CTBRConfig(cost_nodes=2), config, device="cpu", max_planes=4)
+    navigation = PathCoverNavigation(
+        3, CTBRConfig(cost_nodes=2), config, device="cpu", max_planes=4,
+        constraint_mode=constraint_mode,
+    )
     motion_batches = []
     motion_kernel = navigation._motion_seed
 

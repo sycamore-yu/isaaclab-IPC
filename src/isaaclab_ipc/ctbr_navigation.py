@@ -334,7 +334,7 @@ class PathCoverNavigation:
                                        np.zeros((nodes, self.max_planes, 4)),
                                        np.zeros((nodes, self.max_planes), dtype=bool),
                                        np.full(nodes, -1), 0.0,
-                                       progress=np.zeros((nodes, 7)) if self.constraint_mode == 'progress' else None)
+                                       progress=np.zeros((nodes, 8)) if self.constraint_mode == 'progress' else None)
                 self.last_reference_metrics[index] = {"planning_failure": str(errors[index])}
             sampled.append(snapshot)
 
