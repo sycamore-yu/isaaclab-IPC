@@ -145,6 +145,80 @@ This is training wiring/gradient acceptance, not policy convergence (zero
 completed full episodes).
 
 The new MARSIM parameters are connected through the CLI, launch, and ROS
-controller; no full MARSIM Dense/High-speed section episode has been executed
-in this change. The existing ROS overlay contains stale pre-migration
-executable symlinks and must be rebuilt or repaired before live ROS evaluation.
+controller. The initial environment had stale pre-migration executable
+paths. The following section records their repair and subsequent live
+Dense/High-speed evaluations.
+
+## Rerun and MARSIM closed-loop acceptance (2026-11-15)
+
+The recorded Newton Forest run at
+`results/acmpc-section-forest-rerun-20261115/` reached its goal in 3.5 s
+without collision or QP failure (35/35 successful solves, 0.416520 m
+minimum obstacle clearance). Its complete Rerun file is
+`recordings/acmpc-section-forest-20261115.rrd`, 8.5 MB.
+`rerun rrd verify` passed; the Viewer screenshot was inspected and a
+smaller preview saved at
+`recordings/acmpc-section-forest-20261115-preview.jpg`.
+The CTBR Rerun recorder now uses the actual N=5 prediction schedule and
+status rather than the historical IPC N=15/planner fields.
+
+The original ROS overlay was created at the old `free/isaaclab-IPC` paths.
+Its absolute symlinks and generated environment scripts were repaired in
+the ignored build directories (874 links, 20 scripts, with pre-change
+copies); see `results/marsim-ros-path-repair-20261115.json`.
+The legacy mission and LiDAR ELF binaries also embedded the old source
+directory through CMake's `ROOT_DIR`, so a separate, clean ROS 2 overlay
+was compiled from the existing pinned SUPER, Flightmare and corrected
+MARSIM renderer sources at `build/marsim-relocated-20261115/`.
+The first two Dense attempts failed *before collecting odometry* due to
+the old embedded source paths and absent cuDSS dynamic-library search
+path. They are not counted as navigation trials. The checked-in
+`scripts/marsim_ros2_env.sh` now resolves the shared dependency directory
+and cuDSS wheel from the real Git common directory, including worktrees.
+
+The following fixed-cost **section** evaluations used identical CTBR
+model, original mission waypoints, Flightmare dynamic execution,
+original full-PCD collision evaluation, 100 Hz simulated control and
+10 Hz MPC planning. Each scene had one complete episode, seed 0:
+
+| Metric | Dense | High-speed |
+| --- | ---: | ---: |
+| Official waypoints | 2/2 | 2/2 |
+| Collision / timeout | 0 / 0 | 0 / 0 |
+| Simulated time (s) | 97.25 | 71.00 |
+| Flight distance (m) | 227.057 | 199.315 |
+| Minimum swept PCD clearance (m) | 0.164869 | 0.703578 |
+| MPC QP failures | 0 | 0 |
+| Maximum sampled actual SFC violation (m) | 0 | 0 |
+| Maximum predicted SFC violation (m) | 9.789e-6 | 0 |
+| Full planning p95 (ms) | 108.96 | 53.83 |
+| Planning p95 <100 ms | **fail** | pass |
+| Recorded wall-clock real-time factor | 0.591 | 0.712 |
+
+Evidence:
+`results/marsim-section-dense-run-20261115/{metrics.json,trajectory.npz,policy_stats.jsonl,launch.log}`
+and
+`results/marsim-section-high-speed-run-20261115/{metrics.json,trajectory.npz,policy_stats.jsonl,launch.log}`.
+These traces contain successful episodes; saved startup failures remain
+under their separate experiment directories.
+
+Runtime selection after building a relocated overlay:
+
+```bash
+export IPC_MARSIM_RUNTIME="$PWD/build/marsim-relocated-20261115"
+export TURBOMPC_NATIVE_BUILD_DIR="$PWD/build/turbompc/native-v35/cu130"
+source scripts/marsim_ros2_env.sh
+DISPLAY=:11 .venv/bin/python scripts/run_marsim_ros2.py \
+  --mode dynamic --time-mode sim --benchmark dense \
+  --policy fixed-ctbr --frontend pathcover \
+  --sfc-constraint-mode section --sfc-section-half-length 0.5 \
+  --domain 156 --render-prefix 'vglrun -d egl0' \
+  --output results/section-dense-repeat --timeout 180
+```
+
+The same call with `--benchmark high_speed`, a distinct output directory
+and ROS domain reproduces the other evaluation. The compiled overlay,
+native CUDA library, generated RRD and raw results are locally retained
+artifacts, not tracked Git sources. These tests do not demonstrate
+multi-seed robustness, an AC-MPC learned-cost advantage, or a
+100 Hz wall-clock runtime guarantee.
