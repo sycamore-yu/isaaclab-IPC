@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Convert an actual MARSIM/SUPER evaluation to a self-contained Rerun recording.
+"""Convert recorded MARSIM/SUPER or native CTBR flights to Rerun.
 
-Only recorded odometry and PositionCommand samples are animated. The static
-obstacles come from the exact PCD used by the collision evaluator; raw LiDAR
-points and SUPER's internal candidate trajectories were not recorded.
+Actual odometry and published controls are replayed against the original PCD.
+The evaluation saves no raw LiDAR frames or MPC candidate trajectories.
 """
 
 import argparse
@@ -17,22 +16,32 @@ import rerun.blueprint as rrb
 from isaaclab_ipc.scenes import read_pcd
 
 
-def flight_blueprint():
+def flight_blueprint(*, ctbr=False):
+    charts = [
+        rrb.TimeSeriesView(origin="/metrics/speed", name="Actual / reference speed (m/s)"),
+        rrb.TimeSeriesView(origin="/metrics/clearance", name="Swept PCD / ground clearance (m)"),
+    ]
+    if ctbr:
+        charts.extend([
+            rrb.TimeSeriesView(origin="/metrics/ctbr/collective_thrust_mps2", name="Collective thrust (m/s²)"),
+            rrb.TimeSeriesView(origin="/metrics/ctbr/body_rates", name="Body rates (rad/s)"),
+        ])
     return rrb.Blueprint(
         rrb.Horizontal(
             rrb.Spatial3DView(
                 origin="/world",
-                name="Official PCD + actual flight / reference",
+                name="Official PCD + measured flight" if ctbr else "Official PCD + actual flight / reference",
                 eye_controls=rrb.EyeControls3D(
-                    position=(65, -5, 55), look_target=(0, 0, 1.5), eye_up=(0, 1, 0)
+                    position=(70, -85, 70) if ctbr else (65, -5, 55),
+                    look_target=(0, 0, 1.5),
+                    eye_up=(0, 0, 1) if ctbr else (0, 1, 0),
                 ),
                 line_grid=False,
             ),
             rrb.Vertical(
-                rrb.TimeSeriesView(origin="/metrics/speed", name="Actual / reference speed (m/s)"),
-                rrb.TimeSeriesView(origin="/metrics/clearance", name="Swept PCD / ground clearance (m)"),
-                rrb.TextDocumentView(origin="/status", name="Mission / recording provenance"),
-                row_shares=[2, 2, 2],
+                *charts,
+                rrb.TextDocumentView(origin="/status/current", name="Mission progress"),
+                row_shares=[2] * (len(charts) + 1),
             ),
             column_shares=[3, 2],
         ),
@@ -54,8 +63,9 @@ def export(source: Path, destination: Path, *, pcd_override: Path | None = None)
     if destination.exists():
         raise FileExistsError(destination)
     info = json.loads((source / "metrics.json").read_text())
-    if info["policy"] != "super":
-        raise ValueError("Only SUPER evaluation recordings are supported")
+    native_ctbr = info["policy"] in ("fixed-ctbr", "acmpc")
+    if info["policy"] != "super" and not native_ctbr:
+        raise ValueError(f"Unsupported MARSIM policy: {info['policy']}")
     with np.load(source / "trajectory.npz", allow_pickle=False) as data:
         states = {name: data[name] for name in data.files}
     stamps = states["stamp_s"]
@@ -64,24 +74,36 @@ def export(source: Path, destination: Path, *, pcd_override: Path | None = None)
     speed = states["speed_mps"]
     clearance = states["clearance_m"]
     reference = states["position_commands"]
+    controls = states.get("ctbr", np.empty((0, 6)))
     if not len(stamps) or not np.all(np.diff(stamps) > 0):
         raise ValueError("Odometry timestamps must be non-empty and strictly increasing")
     if positions.shape != (len(stamps), 3) or quaternions.shape != (len(stamps), 4):
         raise ValueError("Missing actual 3D odometry / attitude")
     if reference.shape[1] != 16 or (len(reference) and np.any(np.diff(reference[:, 0]) < 0)):
         raise ValueError("Unexpected PositionCommand recording")
+    if native_ctbr and (controls.ndim != 2 or controls.shape[1] != 6 or not len(controls)):
+        raise ValueError("Native CTBR recording requires published CTBR samples [N,6]")
 
     pcd = pcd_override if pcd_override is not None else Path(info["pcd"])
     points = read_pcd(pcd, drop_nan=True)
     if len(points) != info["pcd_points"]:
         raise ValueError("PCD differs from the collision evaluator's original map")
     destination.parent.mkdir(parents=True, exist_ok=True)
-    stream = rr.RecordingStream(f"SUPER {info['benchmark']} · {info['mode']} · {info['status']}")
+    label = {
+        "super": "SUPER",
+        "fixed-ctbr": "PathCover + CTBR (fixed cost)",
+        "acmpc": "PathCover + AC-MPC",
+    }[info["policy"]]
+    control_description = ("CTBR controls in the time series; " if native_ctbr
+                           else "magenta: published PositionCommand samples; ")
+    stream = rr.RecordingStream(f"{label} · {info['benchmark']} · {info['status']}")
     try:
-        stream.save(destination, default_blueprint=flight_blueprint())
+        stream.save(destination, default_blueprint=flight_blueprint(ctbr=native_ctbr))
         stream.log("world", rr.ViewCoordinates.RIGHT_HAND_Z_UP, static=True)
         colors = np.where((points[:, 2] >= 0.2)[:, None], [110, 161, 121], [77, 78, 79]).astype(np.uint8)
-        stream.log("world/obstacles", rr.Points3D(points, colors=colors, radii=0.021), static=True)
+        stream.log("world/obstacles", rr.Points3D(
+            points, colors=colors, radii=0.012 if native_ctbr else 0.021,
+        ), static=True)
 
         waypoints = np.asarray(info["waypoints"], dtype=float)
         start = positions[0]
@@ -97,7 +119,8 @@ def export(source: Path, destination: Path, *, pcd_override: Path | None = None)
         )
         stream.log(
             "world/actual_full_route",
-            rr.LineStrips3D([positions], colors=[115, 135, 160], radii=0.018),
+            rr.LineStrips3D([positions], colors=[115, 135, 160],
+                            radii=0.045 if native_ctbr else 0.018),
             static=True,
         )
         stream.log(
@@ -117,16 +140,18 @@ def export(source: Path, destination: Path, *, pcd_override: Path | None = None)
         stream.log(
             "status/recording",
             rr.TextDocument(
-                f"SUPER {info['benchmark']} / {info['mode']} | {info['status']}\n"
+                f"{label} {info['benchmark']} / {info['mode']} | {info['status']}\n"
                 f"Official waypoint mission (out and back), {len(waypoints)} targets.\n"
-                f"Recorded odometry: {len(stamps)}, PositionCommand: {len(reference)}, "
+                f"Recorded odometry: {len(stamps)}, "
+                f"{'CTBR commands' if native_ctbr else 'PositionCommand'}: "
+                f"{len(controls) if native_ctbr else len(reference)}, "
                 f"LiDAR messages: {len(states['lidar'])}.\n"
                 f"Source: {source}\n"
                 f"Map: original {pcd.name}, {len(points):,} valid PCD points.\n"
                 "Blue: actual body and travelled trail; gray: complete actual route; "
-                "magenta: published PositionCommand samples; yellow: official waypoints.\n"
+                f"{control_description}yellow: official waypoints.\n"
                 "Speed / clearance are recorded evaluation metrics. "
-                "Raw LiDAR point clouds and optimizer candidate paths were not saved."
+                "Raw LiDAR frames and internal optimizer reference/SFC geometry were not saved."
             ),
             static=True,
         )
@@ -134,6 +159,7 @@ def export(source: Path, destination: Path, *, pcd_override: Path | None = None)
         origin = stamps[0]
         command_i = 0
         last_command_i = 0
+        ctbr_i = 0
         waypoint_i = 0
         events = sorted(info["waypoint_events"], key=lambda item: item["stamp_s"])
         for i, stamp in enumerate(stamps):
@@ -146,7 +172,8 @@ def export(source: Path, destination: Path, *, pcd_override: Path | None = None)
 
             if i % 8 == 0 or i == len(stamps) - 1:
                 stream.log("world/actual_trail", rr.LineStrips3D(
-                    [positions[:i + 1]], colors=[50, 165, 245], radii=0.033
+                    [positions[:i + 1]], colors=[50, 165, 245],
+                    radii=0.065 if native_ctbr else 0.033,
                 ))
 
             while command_i < len(reference) and reference[command_i, 0] <= stamp:
@@ -165,6 +192,15 @@ def export(source: Path, destination: Path, *, pcd_override: Path | None = None)
                 stream.log("metrics/speed/reference_mps", rr.Scalars(float(np.linalg.norm(current[5:8]))))
                 last_command_i = command_i
 
+            if native_ctbr:
+                while ctbr_i < len(controls) and controls[ctbr_i, 0] <= stamp:
+                    ctbr_i += 1
+                if ctbr_i:
+                    control = controls[ctbr_i - 1]
+                    stream.log("metrics/ctbr/collective_thrust_mps2", rr.Scalars(float(control[2])))
+                    for axis, value in zip(("wx", "wy", "wz"), control[3:6], strict=True):
+                        stream.log(f"metrics/ctbr/body_rates/{axis}_radps", rr.Scalars(float(value)))
+
             while waypoint_i < len(events) and events[waypoint_i]["stamp_s"] <= stamp:
                 reached = events[waypoint_i]
                 stream.log("world/reached_waypoint", rr.Points3D(
@@ -177,7 +213,7 @@ def export(source: Path, destination: Path, *, pcd_override: Path | None = None)
                 waypoint_i and i > 0 and events[waypoint_i - 1]["stamp_s"] > stamps[i - 1]
             ):
                 stream.log("status/current", rr.TextDocument(
-                    f"SUPER / {info['mode']} / {info['benchmark']}\n"
+                    f"{label} / {info['mode']} / {info['benchmark']}\n"
                     f"Flight recording time: {stamp - origin:.2f} s\n"
                     f"Waypoints reached: {waypoint_i}/{len(waypoints)}\n"
                     f"Speed: {speed[i]:.2f} m/s\n"
@@ -197,6 +233,7 @@ def export(source: Path, destination: Path, *, pcd_override: Path | None = None)
         "file": str(destination), "size_bytes": destination.stat().st_size,
         "source": str(source), "mode": info["mode"], "benchmark": info["benchmark"],
         "status": info["status"], "flight_samples": len(stamps), "pcd_points": len(points),
+        "policy": info["policy"], "control_samples": len(controls) if native_ctbr else len(reference),
         "waypoints_reached": info["waypoints_reached"],
         "duration_s": round(float(stamps[-1] - stamps[0]), 3),
         "min_clearance_m": info["minimum_clearance_m"],
