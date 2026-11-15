@@ -68,6 +68,8 @@ def start(context):
         if native_ctbr:
             policy_command += ["-p", f"frontend:={value('frontend')}",
                                "-p", f"reference_speed:={float(value('reference_speed'))}",
+                               "-p", f"sfc_constraint_mode:={value('sfc_constraint_mode')}",
+                               "-p", f"sfc_section_half_length_m:={float(value('sfc_section_half_length_m'))}",
                                "-p", f"capture_reference_plans:={value('capture_reference_plans')}"]
         if value("checkpoint"):
             policy_command += ["-p", f"checkpoint:={value('checkpoint')}"]
@@ -109,6 +111,10 @@ def generate_launch_description():
         DeclareLaunchArgument("frontend", default_value="pathcover", choices=["pathcover", "none"]),
         DeclareLaunchArgument("reference_speed", default_value="3.0",
                               description="Native PathCover nominal reference speed in m/s"),
+        DeclareLaunchArgument("sfc_constraint_mode", default_value="polytope",
+                              choices=["polytope", "section"]),
+        DeclareLaunchArgument("sfc_section_half_length_m", default_value="0.5",
+                              description="Requested bounded section half-length in metres"),
         DeclareLaunchArgument("capture_reference_plans", default_value="false", choices=["true", "false"],
                               description="Save returned CPU plans once at shutdown for offline reference analysis"),
         DeclareLaunchArgument("benchmark", default_value="high_speed", choices=["high_speed", "dense"]),

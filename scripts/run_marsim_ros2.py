@@ -45,6 +45,10 @@ def main():
     parser.add_argument("--frontend", choices=("pathcover", "none"), default="pathcover")
     parser.add_argument("--reference-speed", type=float, default=3.0,
                         help="Native PathCover nominal speed in m/s; physical scene/CTBR speed limits remain separate")
+    parser.add_argument("--sfc-constraint-mode", choices=("polytope", "section"), default="polytope",
+                        help="Full PathCover SFC or fixed-progress bounded CMPCC-style section tube")
+    parser.add_argument("--sfc-section-half-length", type=float, default=0.5,
+                        help="Requested longitudinal half-length in metres; clipped to the original SFC")
     parser.add_argument("--capture-reference-plans", action="store_true",
                         help="Retain returned CPU plans for offline continuous reference checks; write once at shutdown")
     parser.add_argument("--checkpoint", type=Path)
@@ -67,6 +71,11 @@ def main():
         parser.error("--capture-reference-plans requires a native CTBR policy")
     if not 0 < args.reference_speed < float("inf"):
         parser.error("--reference-speed must be finite and positive")
+    if not 0 < args.sfc_section_half_length < float("inf"):
+        parser.error("--sfc-section-half-length must be finite and positive")
+    if args.sfc_constraint_mode == "section" and (args.frontend != "pathcover"
+                                                 or args.policy not in ("fixed-ctbr", "acmpc")):
+        parser.error("Section constraints require native CTBR with the PathCover frontend")
     if args.executor_parameters and args.mode != "dynamic":
         parser.error("--executor-parameters applies to the dynamic executor")
     output = args.output.absolute()
@@ -82,6 +91,8 @@ def main():
                    f"execution:={args.mode}", f"benchmark:={args.benchmark}", f"policy:={args.policy}",
                    f"frontend:={args.frontend}",
                    f"reference_speed:={args.reference_speed}",
+                   f"sfc_constraint_mode:={args.sfc_constraint_mode}",
+                   f"sfc_section_half_length_m:={args.sfc_section_half_length}",
                    f"capture_reference_plans:={'true' if args.capture_reference_plans else 'false'}",
                    f"time_mode:={args.time_mode}",
                    f"output:={output}", "record:=false", f"render_prefix:={args.render_prefix}"]
@@ -108,6 +119,8 @@ def main():
         "launch": command, "monitor": monitor_command, "ros_domain_id": args.domain,
         "time_mode": args.time_mode, "frontend": args.frontend,
         "reference_speed_m_s": args.reference_speed,
+        "sfc_constraint_mode": args.sfc_constraint_mode,
+        "sfc_section_half_length_m": args.sfc_section_half_length,
         "capture_reference_plans": args.capture_reference_plans,
         "git_revision": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
         "marsim_runtime": str(runtime),

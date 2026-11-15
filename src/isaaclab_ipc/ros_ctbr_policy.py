@@ -85,7 +85,8 @@ class CTBRController:
     """Shared actor and frontend contracts; no ROS objects or hidden PPO state."""
 
     def __init__(self, benchmark, *, policy, frontend="pathcover", checkpoint=None,
-                 device="cuda:0", max_planes=128, reference_speed=3.0, qp_linear_solver=None):
+                 device="cuda:0", max_planes=128, reference_speed=3.0, qp_linear_solver=None,
+                 sfc_constraint_mode="polytope", sfc_section_half_length_m=0.5):
         started = perf_counter()
         self.device = torch.device(device)
         self.reference_speed = float(reference_speed)
@@ -106,9 +107,13 @@ class CTBRController:
         if frontend == "pathcover":
             self.navigation = PathCoverNavigation(1, self.config,
                 benchmark_frontend_config(self.case, self.config, reference_speed),
-                device=self.device, max_planes=self.max_planes)
+                device=self.device, max_planes=self.max_planes,
+                constraint_mode=sfc_constraint_mode,
+                section_half_length_m=sfc_section_half_length_m)
         elif frontend != "none":
             raise ValueError("frontend must be pathcover or none")
+        elif sfc_constraint_mode != "polytope":
+            raise ValueError("Section constraints require the PathCover frontend")
         state = torch.zeros((1, 10), dtype=torch.float64, device=self.device)
         state[:, :3] = state.new_tensor(self.case["start"])
         state[:, 3] = 1.
@@ -212,7 +217,8 @@ def main(args=None):
                             checkpoint="", frontend="pathcover", device="cuda:0",
                             output_directory="results/marsim-ctbr", simulated_time=True,
                             frequency=100.0, replan_frequency=10.0, reference_speed=3.0,
-                            capture_reference_plans=False, qp_linear_solver="")
+                            capture_reference_plans=False, qp_linear_solver="",
+                            sfc_constraint_mode="polytope", sfc_section_half_length_m=0.5)
             for key, value in defaults.items():
                 self.declare_parameter(key, value)
             self.options = p = {key: self.get_parameter(key).value for key in defaults}
@@ -223,7 +229,9 @@ def main(args=None):
             torch.set_num_threads(1)
             self.controller = CTBRController(p["benchmark"], policy=p["policy"], frontend=p["frontend"],
                 checkpoint=p["checkpoint"] or None, device=p["device"], reference_speed=p["reference_speed"],
-                qp_linear_solver=p["qp_linear_solver"] or None)
+                qp_linear_solver=p["qp_linear_solver"] or None,
+                sfc_constraint_mode=p["sfc_constraint_mode"],
+                sfc_section_half_length_m=p["sfc_section_half_length_m"])
             directory = Path(p["output_directory"])
             directory.mkdir(parents=True, exist_ok=True)
             self.directory = directory

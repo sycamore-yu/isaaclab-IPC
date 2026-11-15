@@ -44,6 +44,8 @@ def _configure_ctbr(cfg, frontend):
     cfg.reference_speed = 3.0
     cfg.pathcover_config = {}
     cfg.max_planes = 0 if frontend == "none" else 128
+    cfg.sfc_constraint_mode = "polytope"
+    cfg.sfc_section_half_length_m = 0.5
     cfg.reward = NavigationRewardCfg()
     cfg.observation_space = ctbr_feature_size(model.cost_nodes)
     cfg.thrust_limits = model.specific_thrust_limits
@@ -157,9 +159,13 @@ class CTBRMPCEnv(IPCEnv):
             self.navigation = PathCoverNavigation(
                 self.num_envs, self.ctbr_config, frontend_config,
                 device=self.device, max_planes=cfg.max_planes,
+                constraint_mode=cfg.sfc_constraint_mode,
+                section_half_length_m=cfg.sfc_section_half_length_m,
             )
         elif cfg.frontend != "none":
             raise ValueError("CTBR frontend must be none or pathcover")
+        elif cfg.sfc_constraint_mode != "polytope":
+            raise ValueError("Section constraints require the PathCover frontend")
         self.records, self.observation_times = [], []
         self.frontend_times = [] if self.navigation is None else self.navigation.frontend_times_ms
         self.frontend_batch_times = [] if self.navigation is None else self.navigation.frontend_batch_times_ms
@@ -203,6 +209,8 @@ class CTBRMPCEnv(IPCEnv):
             "physics_period_s": self.cfg.sim.dt,
             "frontend": cfg.frontend,
             "frontend_config": None if frontend_config is None else asdict(frontend_config),
+            "sfc_constraint_mode": cfg.sfc_constraint_mode,
+            "sfc_section_half_length_m": cfg.sfc_section_half_length_m,
             "cost_outputs": self.ctbr_config.cost_dim,
         }
 

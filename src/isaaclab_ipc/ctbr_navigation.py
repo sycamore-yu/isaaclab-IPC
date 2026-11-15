@@ -11,6 +11,8 @@ from time import perf_counter
 import numpy as np
 import torch
 
+from .ctbr_section import reference_tangent, section_tube_planes
+
 
 def ctbr_boundary_frame(quaternion_wxyz):
     """Return the measured thrust axis and flatness heading from a CTBR frame.
@@ -38,6 +40,7 @@ class SampledPlan:
     plane_mask: np.ndarray
     corridor_index: np.ndarray
     reference_violation: float
+    source_reference_violation: float = 0.0
 
 
 def position_sfc_violation(plan, position, now):
@@ -52,13 +55,17 @@ def position_sfc_violation(plan, position, now):
                        for i in corridors))
 
 
-def sample_plan(plan, now, cost_nodes, dt, max_planes=128):
+def sample_plan(plan, now, cost_nodes, dt, max_planes=128, *,
+                constraint_mode="polytope", section_half_length_m=0.5):
     """Sample t0+k*dt; keep adjacent corridor faces at an exact junction.
 
     Polynomials and their corridor ownership use the frontend's own segment
-    times. After the final segment the reference holds its endpoint. This does
-    not re-integrate or accept/reject the MPC execution trajectory.
+    times. Section mode replaces each node's polytope by a bounded sweep of
+    its normal-plane section, with fixed progress from this reference clock.
+    After the final segment the reference holds its endpoint.
     """
+    if constraint_mode not in ("polytope", "section"):
+        raise ValueError("SFC constraint mode must be polytope or section")
     segments = plan.segments
     ends = np.asarray([segment.end for segment in segments], dtype=np.float64)
     relative = float(now) - float(plan.start_time) + np.arange(cost_nodes) * float(dt)
@@ -71,7 +78,7 @@ def sample_plan(plan, now, cost_nodes, dt, max_planes=128):
     planes = np.zeros((cost_nodes, max_planes, 4), dtype=np.float64)
     masks = np.zeros((cost_nodes, max_planes), dtype=bool)
     ownership = np.asarray([segments[index].corridor_index for index in indices], dtype=np.int64)
-    violation = 0.0
+    violation = source_violation = 0.0
     for k, (time, index) in enumerate(zip(clipped, indices, strict=True)):
         blocks = [np.asarray(plan.corridors[ownership[k]], dtype=np.float64)]
         # The reference is continuous at a segment boundary. Enforcing both
@@ -80,19 +87,29 @@ def sample_plan(plan, now, cost_nodes, dt, max_planes=128):
             previous = segments[index - 1].corridor_index
             if previous != ownership[k]:
                 blocks.append(np.asarray(plan.corridors[previous], dtype=np.float64))
-        faces = np.concatenate(blocks, axis=0)
+        source_faces = np.concatenate(blocks, axis=0)
+        if len(source_faces):
+            source_violation = max(source_violation, float(np.max(
+                source_faces[:, :3] @ pva[k, :3] + source_faces[:, 3],
+            )))
+        faces = (
+            section_tube_planes(source_faces, pva[k, :3], reference_tangent(pva, yaw, k),
+                                section_half_length_m)
+            if constraint_mode == "section" else source_faces
+        )
         if len(faces) > max_planes:
             raise ValueError(f"Sample requires {len(faces)} SFC faces; configured capacity is {max_planes}")
         planes[k, :len(faces)], masks[k, :len(faces)] = faces, True
         if len(faces):
             violation = max(violation, float(np.max(faces[:, :3] @ pva[k, :3] + faces[:, 3])))
-    return SampledPlan(pva, yaw, planes, masks, ownership, violation)
+    return SampledPlan(pva, yaw, planes, masks, ownership, violation, source_violation)
 
 
 class PathCoverNavigation:
     """One observed map per environment, one packed transfer per policy batch."""
 
-    def __init__(self, num_envs, ctbr_config, frontend_config, *, device, max_planes=128):
+    def __init__(self, num_envs, ctbr_config, frontend_config, *, device, max_planes=128,
+                 constraint_mode="polytope", section_half_length_m=0.5):
         from .pathcover_native import NativePathCoverFrontend
         from .rl.ctbr_observation import PackedCTBRObservation
         from .turbompc.quadrotor import CTBRDynamics
@@ -100,6 +117,12 @@ class PathCoverNavigation:
         self.config = ctbr_config
         self.device = torch.device(device)
         self.max_planes = int(max_planes)
+        if constraint_mode not in ("polytope", "section"):
+            raise ValueError("SFC constraint mode must be polytope or section")
+        if not np.isfinite(section_half_length_m) or section_half_length_m <= 0:
+            raise ValueError("Section half-length must be positive and finite")
+        self.constraint_mode = constraint_mode
+        self.section_half_length_m = float(section_half_length_m)
         self._dynamics = CTBRDynamics(dt=ctbr_config.dt, mass=ctbr_config.mass, gravity=ctbr_config.gravity)
         self._motion_seed = (torch.compile(self._initial_motion_seed, fullgraph=True, dynamic=False)
                              if self.device.type == "cuda" else self._initial_motion_seed)
@@ -258,10 +281,14 @@ class PathCoverNavigation:
             except PathCoverPlanningError as error:
                 return None, error, 1000 * (perf_counter() - started), None
             elapsed = 1000 * (perf_counter() - started)
-            snapshot = sample_plan(plan, now, self.config.cost_nodes, self.config.dt, self.max_planes)
+            snapshot = sample_plan(
+                plan, now, self.config.cost_nodes, self.config.dt, self.max_planes,
+                constraint_mode=self.constraint_mode, section_half_length_m=self.section_half_length_m,
+            )
             metrics = {
                 **plan.metrics,
                 "reference_sfc_violation_m": snapshot.reference_violation,
+                "source_reference_sfc_violation_m": snapshot.source_reference_violation,
                 "corridor_count": len(plan.corridors),
                 "trajectory_duration_s": float(plan.valid_until - plan.start_time),
             }
