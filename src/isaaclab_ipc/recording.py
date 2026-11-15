@@ -142,6 +142,7 @@ class ForestRecording:
     def plan(self):
         env, r = self.env, self.stream
         obs, result = env.current_context, env.last_mpc_result
+        ctbr = hasattr(env, "ctbr_config")
         mode = bool(result["sfc_valid"][0]), bool(result["solved"][0]), bool(result["braking"][0])
         tick = round(float(env.elapsed[0]) * 100)
         if tick % 10 and mode == self.mode:
@@ -157,16 +158,16 @@ class ForestRecording:
             planes = plane_tensor[0].cpu().numpy()
             masks = mask_tensor[0].cpu().numpy()
             unique = []
-            for k in range(15):
+            for k in range(len(reference)):
                 faces = planes[k, masks[k]]
                 if not len(faces) or any(np.array_equal(faces, old) for old in unique):
                     continue
                 unique.append(faces)
-                steps = [j for j in range(15) if np.array_equal(faces, planes[j, masks[j]])]
+                steps = [j for j in range(len(reference)) if np.array_equal(faces, planes[j, masks[j]])]
                 color = [30, 220, 220] if len(unique) == 1 else [255, 170, 50]
                 name = f"world/sfc/{len(unique)}"
                 r.log(name, rr.LineStrips3D(corridor_edges(faces), colors=color, radii=0.012))
-                label = "SFC steps " + ",".join(str(j + 1) for j in steps)
+                label = "SFC nodes " + ",".join(str(j) for j in steps)
                 r.log(name + "/label", rr.Points3D([reference[k]], radii=0.03, colors=color, labels=[label]))
         else:
             r.log("world/reference", rr.Clear(recursive=True))
@@ -188,23 +189,35 @@ class ForestRecording:
                     labels=["Brake +0.1 s"],
                 ),
             )
-        planner = env.planners[0]
-        recovery_note = (
-            f"Safe climb target: {planner.recovery_target[2]:.2f} m | climbs: {planner.safe_climb_events}\n"
-            if planner.recovery_target is not None
-            else f"Last frontend issue: {planner.last_frontend_error or 'none'}\n"
-        )
-        reuse_note = f"Reused trajectories: {planner.reused_prediction_count}\n"
+        if ctbr:
+            details = (
+                f"CTBR 10D · {env.cfg.sfc_constraint_mode} SFC · "
+                f"{len(reference)} cost nodes · {env.ctbr_config.dt:g} s grid\n"
+                f"SQP status: {int(result['sqp_status'][0])} | "
+                f"QP status: {int(result['raw_qp_status'][0])}\n"
+                f"Frontend failures: {int(env.frontend_failure[0])} | "
+                f"QP failures so far: {int(env.qp_failures[0])}\n"
+            )
+        else:
+            planner = env.planners[0]
+            recovery_note = (
+                f"Safe climb target: {planner.recovery_target[2]:.2f} m | climbs: {planner.safe_climb_events}\n"
+                if planner.recovery_target is not None
+                else f"Last frontend issue: {planner.last_frontend_error or 'none'}\n"
+            )
+            details = (
+                f"Frontend failures: {planner.frontend_failures} | recoveries: {planner.recovery_events}\n\n"
+                f"{recovery_note}"
+                f"Reused trajectories: {planner.reused_prediction_count}\n"
+            )
         r.log(
             "status/current",
             rr.TextDocument(
                 f"{self.policy} | Newton real | {self.route_label}\n"
                 f"SFC valid: {mode[0]} | QP solved: {mode[1]} | braking: {mode[2]}\n"
-                f"Frontend failures: {planner.frontend_failures} | recoveries: {planner.recovery_events}\n\n"
-                f"{recovery_note}"
-                f"{reuse_note}"
+                f"{details}"
                 "Blue: actual flight\nWhite: reference\nMagenta: accepted QP prediction\n"
-                "Cyan / amber: SFC, labels list prediction steps (0.1 s each)\n"
+                "Cyan / amber: SFC, labels list prediction nodes\n"
                 "Red point: braking prediction\nPlans sampled at 10 Hz and every mode change."
             ),
         )
@@ -231,7 +244,11 @@ class ForestRecording:
         clearance = float(env.min_clearance[0])
         if np.isfinite(clearance):
             r.log("metrics/min_clearance_m", rr.Scalars(clearance))
-        r.log("metrics/braking", rr.Scalars(float(env.planners[0].braking)))
+        if hasattr(env, "ctbr_config"):
+            r.log("metrics/qp_solved", rr.Scalars(float(env.last_mpc_result["solved"][0])))
+            r.log("metrics/braking", rr.Scalars(float(env.last_mpc_result["braking"][0])))
+        else:
+            r.log("metrics/braking", rr.Scalars(float(env.planners[0].braking)))
         if env.reported[0]:
             row = env.records[-1]
             mission = ""
