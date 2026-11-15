@@ -136,7 +136,7 @@ class CTBRMPCEnv(IPCEnv):
             "sfc_valid": (1,), "yaw_target": (1,),
         }
         if self.cfg.sfc_constraint_mode == 'progress':
-            shapes['progress_reference'] = (nodes, 7)
+            shapes['progress_reference'] = (nodes, 8)
         for name, shape in shapes.items():
             boolean = name in ("plane_mask", "sfc_valid")
             self.single_observation_space[name] = gym.spaces.Box(
@@ -186,6 +186,9 @@ class CTBRMPCEnv(IPCEnv):
         self.reward_active = torch.ones_like(self.reported)
         self.episode_ids = np.zeros(self.num_envs, dtype=np.int64)
         self.episode_record_index = np.full(self.num_envs, -1, dtype=np.int64)
+        if cfg.sfc_constraint_mode == "progress":
+            # The first unsuccessful MPC solve has no preceding valid command.
+            self.controller.command[:, 0] = self.ctbr_config.gravity
         self.previous_action = self.controller.command.clone()
         self.reward_sums = torch.zeros((self.num_envs, 4), device=self.device)
         self.command_violations = torch.zeros(self.num_envs, dtype=torch.int64, device=self.device)
@@ -366,8 +369,12 @@ class CTBRMPCEnv(IPCEnv):
         right = (left + 1).clamp_max(self.ctbr_config.horizon - 1)
         fraction = (offset - offset.floor())[None, :, None]
         controls = result["controls"]
-        self._warm_controls.copy_(controls[:, left] * (1 - fraction) + controls[:, right] * fraction)
-        super()._pre_physics_step(actions.clamp(self._action_lower, self._action_upper))
+        updated = controls[:, left] * (1 - fraction) + controls[:, right] * fraction
+        self._warm_controls.copy_(torch.where(
+            result["solved"][:, None, None], updated, self._warm_controls,
+        ))
+        applied = torch.where(result["solved"][:, None], actions, self.controller.command)
+        super()._pre_physics_step(applied.clamp(self._action_lower, self._action_upper))
 
     def _get_dones(self):
         term, trunc = super()._get_dones()

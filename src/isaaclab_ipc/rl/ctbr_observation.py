@@ -9,14 +9,14 @@ from isaaclab_ipc.turbompc.quadrotor import reference_from_pva
 
 
 def ctbr_feature_size(cost_nodes, *, progress=False):
-    return 14 + (18 if progress else 11) * cost_nodes
+    return 14 + (19 if progress else 11) * cost_nodes
 
 
 def add_progress_observation(values, progress):
-    """Append a frozen [s,tangent_xyz,s_lo,s_hi,nu] geometry snapshot."""
+    """Append a frozen [s,tangent_xyz,s_lo,s_hi,nu_guess,nu_limit] snapshot."""
     result = dict(values)
     result['progress_reference'] = progress.clone(memory_format=torch.contiguous_format)
-    scale = progress.new_tensor([10., 1., 1., 1., 10., 10., 10.])
+    scale = progress.new_tensor([10., 1., 1., 1., 10., 10., 10., 10.])
     result['policy'] = torch.cat((values['policy'], (progress / scale).flatten(1).float()), -1)
     return result
 

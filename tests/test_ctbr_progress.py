@@ -54,10 +54,13 @@ def test_path_progress_uses_geometry_not_minco_clock():
     slow = sample_progress_plan(straight_plan(7.), state, 5, .1, 16)
     np.testing.assert_allclose(fast.pva, slow.pva, atol=1e-10)
     np.testing.assert_allclose(fast.progress, slow.progress, atol=1e-10)
-    np.testing.assert_allclose(fast.progress[:, 0], [0., .2, .4, .6, .8])
+    assert fast.progress[0, 0] == 0.
+    assert np.all(np.diff(fast.progress[:, 0]) > 0)
+    assert fast.progress[1, 0] == pytest.approx(.2)
     np.testing.assert_allclose(fast.progress[:, 1:4], [[1., 0., 0.]] * 5)
     np.testing.assert_array_equal(fast.plane_mask.sum(-1), [6] * 5)
     np.testing.assert_allclose(fast.progress[:, 4:6], [[0., 10.]] * 5)
+    assert np.all(fast.progress[:, 7] <= 4.)
 
 
 def test_standstill_previews_curve_instead_of_repeating_initial_tangent():
@@ -80,6 +83,7 @@ def test_standstill_previews_curve_instead_of_repeating_initial_tangent():
     # Progress and actual velocity are not replaced by this linearization seed.
     assert sample.progress[0, 0] == 0.
     np.testing.assert_array_equal(sample.progress[:, 6], 0.)
+    assert .07 < sample.progress[1, 0] <= .1
 
 
 def test_progress_dynamics_preserves_physics_and_integrates_virtual_speed():
@@ -95,6 +99,13 @@ def test_progress_dynamics_preserves_physics_and_integrates_virtual_speed():
     assert actual[0, 10] == pytest.approx(2.3)
     assert jac[0, 10, 10] == pytest.approx(1.)
     assert jac[0, 10, 15] == pytest.approx(.1)
+    lagrange = torch.ones((1, 11), dtype=z.dtype)
+    hessian = model.lagrangian_hessian(z, lagrange)
+    physical_hessian = model.physical.lagrangian_hessian(
+        torch.cat((z[:, :10], z[:, 11:15]), -1), lagrange[:, :10])
+    torch.testing.assert_close(hessian[0, :10, :10], physical_hessian[0, :10, :10])
+    assert not hessian[0, 10].count_nonzero()
+    assert not hessian[0, :, 15].count_nonzero()
     delta = torch.zeros_like(z)
     delta[:, 15] = 1e-5
     torch.testing.assert_close((model(z + delta) - model(z - delta)) / 2e-5, jac[:, :, 15])
@@ -113,7 +124,7 @@ def test_progress_cost_couples_position_velocity_and_progress():
     assert problem.q[0, -1, 10] < 0  # reward forward progress
     assert torch.linalg.eigvalsh(problem.D).min() > -1e-8
     assert torch.isfinite(problem.q).all()
-    assert obs['policy'].shape == (1, 104)
+    assert obs['policy'].shape == (1, 109)
 
 
 def test_progress_hard_rows_preserve_source_sfc_and_progress_interval():
@@ -140,11 +151,61 @@ def test_progress_owns_corridor_by_arclength_at_junction():
     plan.segments = (SimpleNamespace(start=0., end=1., corridor_index=0),
                      SimpleNamespace(start=1., end=2., corridor_index=1))
     state = np.array([0., 0., 1.5, 1., 0., 0., 0., 5., 0., 0.])
-    sample = sample_progress_plan(plan, state, 5, .5, 16)
-    np.testing.assert_allclose(sample.progress[:, 0], [0., 2.5, 5., 7.5, 10.])
+    sample = sample_progress_plan(plan, state, 5, .5, 16, max_speed=5.)
+    np.testing.assert_allclose(sample.progress[:4, 0], [0., 2.5, 5., 7.5])
+    assert 9. < sample.progress[-1, 0] < 10.
     np.testing.assert_array_equal(sample.corridor_index, [0, 0, 1, 1, 1])
     assert sample.plane_mask[2].sum() == 12
     np.testing.assert_allclose(sample.progress[2, 4:6], [5., 10.])
+
+
+def test_progress_curvature_attitude_and_mission_goal_speed_limit():
+    from isaaclab_ipc.ctbr_progress import sample_progress_plan
+
+    plan = straight_plan()
+
+    def curve(times):
+        u = np.asarray(times) / 2.
+        pva = np.zeros(u.shape + (9,))
+        pva[:, 0] = 10 * u
+        pva[:, 1] = 2 * np.sin(np.pi * u)
+        pva[:, 2] = 1.5
+        return SimpleNamespace(pva=pva, yaw=np.zeros_like(u))
+
+    plan.trajectory.sample = curve
+    plan.local_goal = np.array([10., 0., 1.5])
+    state = np.array([0., 0., 1.5, 1., 0., 0., 0., 3., 0., 0.])
+    sample = sample_progress_plan(plan, state, 5, .1, 16, mission_goal=plan.local_goal)
+    assert np.linalg.norm(sample.pva[:, 6:9], axis=-1).max() > .05
+    assert np.all(sample.progress[:, 7] <= 4.)
+
+    # Remaining distance, not the MINCO time clock, determines braking.
+    close = straight_plan()
+    close.local_goal = np.array([1., 0., 1.5])
+    sample = sample_progress_plan(close, state, 5, .1, 16, mission_goal=close.local_goal)
+    assert sample.progress[0, 7] == pytest.approx(np.sqrt(8.))
+    assert sample.progress[-1, 7] < sample.progress[0, 7]
+
+
+def test_progress_brakes_before_approaching_sharp_bend():
+    from isaaclab_ipc.ctbr_progress import sample_progress_plan
+
+    plan = straight_plan()
+
+    def sharp_bend(times):
+        u = np.asarray(times) / 2.
+        x = 10. * u
+        pva = np.zeros(u.shape + (9,))
+        pva[:, 0] = x
+        pva[:, 1] = .75 * (1. + np.tanh((x - 2.) / .2))
+        pva[:, 2] = 1.5
+        return SimpleNamespace(pva=pva, yaw=np.zeros_like(u))
+
+    plan.trajectory.sample = sharp_bend
+    state = np.array([0., 0., 1.5, 1., 0., 0., 0., 5., 0., 0.])
+    result = sample_progress_plan(plan, state, 5, .1, 16)
+    assert result.progress[0, 7] < 5.
+    assert np.all(result.progress[:, 7] <= 4.)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason='Native CUDA MPC required')

@@ -288,7 +288,10 @@ class PathCoverNavigation:
 
                 snapshot = sample_progress_plan(
                     plan, values[:10], self.config.cost_nodes, self.config.dt, self.max_planes,
-                    max_speed=self.progress_config.get('max_speed', 6.0),
+                    max_speed=self.progress_config.get('max_speed', 4.0),
+                    lateral_acceleration=self.progress_config.get('lateral_acceleration', 3.5),
+                    braking_acceleration=self.progress_config.get('braking_acceleration', 4.0),
+                    mission_goal=values[13:16],
                 )
             else:
                 snapshot = sample_plan(

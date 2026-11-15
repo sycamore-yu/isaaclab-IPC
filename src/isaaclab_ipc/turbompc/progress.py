@@ -16,11 +16,15 @@ from .solver import MPCInputs
 
 @dataclass(frozen=True)
 class ProgressConfig:
-    reward: float = 6.0
+    reward: float = 12.0
     lag_weight: float = 50.0
     rate_weight: float = 0.1
     rate_change_weight: float = 0.2
-    max_speed: float = 6.0
+    contour_weight: float = 25.0
+    velocity_consistency_weight: float = 10.0
+    max_speed: float = 4.0
+    lateral_acceleration: float = 3.5
+    braking_acceleration: float = 4.0
 
 
 class ProgressDynamics(AutoDiffDynamics):
@@ -34,6 +38,26 @@ class ProgressDynamics(AutoDiffDynamics):
     def step(self, z):
         physical_z = torch.cat((z[..., :10], z[..., 11:15]), -1)
         return torch.cat((self.physical(physical_z), z[..., 10:11] + self.dt * z[..., 15:16]), -1)
+
+    def linearize(self, z):
+        physical_z = torch.cat((z[..., :10], z[..., 11:15]), -1)
+        physical_next, physical_jac = self.physical.linearize(physical_z)
+        jacobian = z.new_zeros((*z.shape[:-1], 11, 16))
+        jacobian[..., :10, :10] = physical_jac[..., :10, :10]
+        jacobian[..., :10, 11:15] = physical_jac[..., :10, 10:14]
+        jacobian[..., 10, 10] = 1.
+        jacobian[..., 10, 15] = self.dt
+        return torch.cat((physical_next, z[..., 10:11] + self.dt * z[..., 15:16]), -1), jacobian
+
+    def lagrangian_hessian(self, z, multipliers):
+        physical_z = torch.cat((z[..., :10], z[..., 11:15]), -1)
+        physical_hessian = self.physical.lagrangian_hessian(physical_z, multipliers[..., :10])
+        hessian = z.new_zeros((*z.shape[:-1], 16, 16))
+        hessian[..., :10, :10] = physical_hessian[..., :10, :10]
+        hessian[..., :10, 11:15] = physical_hessian[..., :10, 10:14]
+        hessian[..., 11:15, :10] = physical_hessian[..., 10:14, :10]
+        hessian[..., 11:15, 11:15] = physical_hessian[..., 10:14, 10:14]
+        return hessian
 
     def rollout(self, initial_state, controls):
         state, states = initial_state, [initial_state]
@@ -86,6 +110,17 @@ class ProgressQPBuilder(CTBRQPBuilder):
         d = transposed @ (diagonal[..., :, None] * transform)
         q = (transposed @ (linear - diagonal * center)[..., None]).squeeze(-1)
 
+        # The spatial curve is the reference, not a timed velocity command.
+        # Penalize lateral position and actual velocity that diverges from
+        # the optimized virtual progress rate.
+        lateral = torch.eye(3, dtype=state.dtype, device=state.device) - (
+            tangent[..., :, None] * tangent[..., None, :]
+        )
+        d[..., :3, :3] += pc.contour_weight * lateral
+        q[..., :3] -= pc.contour_weight * (lateral @ reference[..., :3, None]).squeeze(-1)
+        velocity_map = transform[..., 7:10, :]
+        d += pc.velocity_consistency_weight * (velocity_map.transpose(-1, -2) @ velocity_map)
+
         lag = state.new_zeros((batch, nodes, 16))
         lag[..., :3], lag[..., 10] = tangent, -1.
         lag_center = (reference[..., :3] * tangent).sum(-1) - arc
@@ -107,7 +142,8 @@ class ProgressQPBuilder(CTBRQPBuilder):
         g[:, :, 3:7, 11:15] = torch.eye(4, dtype=state.dtype, device=state.device)
         lower[:, :, 3:7], upper[:, :, 3:7] = self.control_lower, self.control_upper
         g[:, :, 7, 15] = 1.
-        lower[:, :, 7], upper[:, :, 7] = 0., pc.max_speed
+        lower[:, :, 7] = 0.
+        upper[:, :, 7] = geometry[..., 7].clamp(min=0., max=pc.max_speed)
         g[:, 1:, 8, 10] = 1.
         lower[:, 1:, 8], upper[:, 1:, 8] = s_lower[:, 1:], s_upper[:, 1:]
         active_planes = planes.masked_fill(~mask[..., None], 0.)
@@ -117,7 +153,8 @@ class ProgressQPBuilder(CTBRQPBuilder):
         data = MPCInputs(initial_state, d, e, q, g, lower, upper)
 
         physical_controls = obs['ctbr_warm_start'].double().clamp(self.control_lower, self.control_upper)
-        rates = geometry[:, :-1, 6:7].clamp(0., pc.max_speed)
+        rates = torch.minimum(geometry[:, :-1, 6:7].clamp_min(0.),
+                              upper[:, :-1, 7:8])
         controls = torch.cat((physical_controls, rates), -1)
         states = self._rollout(initial_state, controls)
         terminal = torch.cat((self.hover_control.expand(batch, 1, 4), rates[:, -1:]), -1)

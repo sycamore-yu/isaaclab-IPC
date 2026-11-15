@@ -15,7 +15,7 @@ r(s) = r(s_bar) + tangent(s_bar) * (s - s_bar)
 
 该局部模型在一次求解期间固定。位置与进度、速度与虚拟速度的交叉项进入
 同一个二次成本和 KKT 系统。物理 CTBR 动力学、CUDA QP、隐式梯度后端均复用。
-140D 成本头保持不变；策略输入增加各节点几何信息，从 69D 变为 104D。
+140D 成本头保持不变；策略输入增加各节点几何信息，从 69D 变为 109D。
 
 ## 安全空间与进度
 
@@ -24,9 +24,10 @@ PathCover 每次重规划返回最多 3 个有序 SFC。各节点根据几何进
 旧固定时间截面的前后 ±0.5 m 约束在 `progress` 模式中不使用。
 
 每条新局部路径从实测位置开始，因此局部 s0=0；不会将上一条曲线的虚拟
-进度累加到新曲线。低速时用至少 1 m/s 的几何预览选择线性化点，以避免
-整段预测重复使用起点附近的退化切线。该预览不改变实测速度、虚拟速度初值
-或进度上下界。
+进度累加到新曲线。低速时用至少 1 m/s 的几何预览选择线性化点。对整条
+局部曲线计算曲率速度上限，并沿弧长反向传播制动速度曲线。到任务终点时，
+按剩余实际距离约束虚拟进度速度。MINCO 只决定空间路径形状及其切线、
+曲率，不向控制器施加固定的时间速度参考。
 
 物理执行、到达半径、终止条件和实际 PCD 碰撞判定保持原配置。ROS 的 SFC
 执行残差使用当前执行区间对应的 MPC 多面体，不再使用 MINCO 时钟选走廊。
@@ -34,8 +35,8 @@ PathCover 每次重规划返回最多 3 个有序 SFC。各节点根据几何进
 ## 成本与本轮参数
 
 原 14D 可学习残差包含位置/进度误差、姿态正则、速度/虚拟速度一致性和
-CTBR 控制正则。额外固定成本为沿切线滞后误差、虚拟速度正则、相邻虚拟
-速度差和末端进度奖励。
+CTBR 控制正则。额外固定成本为轮廓误差、速度与虚拟进度的一致性、
+沿切线滞后误差、虚拟速度正则、相邻虚拟速度差和末端进度奖励。
 
 | 参数 | 本轮训练及评测 |
 | --- | ---: |
@@ -43,12 +44,16 @@ CTBR 控制正则。额外固定成本为沿切线滞后误差、虚拟速度正
 | 滞后误差权重 | 50 |
 | 虚拟速度权重 | 0.1 |
 | 虚拟速度变化权重 | 0.2 |
-| 虚拟速度上限 | 6 m/s |
+| 虚拟速度上限 | 4 m/s |
+| 最大侧向参考加速度 | 3.5 m/s² |
+| 进度制动加速度 | 4 m/s² |
+| 轮廓误差权重 | 25 |
+| 速度一致性权重 | 10 |
 | 节点数 / 步长 | 5 / 0.1 s |
 
-进度奖励 12 来自训练地图的固定成本诊断。默认参数 6 保留为初始设置；
-正式命令显式指定 12，评测从同一检查点恢复参数。神经成本与物理速度上限
-均未借此修改。
+进度奖励 12 来自训练地图的固定成本诊断。上述配置用于后续完整闭环，
+神经成本维度、物理输入界和四旋翼动力学未修改。原方案的奖励 6、
+速度上限 6 m/s 已保留在 Git 历史中。
 
 ## 已完成的机制检查
 
@@ -79,7 +84,7 @@ export LD_LIBRARY_PATH="$PWD/build/turbompc/envs/cu130/lib/python3.12/site-packa
 .venv/bin/python scripts/acmpc.py train \
   --task Isaac-ACMPC-PathCover-Forest-Direct --num-envs 16 --iterations 32 \
   --output results/my-progress-training \
-  env.sfc_constraint_mode=progress env.progress_config.reward=12.0 \
+  env.sfc_constraint_mode=progress \
   agent.seed=0 agent.num_steps_per_env=16 \
   agent.algorithm.num_mini_batches=2 agent.algorithm.num_learning_epochs=1 \
   agent.actor.compile_kernels=False
@@ -101,3 +106,27 @@ DISPLAY=:11 .venv/bin/python scripts/run_marsim_ros2.py \
 
 学习成本使用 `--policy acmpc`；High-speed 使用 `--benchmark high_speed`。
 分别使用新的输出目录和 ROS domain。`polytope`、`section` 保持固定时间语义。
+
+## 后续修复与结果
+
+初版在 Dense 的急弯处出现 QP 未收敛和 PathCover 初始运动种子不可行。
+原控制器曾执行未收敛的极端控制解。现在仅在 MPC 成功时更新热启动；
+失败时保持上一次有效 CTBR 控制，不增加第二套控制器。
+同时根据实际转弯几何生成加速度/姿态参考，强化实际速度与进度耦合，
+对全局部路径反向传播弯道制动速度曲线。
+新增虚拟进度导数直接复用 CTBR 物理雅可比与 Hessian。
+
+固定成本完整 MARSIM 结果，seed 0、PathCover、动态 Flightmare、
+100 Hz 仿真控制、10 Hz 进度 MPC：
+
+| 场景 | 固定进度历史基线 | 自由进度 | 实际净空 | QP 失败 | 规划 p95 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Dense | 95.54 s | **84.19 s** | 0.218 m | 0 | 551.21 ms |
+| High-speed | 70.99 s | **55.56 s** | 0.631 m | 0 | 235.93 ms |
+
+以上自由进度任务均完成 2/2 航点，碰撞及实际 SFC 违反均为 0。
+相比固定进度，飞行时间分别缩短约 11.9% 与 21.7%。MPC 计算延迟
+明显上升，尚不符合 100 ms 的墙钟规划目标。
+记录分别在 `results/acmpc-progress-20261115-v2/marsim-{dense,high-speed}-fixed-v5/`。
+初版及中间失败尝试保留在 `results/acmpc-progress-20261115/` 和
+`results/acmpc-progress-20261115-v2/`，不覆盖历史记录。

@@ -135,7 +135,8 @@ class CTBRController:
             tangent = (delta / length)[:, None].expand(-1, self.config.cost_nodes, -1)
             arc = (sample['reference'][..., :3] - state[:, None, :3]).norm(dim=-1, keepdim=True)
             geometry = torch.cat((arc, tangent, torch.zeros_like(arc),
-                                  length[:, None].expand_as(arc), torch.zeros_like(arc)), -1)
+                                  length[:, None].expand_as(arc), torch.zeros_like(arc),
+                                  torch.full_like(arc, actor_cfg['progress_config'].get('max_speed', 4.0))), -1)
             sample = add_progress_observation(sample, geometry)
         sample = TensorDict(sample, batch_size=[1])
         actor_cfg.setdefault("model_config", asdict(self.config))
@@ -153,6 +154,7 @@ class CTBRController:
         self.actor.fixed_cost = policy == "fixed-ctbr"
         self.actor.eval()
         self.warm_start = None
+        self.last_valid_command = np.array([self.config.gravity, 0., 0., 0.])
         self.last_observation = None
         self.last_result = None
         # Compile before subscribing to lockstep ticks, outside mission timing.
@@ -183,7 +185,9 @@ class CTBRController:
         torch.cuda.synchronize(self.device)
         solve_ms = 1000 * (perf_counter() - solve_started)
         controls = result["controls"].detach()
-        self.warm_start = torch.cat((controls[:, 1:], controls[:, -1:]), 1).clone()
+        solved = bool(result["solved"][0])
+        if solved:
+            self.warm_start = torch.cat((controls[:, 1:], controls[:, -1:]), 1).clone()
         self.last_observation, self.last_result = observation, result
         trajectory = result["trajectory"]
         violation = 0.0
@@ -191,8 +195,12 @@ class CTBRController:
             residual = (context["planes"][..., :3] * trajectory[..., None, :3]).sum(-1) + context["planes"][..., 3]
             violation = float(residual.masked_fill(~context["plane_mask"], 0).clamp_min(0).amax())
         command = action[0].cpu().numpy()
+        if solved:
+            self.last_valid_command = command.copy()
+        else:
+            command = self.last_valid_command.copy()
         metrics = dict(
-            qp_ok=bool(result["solved"][0]), qp_failed=not bool(result["solved"][0]),
+            qp_ok=solved, qp_failed=not solved,
             sfc_valid=bool(result["sfc_valid"][0]), qp_iterations=int(result["iterations"]),
             sqp_iterations=int(result["sqp_iterations"][0]),
             qp_iterations_total=int(result["qp_iterations_total"][0]),
