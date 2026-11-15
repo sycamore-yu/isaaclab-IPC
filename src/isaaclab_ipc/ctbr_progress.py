@@ -110,4 +110,5 @@ def sample_progress_plan(plan, state, cost_nodes, dt, max_planes=128, *,
         masks[k, :len(faces)] = True
         if len(faces):
             violation = max(violation, float(np.max(faces[:, :3] @ points[k] + faces[:, 3])))
-    return SampledPlan(pva, yaw, planes, masks, corridor_ids, violation, violation, progress)
+    return SampledPlan(pva, yaw, planes, masks, corridor_ids, violation, violation, progress,
+                       float(arc[-1]))

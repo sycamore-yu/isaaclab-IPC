@@ -179,3 +179,174 @@ Dense 95.54 s、High-speed 70.99 s，用于算法进展参考；
 `results/acmpc-progress-20261115-v2/marsim-{dense,high-speed}-{fixed,learned}-paired-v5/`
 和 `results/acmpc-progress-20261115-v2/paired-v5-summary.json`。
 Rerun 录制位于 `recordings/acmpc-progress-{dense,high-speed}-{fixed,learned}-paired-v5.rrd`。
+
+## SUPER 同场景对照、虚拟速度与求解预算（2026-11-15）
+
+使用仓库已有的 ROS 2 SUPER 接口，重新编译原生
+ROG-Map / CIRI / MINCO / FSM。SUPER 和 AC-MPC 共享 MARSIM
+Flightmare 刚体、动力学参数、点云地图和两个官方航点。
+SUPER 通过位置/PVA 轨迹跟踪器执行，AC-MPC 直接执行 CTBR；
+两者的**规划与控制接口不同**，但动力学执行器相同。
+
+| 算法与控制 | Dense | High-speed |
+| --- | --- | --- |
+| SUPER 原生 ROS 2 | 4.15 s 物理碰撞，0/2 到达 | 21.13 s，2/2 |
+| AC-MPC 旧版固定进度，固定成本 | 95.54 s，2/2 | 70.99 s，2/2 |
+| AC-MPC 自由进度，学习成本，原 4 m/s 上限 | 81.96 s，2/2 | 55.57 s，2/2 |
+| AC-MPC 自由进度，学习成本，场景原限速 + 8/1024 预算 | **83.23 s，2/2** | **47.29 s，2/2** |
+
+原生 SUPER High-speed 飞行距离 205.03 m，实测最大速度
+25.57 m/s，最小障碍净空 0.421 m。新版 AC-MPC High-speed
+飞行距离 201.30 m，实测最高速度 6.55 m/s，最小障碍净空
+0.651 m。原生 SUPER High-speed 飞行时间约为新版 AC-MPC
+的 44.7%。目前真实速度差距远大于单纯的规划计算耗时差距。
+
+SUPER Dense 在相同 Flightmare 和 0.20 m 碰撞半径下复测两次，
+均在 4.15 s 发生碰撞。另一次把独立碰撞评测半径临时缩至
+0.195 m，仍在 4.15 s 碰撞。原半径下，首次碰撞时的 SUPER
+**参考位置**仍有 0.394 m 原始 PCD 净空，但实际机体与参考
+位置偏差 0.409 m，实际净空为 −0.0024 m。问题主要是
+轨迹跟踪误差，不是参考位置与障碍的几何重叠；不能将
+4.15 s 作为 SUPER 的成功到达时间。
+
+为了与 SUPER 的场景配置对应，MARSIM 自由进度虚拟速度上限
+由 4 m/s 调整为 **Dense 8 m/s / High-speed 25 m/s**。
+通过模型加载后替换进度配置完成，不修改学习网络权重，
+也不修改 Newton 训练配置。原生 SFC、Flightmare 的
+0.20 m 碰撞半径与高度边界保持不变。
+
+该上限仅约束虚拟进度 `nu`。实际 CTBR 预测模型仍限制
+速度各轴不超过 10 m/s、机体系角速度为 (3,3,1.5) rad/s；
+曲线参考仍使用侧向加速度 3.5 m/s²、制动加速度 4 m/s²。
+这些限制，以及 0.4 s 的 MPC 预测窗口，比 25 m/s
+虚拟速度上限更直接地影响 High-speed 的实际飞行速度。
+
+冻结同一份 Dense / High-speed SQP 输入测试表明：
+把 SQP/QP 迭代预算从 25/4096 缩到 8/1024，
+首个 CTBR 动作的最大分量变化分别不超过约 0.0005。
+三份输入均出现未严格收敛的状态码，但其原始不等式
+残差量级为 10⁻⁷ m。MARSIM 推理现在允许
+SQP 状态为迭代上限、原始残差不超过 0.001、
+预测 SFC 正违反不超过 0.01 m，且观测有效的解执行。
+原始状态码、严格收敛状态和提前接受次数均保留记录；
+物理碰撞与原始 PCD 检验不变。
+
+原地图边界下的重新运行：
+
+| 指标 | Dense 学习成本 | High-speed 学习成本 |
+| --- | ---: | ---: |
+| 航点 / 碰撞 | 2/2、0 | 2/2、0 |
+| SQP 严格收敛 / 提前接受 | 712 / 95 | 434 / 12 |
+| 被拒绝的 MPC 解 | 0 | 0 |
+| 实际 SFC 最大正违反 | 0 | 0 |
+| 完整规划 p95 | 468.90 ms | 308.48 ms |
+
+原始数据：
+`results/acmpc-super-speed-match-20261115/`，
+对应成功目录
+`dense-learned-fast8-1024-native-ceiling/`、
+`high-speed-learned-fast8-1024-native-ceiling/`、
+`super-dynamic-high_speed/` 以及 SUPER Dense 失败记录。
+时间使用仿真时钟，计算耗时使用墙钟；当前离线重放
+不把 100 ms 规划 p95 当作到达率的独立拒绝条件。
+实际硬件部署时，规划耗时仍会影响控制滞后。
+
+### High-speed 几何侧向加速度消融
+
+为判断 25 m/s 虚拟速度仍无法达到 SUPER 速度的原因，
+另使用相同的 Actor 权重，把**单一**非学习参数
+`progress_config.lateral_acceleration` 从 3.5 提至
+10 m/s²。其余成本、参考和动力学参数不变；新检查点位于
+`results/acmpc-super-speed-match-20261115/checkpoint-lateral10-ablation.pt`，
+对应源检查点、参数差分和 SHA256 记录在同目录 JSON。
+所有 Actor 张量权重均与原检查点完全相同。
+
+| High-speed | 侧向加速度 3.5 | 侧向加速度 10 |
+| --- | ---: | ---: |
+| 航点到达 | 2/2 | 2/2 |
+| 飞行时间 | 47.29 s | **42.76 s** |
+| 路径长度 | 201.30 m | 207.29 m |
+| 平均距离/时间 | 4.26 m/s | **4.85 m/s** |
+| 最大实际速度 | 6.55 m/s | 6.35 m/s |
+| 最小 PCD 净空 | 0.651 m | 0.672 m |
+| SQP 严格收敛 / 提前接受 | 434 / 12 | 392 / 9 |
+| 被拒绝的 MPC / 碰撞 / SFC 正违反 | 0 / 0 / 0 | 0 / 0 / 0 |
+| 规划 p95 | 308.48 ms | **234.81 ms** |
+
+改进来自更高的**持续平均速度**，而不是更高的最高瞬时速度。
+这说明局部 MINCO 曲率与基于曲率的速度限制是当前主要
+飞行时间瓶颈之一。10 m/s² 为成功的单场候选，
+不自动替换所有场景的训练配置。
+对应原始结果在
+`results/acmpc-super-speed-match-20261115/high-speed-learned-lateral10-final/`；
+Rerun 位于
+`recordings/acmpc-progress-high-speed-lateral10-20261115.rrd`。
+
+### 参考 Isaac-PathCover 的预见范围与速度消融
+
+`Isaac-PathCover` 沿用 SUPER 的按米数规划视野：
+Dense 7 m，High-speed 30 m，并保留旧轨迹前缀。
+本仓库的 DMP 每次搜索到官方航点，但 PathCover 仅取
+前 3 个安全走廊生成局部 MINCO 轨迹。局部轨迹长度
+不固定；MPC 另有 0.4 s 的短预测窗口，每 0.1 s 重规划。
+
+为直接统计真实局部预见距离，进度采样现在把已计算的
+局部弧长传给 `local_path_length_m` 指标，不再重复积分。
+本轮 High-speed 最佳配置的局部轨迹长度中位数为
+**11.73 m**（p95 16.34 m）；Dense 名义速度 8 m/s
+实验的中位数为 **4.21 m**（p95 6.32 m）。
+
+为改善速度，保持 Actor、原 SFC、CTBR 刚体预测及
+Flightmare 电机参数不变，分别修改一个几何规划参数：
+
+| High-speed 配置 | 结果 | 飞行时间 | 路径长度 | 规划 p95 |
+| --- | --- | ---: | ---: | ---: |
+| 侧向加速度 3.5；MINCO 名义速度 3；3 SFC | 2/2 | 47.29 s | 201.30 m | 308.48 ms |
+| 侧向加速度 10；名义速度 3；3 SFC | 2/2 | 42.76 s | 207.29 m | **234.81 ms** |
+| **侧向加速度 10；名义速度 10；3 SFC** | **2/2** | **41.90 s** | **199.43 m** | 275.28 ms |
+| 侧向加速度 20；名义速度 3；3 SFC | 2/2 | 46.18 s | 223.19 m | 442.75 ms |
+| 侧向加速度 10；名义速度 3；6 SFC | 1/2，前端中断 | 37.46 s | 176.50 m | 407.37 ms |
+
+完成的 4 场 High-speed 测试均为 0 碰撞、0 次被拒绝的
+MPC 解、0 次实际 SFC 正违反。扩大到 6 SFC 增加了
+计算开销，并在返航时触及原地图的有效高度限制，
+因而已撤销该代码改动。
+
+Dense 将 MINCO 名义速度从 3 提到 8 m/s 后，飞行
+时间由 **83.23 s** 变成 **83.90 s**，同时出现
+2 次被拒绝的 MPC 解。故只推荐 High-speed 使用
+名义参考速度 10 m/s；Dense 继续使用 3 m/s。
+
+最优 High-speed 直接用已有接口复现：
+
+```bash
+export IPC_MARSIM_RUNTIME="$PWD/build/marsim_ros2_relocated"
+export TURBOMPC_NATIVE_BUILD_DIR="$PWD/build/turbompc/native-v35/cu130"
+source scripts/marsim_ros2_env.sh
+.venv/bin/python scripts/run_marsim_ros2.py \
+  --mode dynamic --time-mode sim --benchmark high_speed \
+  --policy acmpc --frontend pathcover --sfc-constraint-mode progress \
+  --checkpoint "$PWD/results/acmpc-super-speed-match-20261115/checkpoint-lateral10-ablation.pt" \
+  --reference-speed 10 --domain 178 --render-prefix 'vglrun -d egl0' \
+  --output results/high-speed-reference10-repeat --timeout 120
+```
+
+**约束区分：** CTBR MPC 对预测速度施加每轴 ±10 m/s，
+对角速度施加 (3,3,1.5) rad/s，并限制总推力加速度
+0～29.43 m/s²；这些是预测优化的约束。
+Flightmare 无独立平移速度截断，实际角速度限制为
+10 rad/s，旋翼推力限制对应最大总推力加速度
+29.43 m/s²，电机滞后时间常数为 0.01 s。
+在此前 42.76 s 的成功飞行中，角速度 X/Y 触及
+99% MPC 限幅的比例只有 0.50% / 0.75%，
+最大推力加速度为 16.33 m/s²，真实速度峰值
+为 6.35 m/s。因此当前加速重点应为曲线形状、
+局部预见与进度成本，而非修改仿真动力学或
+继续提高基本未触发的控制上限。
+
+完整证据：
+`results/acmpc-super-speed-match-20261115/speed-optimization-summary.json`。
+最佳 High-speed Rerun：
+`recordings/acmpc-progress-high-speed-ref10-20261115.rrd`。
+该结果来自单次完整配对条件下的消融，不代表
+多随机种子下的全局最优。

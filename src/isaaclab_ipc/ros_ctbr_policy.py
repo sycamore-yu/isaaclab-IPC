@@ -7,7 +7,7 @@ MPC action; there is no jerk conversion or second execution-trajectory solve.
 import copy
 import hashlib
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from time import perf_counter
 
@@ -81,6 +81,19 @@ def benchmark_frontend_config(case, config, reference_speed=3.0, *, nominal_thru
     )
 
 
+def benchmark_progress_speed(case):
+    """Use the official SUPER scene's virtual-progress limit, in m/s."""
+    return float(case["planner"]["traj_opt"]["boundary"]["max_vel"])
+
+
+def usable_progress_iterate(solved, status, primal, sfc_violation, reference_valid):
+    """A bounded SQP iterate can be executed before strict convergence."""
+    return bool(solved or (
+        status == 1 and reference_valid and np.isfinite(primal)
+        and 0 <= primal <= 1e-3 and 0 <= sfc_violation <= .01
+    ))
+
+
 class CTBRController:
     """Shared actor and frontend contracts; no ROS objects or hidden PPO state."""
 
@@ -104,10 +117,19 @@ class CTBRController:
                 DEFAULT_CTBR_QP_LINEAR_SOLVER if qp_linear_solver is None else qp_linear_solver
             )
         progress = sfc_constraint_mode == 'progress'
+        runtime_progress = None
         if progress:
             from .turbompc.progress import ProgressConfig
 
             actor_cfg.setdefault('progress_config', asdict(ProgressConfig()))
+            runtime_progress = dict(actor_cfg['progress_config'])
+            runtime_progress['max_speed'] = benchmark_progress_speed(self.case)
+            # The frozen Dense/High-speed snapshots show effectively identical
+            # physical actions after 8 SQP/1024 QP iterations. Keep the raw
+            # numerical status, but do not spend 25/4096 to obtain a stricter
+            # certificate that does not improve the first CTBR command.
+            actor_cfg['sqp_iterations'] = 8
+            actor_cfg['qp_iterations'] = 1024
         if bool(actor_cfg.get('progress_config') is not None) != progress:
             raise ValueError('Checkpoint progress mode must match sfc_constraint_mode')
         self.navigation = None
@@ -117,7 +139,7 @@ class CTBRController:
                 device=self.device, max_planes=self.max_planes,
                 constraint_mode=sfc_constraint_mode,
                 section_half_length_m=sfc_section_half_length_m,
-                progress_config=actor_cfg.get('progress_config'))
+                progress_config=runtime_progress)
         elif frontend != "none":
             raise ValueError("frontend must be pathcover or none")
         elif sfc_constraint_mode != "polytope":
@@ -136,13 +158,22 @@ class CTBRController:
             arc = (sample['reference'][..., :3] - state[:, None, :3]).norm(dim=-1, keepdim=True)
             geometry = torch.cat((arc, tangent, torch.zeros_like(arc),
                                   length[:, None].expand_as(arc), torch.zeros_like(arc),
-                                  torch.full_like(arc, actor_cfg['progress_config'].get('max_speed', 4.0))), -1)
+                                  torch.full_like(arc, runtime_progress['max_speed'])), -1)
             sample = add_progress_observation(sample, geometry)
         sample = TensorDict(sample, batch_size=[1])
         actor_cfg.setdefault("model_config", asdict(self.config))
         self.actor = CTBRMPCActor(sample, {"actor": ["policy"]}, "actor", 4, **actor_cfg).to(self.device)
         if saved is not None:
             self.actor.load_state_dict(saved["actor_state_dict"], strict=True)
+        if progress:
+            # Load the trained weights with their original contract, then
+            # substitute the per-scene virtual-speed bound at inference.
+            # Neither the 10D CTBR physical velocity bounds nor motor model
+            # are changed by this scenario-level reference limit.
+            self.actor.ctbr_problem.progress_config = replace(
+                self.actor.ctbr_problem.progress_config,
+                max_speed=runtime_progress['max_speed'],
+            )
         selection_source = (
             "runtime_override" if qp_linear_solver is not None else
             "checkpoint" if checkpoint_actor_config is not None and "qp_linear_solver" in checkpoint_actor_config else
@@ -185,9 +216,6 @@ class CTBRController:
         torch.cuda.synchronize(self.device)
         solve_ms = 1000 * (perf_counter() - solve_started)
         controls = result["controls"].detach()
-        solved = bool(result["solved"][0])
-        if solved:
-            self.warm_start = torch.cat((controls[:, 1:], controls[:, -1:]), 1).clone()
         self.last_observation, self.last_result = observation, result
         trajectory = result["trajectory"]
         violation = 0.0
@@ -195,12 +223,24 @@ class CTBRController:
             residual = (context["planes"][..., :3] * trajectory[..., None, :3]).sum(-1) + context["planes"][..., 3]
             violation = float(residual.masked_fill(~context["plane_mask"], 0).clamp_min(0).amax())
         command = action[0].cpu().numpy()
+        converged = bool(result["solved"][0])
+        solved = converged or (
+            self.actor.progress_enabled
+            and np.isfinite(command).all()
+            and usable_progress_iterate(
+                converged, int(result["sqp_status"][0]), float(result["primal"][0]),
+                violation, bool(result["sfc_valid"][0]),
+            )
+        )
         if solved:
+            self.warm_start = torch.cat((controls[:, 1:], controls[:, -1:]), 1).clone()
             self.last_valid_command = command.copy()
         else:
             command = self.last_valid_command.copy()
         metrics = dict(
             qp_ok=solved, qp_failed=not solved,
+            optimizer_converged=converged,
+            early_iterate_used=solved and not converged,
             sfc_valid=bool(result["sfc_valid"][0]), qp_iterations=int(result["iterations"]),
             sqp_iterations=int(result["sqp_iterations"][0]),
             qp_iterations_total=int(result["qp_iterations_total"][0]),

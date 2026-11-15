@@ -61,6 +61,26 @@ def test_path_progress_uses_geometry_not_minco_clock():
     np.testing.assert_array_equal(fast.plane_mask.sum(-1), [6] * 5)
     np.testing.assert_allclose(fast.progress[:, 4:6], [[0., 10.]] * 5)
     assert np.all(fast.progress[:, 7] <= 4.)
+    assert fast.local_path_length_m == pytest.approx(10.)
+
+
+def test_marsim_progress_limit_matches_native_super_scene():
+    from isaaclab_ipc.benchmark_config import load_case
+    from isaaclab_ipc.ros_ctbr_policy import (
+        benchmark_frontend_config,
+        benchmark_progress_speed,
+        usable_progress_iterate,
+    )
+    from isaaclab_ipc.turbompc.ctbr import CTBRConfig
+
+    assert benchmark_progress_speed(load_case('dense')) == 8.0
+    assert benchmark_progress_speed(load_case('high_speed')) == 25.0
+    assert benchmark_frontend_config(load_case('dense'), CTBRConfig()).max_corridors == 3
+    assert benchmark_frontend_config(load_case('high_speed'), CTBRConfig()).max_corridors == 3
+    assert usable_progress_iterate(False, 1, 5e-6, .006, True)
+    assert not usable_progress_iterate(False, 1, 5e-6, .03, True)
+    assert not usable_progress_iterate(False, 1, .05, 0., True)
+    assert not usable_progress_iterate(False, 2, 1e-6, 0., True)
 
 
 def test_standstill_previews_curve_instead_of_repeating_initial_tangent():

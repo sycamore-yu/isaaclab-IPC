@@ -42,6 +42,7 @@ class SampledPlan:
     reference_violation: float
     source_reference_violation: float = 0.0
     progress: np.ndarray | None = None
+    local_path_length_m: float | None = None
 
 
 def position_sfc_violation(plan, position, now):
@@ -305,6 +306,8 @@ class PathCoverNavigation:
                 "corridor_count": len(plan.corridors),
                 "trajectory_duration_s": float(plan.valid_until - plan.start_time),
             }
+            if snapshot.local_path_length_m is not None:
+                metrics["local_path_length_m"] = snapshot.local_path_length_m
             return plan, snapshot, elapsed, metrics
 
         if self._workers is None:
