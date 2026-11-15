@@ -130,3 +130,52 @@ DISPLAY=:11 .venv/bin/python scripts/run_marsim_ros2.py \
 记录分别在 `results/acmpc-progress-20261115-v2/marsim-{dense,high-speed}-fixed-v5/`。
 初版及中间失败尝试保留在 `results/acmpc-progress-20261115/` 和
 `results/acmpc-progress-20261115-v2/`，不覆盖历史记录。
+
+## 配对训练和闭环结果（2026-11-15，最终 V5）
+
+训练前半段在第 19 次更新附近遇到前端失败：失败行仍使用 7D
+`progress_reference` 占位数据，而当前观测为 8D。修复该接口后，从
+`train-v5-8192/model_16.pt` 恢复第 17–31 次更新，累计完成 32 次
+PPO 更新、8192 次环境交互。最终检查点：
+
+`results/acmpc-progress-20261115-v2/train-v5-resume17-31/checkpoint.pt`
+
+SHA256：
+`ffdabf4236453f7b56c32a8beab205372dde74d323462a124cde7c3b1a9dd974`
+
+最终检查点动作重载通过。5 个 Newton Forest 配对种子均成功到达，
+无碰撞、QP 未收敛或前端失败。固定成本平均飞行时间 **2.68 s**，
+学习成本 **2.72 s**，学习未提高短程任务速度。
+
+4 场正式 MARSIM 使用上述**同一个检查点**，物理动力学、PathCover
+几何、自由进度和求解器设置一致。仅切换固定成本/学习成本：
+
+| 指标 | Dense 固定 | Dense 学习 | High-speed 固定 | High-speed 学习 |
+| --- | ---: | ---: | ---: | ---: |
+| 完成航点 | 2/2 | 2/2 | 2/2 | 2/2 |
+| 飞行时间（s） | 87.55 | **81.96** | 55.59 | 55.57 |
+| 飞行距离（m） | 229.23 | 228.06 | 199.48 | 199.50 |
+| 最小障碍净空（m） | 0.166 | 0.228 | 0.616 | 0.643 |
+| MPC 未收敛（次） | 2 | 2 | 0 | 0 |
+| 实际 SFC 最大正违反（mm） | 9.27 | 6.53 | 0 | 0 |
+| 规划耗时 p95（ms） | 756.73 | 829.63 | 401.13 | 391.51 |
+
+四场均无物理碰撞、无超时，且实际达到全部官方航点。
+Dense 两组各有 **1 个控制时刻**出现 SFC 正违反：
+固定成本为 9.70 s，学习成本为 37.20 s。该项与物理障碍碰撞
+分开记录，不能写作零 SFC 违反。
+
+相同自由进度控制器下，学习成本令 Dense 到达时间缩短 5.59 s
+（约 6.4%）。High-speed 的 0.02 s 差异不构成明显效率优势。
+两场学习策略均略微提高最小障碍净空。历史固定时间基线
+Dense 95.54 s、High-speed 70.99 s，用于算法进展参考；
+它们不是本次重新运行的第五、第六个配对实验。
+
+本轮使用非编译推理（`compile_kernels=False`）。规划 p95 仍超过
+100 ms，实时性和 Dense 的少量数值约束违反是后续性能改进目标，
+**不影响上述已观测的到达时间结果**。
+
+原始数据与完整机器可读汇总：
+`results/acmpc-progress-20261115-v2/marsim-{dense,high-speed}-{fixed,learned}-paired-v5/`
+和 `results/acmpc-progress-20261115-v2/paired-v5-summary.json`。
+Rerun 录制位于 `recordings/acmpc-progress-{dense,high-speed}-{fixed,learned}-paired-v5.rrd`。

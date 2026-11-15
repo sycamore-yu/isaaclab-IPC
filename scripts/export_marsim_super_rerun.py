@@ -75,8 +75,10 @@ def export(source: Path, destination: Path, *, pcd_override: Path | None = None)
     clearance = states["clearance_m"]
     reference = states["position_commands"]
     controls = states.get("ctbr", np.empty((0, 6)))
-    if not len(stamps) or not np.all(np.diff(stamps) > 0):
-        raise ValueError("Odometry timestamps must be non-empty and strictly increasing")
+    # ROS can repeat a clock tick with identical odometry. Preserve both
+    # recorded samples; Rerun accepts multiple updates at the same time.
+    if not len(stamps) or np.any(np.diff(stamps) < 0):
+        raise ValueError("Odometry timestamps must be non-empty and nondecreasing")
     if positions.shape != (len(stamps), 3) or quaternions.shape != (len(stamps), 4):
         raise ValueError("Missing actual 3D odometry / attitude")
     if reference.shape[1] != 16 or (len(reference) and np.any(np.diff(reference[:, 0]) < 0)):

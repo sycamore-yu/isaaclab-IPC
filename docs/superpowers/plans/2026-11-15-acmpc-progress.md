@@ -13,8 +13,8 @@
 - [x] `ctbr_progress.py`：从 MINCO 构建弧长参考，按实际运动的进度初值选择有序 SFC。测试时间重参数化不改变几何与走廊映射。
 - [x] `turbompc/progress.py`：11D 状态、5D 优化输入；物理执行仍为 4D。保留 140D CTBR 成本头，在局部切线模型上增加滞后误差、速度一致性及固定进度奖励。测试新增进度导数、PSD 成本和一次 KKT 反向。
 - [x] 将 `progress` 模式接入现有观测、Actor、Newton、ROS 参数。固定时间模式保持现有行为。终止、奖励与碰撞判定保持原契约。
-- [ ] 先跑固定成本 Newton，随后训练 Actor；固定和学习策略采用相同约束与执行设置。完成 Dense / High-speed 配对任务及 Rerun。
-- [ ] 根据实测填写报告，选择性提交源码、测试、文档；保留用户原有未提交修改与全部实验结果。
+- [x] 固定成本 Newton、Actor 训练、固定与学习成本的 5 种子 Newton 配对和 Dense / High-speed 4 场完整 MARSIM 闭环均完成。Rerun 已保存。
+- [x] 实测记录、失败样本和完整配对结果见 `docs/acmpc-progress.md` 与 `results/acmpc-progress-20261115-v2/paired-v5-summary.json`；源码和必要测试单独提交，不包含用户原有未提交修改。
 
 ## 数值决策
 

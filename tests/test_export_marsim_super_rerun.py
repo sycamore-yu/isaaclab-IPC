@@ -82,11 +82,11 @@ def test_exports_native_ctbr_flight_without_inventing_position_commands(tmp_path
     }))
     np.savez_compressed(
         run / "trajectory.npz",
-        stamp_s=np.array([1., 1.01, 1.02]),
-        position_m=np.array([[0, 0, 1], [0, 1, 1], [0, 0, 1]]),
-        quaternion_xyzw=np.array([[0, 0, 0, 1]] * 3),
-        speed_mps=np.array([0, 1, 0]),
-        clearance_m=np.array([.3, .25, .2]),
+        stamp_s=np.array([1., 1.01, 1.01, 1.02]),
+        position_m=np.array([[0, 0, 1], [0, 1, 1], [0, 1, 1], [0, 0, 1]]),
+        quaternion_xyzw=np.array([[0, 0, 0, 1]] * 4),
+        speed_mps=np.array([0, 1, 1, 0]),
+        clearance_m=np.array([.3, .25, .25, .2]),
         position_commands=np.empty((0, 16)),
         ctbr=np.array([[1., 0., 9.81, 0., .1, 0.], [1.01, .01, 10., 0., -.1, 0.]]),
         lidar=np.empty((0, 4)),
@@ -94,5 +94,5 @@ def test_exports_native_ctbr_flight_without_inventing_position_commands(tmp_path
     result = export(run, tmp_path / "dense.rrd")
     assert result["policy"] == "fixed-ctbr"
     assert result["control_samples"] == 2
-    assert result["flight_samples"] == 3
+    assert result["flight_samples"] == 4
     assert result["waypoints_reached"] == 2
