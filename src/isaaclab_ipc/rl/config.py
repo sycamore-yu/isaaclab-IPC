@@ -60,6 +60,7 @@ class CTBRActorCfg(RslRlMLPModelCfg):
     cost_nodes = 5
     prediction_dt = 0.1
     model_config = None
+    progress_config = None
     compile_kernels = True
     qp_iterations = 4096
     sqp_iterations = 25

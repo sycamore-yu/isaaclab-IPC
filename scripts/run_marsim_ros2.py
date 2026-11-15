@@ -45,8 +45,8 @@ def main():
     parser.add_argument("--frontend", choices=("pathcover", "none"), default="pathcover")
     parser.add_argument("--reference-speed", type=float, default=3.0,
                         help="Native PathCover nominal speed in m/s; physical scene/CTBR speed limits remain separate")
-    parser.add_argument("--sfc-constraint-mode", choices=("polytope", "section"), default="polytope",
-                        help="Full PathCover SFC or fixed-progress bounded CMPCC-style section tube")
+    parser.add_argument("--sfc-constraint-mode", choices=("polytope", "section", "progress"), default="polytope",
+                        help="Full SFC, fixed-clock slabs, or optimized arc-length progress")
     parser.add_argument("--sfc-section-half-length", type=float, default=0.5,
                         help="Requested longitudinal half-length in metres; clipped to the original SFC")
     parser.add_argument("--capture-reference-plans", action="store_true",
@@ -73,7 +73,7 @@ def main():
         parser.error("--reference-speed must be finite and positive")
     if not 0 < args.sfc_section_half_length < float("inf"):
         parser.error("--sfc-section-half-length must be finite and positive")
-    if args.sfc_constraint_mode == "section" and (args.frontend != "pathcover"
+    if args.sfc_constraint_mode in ("section", "progress") and (args.frontend != "pathcover"
                                                  or args.policy not in ("fixed-ctbr", "acmpc")):
         parser.error("Section constraints require native CTBR with the PathCover frontend")
     if args.executor_parameters and args.mode != "dynamic":

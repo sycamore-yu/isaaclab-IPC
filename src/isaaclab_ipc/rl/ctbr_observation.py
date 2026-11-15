@@ -8,8 +8,17 @@ import torch
 from isaaclab_ipc.turbompc.quadrotor import reference_from_pva
 
 
-def ctbr_feature_size(cost_nodes):
-    return 14 + 11 * cost_nodes
+def ctbr_feature_size(cost_nodes, *, progress=False):
+    return 14 + (18 if progress else 11) * cost_nodes
+
+
+def add_progress_observation(values, progress):
+    """Append a frozen [s,tangent_xyz,s_lo,s_hi,nu] geometry snapshot."""
+    result = dict(values)
+    result['progress_reference'] = progress.clone(memory_format=torch.contiguous_format)
+    scale = progress.new_tensor([10., 1., 1., 1., 10., 10., 10.])
+    result['policy'] = torch.cat((values['policy'], (progress / scale).flatten(1).float()), -1)
+    return result
 
 
 def _reference_controls(reference, pva, mass, gravity, dt):
@@ -159,6 +168,8 @@ def terminal_ctbr_observation(previous, ctbr_state, body_rates, *, ctbr_config):
         state, rates, previous["goal"], previous["ctbr_reference"], previous["planes"],
         previous["plane_mask"], previous["sfc_valid"], ctbr_config,
     )
+    if 'progress_reference' in previous:
+        values = add_progress_observation(values, previous['progress_reference'])
     return {name: value.clone(memory_format=torch.contiguous_format) for name, value in values.items()}
 
 

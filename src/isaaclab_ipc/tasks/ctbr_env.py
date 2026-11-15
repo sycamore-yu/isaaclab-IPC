@@ -38,6 +38,8 @@ def checked_articulation_mass(robot, expected_mass: float) -> torch.Tensor:
 
 
 def _configure_ctbr(cfg, frontend):
+    from isaaclab_ipc.turbompc.progress import ProgressConfig
+
     model = CTBRConfig(mass=MASS)
     cfg.ctbr_model = asdict(model)
     cfg.frontend = frontend
@@ -46,6 +48,7 @@ def _configure_ctbr(cfg, frontend):
     cfg.max_planes = 0 if frontend == "none" else 128
     cfg.sfc_constraint_mode = "polytope"
     cfg.sfc_section_half_length_m = 0.5
+    cfg.progress_config = asdict(ProgressConfig())
     cfg.reward = NavigationRewardCfg()
     cfg.observation_space = ctbr_feature_size(model.cost_nodes)
     cfg.thrust_limits = model.specific_thrust_limits
@@ -132,6 +135,8 @@ class CTBRMPCEnv(IPCEnv):
             "planes": (nodes, faces, 4), "plane_mask": (nodes, faces),
             "sfc_valid": (1,), "yaw_target": (1,),
         }
+        if self.cfg.sfc_constraint_mode == 'progress':
+            shapes['progress_reference'] = (nodes, 7)
         for name, shape in shapes.items():
             boolean = name in ("plane_mask", "sfc_valid")
             self.single_observation_space[name] = gym.spaces.Box(
@@ -147,7 +152,8 @@ class CTBRMPCEnv(IPCEnv):
         self.ctbr_config = CTBRConfig(**cfg.ctbr_model)
         if tuple(cfg.sim.gravity) != (0.0, 0.0, -self.ctbr_config.gravity):
             raise ValueError("CTBR gravity must match Newton gravity")
-        cfg.observation_space = ctbr_feature_size(self.ctbr_config.cost_nodes)
+        cfg.observation_space = ctbr_feature_size(self.ctbr_config.cost_nodes,
+                                                 progress=cfg.sfc_constraint_mode == 'progress')
         super().__init__(cfg, render_mode, **kwargs)
         masses = checked_articulation_mass(self.robot, self.ctbr_config.mass)
         self.navigation = None
@@ -161,6 +167,7 @@ class CTBRMPCEnv(IPCEnv):
                 device=self.device, max_planes=cfg.max_planes,
                 constraint_mode=cfg.sfc_constraint_mode,
                 section_half_length_m=cfg.sfc_section_half_length_m,
+                progress_config=cfg.progress_config,
             )
         elif cfg.frontend != "none":
             raise ValueError("CTBR frontend must be none or pathcover")

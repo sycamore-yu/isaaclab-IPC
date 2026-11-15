@@ -462,7 +462,9 @@ def main():
         runner_config.actor.model_config = dict(env_cfg.ctbr_model)
         runner_config.actor.cost_nodes = env_cfg.ctbr_model["cost_nodes"]
         runner_config.actor.prediction_dt = env_cfg.ctbr_model["dt"]
-        env_cfg.observation_space = ctbr_feature_size(env_cfg.ctbr_model["cost_nodes"])
+        progress = env_cfg.sfc_constraint_mode == 'progress'
+        runner_config.actor.progress_config = dict(env_cfg.progress_config) if progress else None
+        env_cfg.observation_space = ctbr_feature_size(env_cfg.ctbr_model["cost_nodes"], progress=progress)
     agent_cfg = runner_config.to_dict()
     env_cfg.seed = agent_cfg["seed"]
     device = env_cfg.sim.device

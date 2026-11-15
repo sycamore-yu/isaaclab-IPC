@@ -20,7 +20,7 @@ from .assets.quadrotor import MASS
 from .benchmark_config import load_case
 from .ctbr_navigation import PathCoverNavigation, position_sfc_violation
 from .rl.ctbr_actor import DEFAULT_CTBR_QP_LINEAR_SOLVER, CTBRMPCActor
-from .rl.ctbr_observation import goal_ctbr_observation
+from .rl.ctbr_observation import add_progress_observation, goal_ctbr_observation
 from .turbompc.ctbr import CTBRConfig
 
 
@@ -103,13 +103,21 @@ class CTBRController:
             actor_cfg["qp_linear_solver"] = (
                 DEFAULT_CTBR_QP_LINEAR_SOLVER if qp_linear_solver is None else qp_linear_solver
             )
+        progress = sfc_constraint_mode == 'progress'
+        if progress:
+            from .turbompc.progress import ProgressConfig
+
+            actor_cfg.setdefault('progress_config', asdict(ProgressConfig()))
+        if bool(actor_cfg.get('progress_config') is not None) != progress:
+            raise ValueError('Checkpoint progress mode must match sfc_constraint_mode')
         self.navigation = None
         if frontend == "pathcover":
             self.navigation = PathCoverNavigation(1, self.config,
                 benchmark_frontend_config(self.case, self.config, reference_speed),
                 device=self.device, max_planes=self.max_planes,
                 constraint_mode=sfc_constraint_mode,
-                section_half_length_m=sfc_section_half_length_m)
+                section_half_length_m=sfc_section_half_length_m,
+                progress_config=actor_cfg.get('progress_config'))
         elif frontend != "none":
             raise ValueError("frontend must be pathcover or none")
         elif sfc_constraint_mode != "polytope":
@@ -119,9 +127,17 @@ class CTBRController:
         state[:, 3] = 1.
         rates = state.new_zeros((1, 3))
         warm_goal = state[:, :3] + state.new_tensor([.25, .1, .1])
-        sample = TensorDict(goal_observation(state, rates, warm_goal, self.config,
-                                            reference_speed=self.reference_speed,
-                                            max_planes=self.max_planes), batch_size=[1])
+        sample = goal_observation(state, rates, warm_goal, self.config,
+                                  reference_speed=self.reference_speed, max_planes=self.max_planes)
+        if progress:
+            delta = warm_goal - state[:, :3]
+            length = delta.norm(dim=-1, keepdim=True)
+            tangent = (delta / length)[:, None].expand(-1, self.config.cost_nodes, -1)
+            arc = (sample['reference'][..., :3] - state[:, None, :3]).norm(dim=-1, keepdim=True)
+            geometry = torch.cat((arc, tangent, torch.zeros_like(arc),
+                                  length[:, None].expand_as(arc), torch.zeros_like(arc)), -1)
+            sample = add_progress_observation(sample, geometry)
+        sample = TensorDict(sample, batch_size=[1])
         actor_cfg.setdefault("model_config", asdict(self.config))
         self.actor = CTBRMPCActor(sample, {"actor": ["policy"]}, "actor", 4, **actor_cfg).to(self.device)
         if saved is not None:
@@ -187,6 +203,14 @@ class CTBRController:
             solve_ms=solve_ms,
             planning_ms=1000 * (perf_counter() - started),
         )
+        if 'optimized_progress' in result:
+            arc, speed = result['optimized_progress'][0], result['progress_speed'][0]
+            reference = context['ctbr_reference'][0, :, :3]
+            geometry = context['progress_reference'][0]
+            lag = ((trajectory[0, :, :3] - reference) * geometry[:, 1:4]).sum(-1) - (arc - geometry[:, 0])
+            metrics.update(virtual_progress_m=float(arc[-1] - arc[0]),
+                           progress_speed_m_s=float(speed[0]),
+                           maximum_lag_error_m=float(lag.abs().max()))
         if self.navigation is not None:
             metrics.update(self.navigation.last_reference_metrics[0])
         else:
@@ -327,8 +351,18 @@ def main(args=None):
                 previous_plan = self.controller.navigation.last_plans[0]
                 if previous_plan is not None:
                     # Compare execution with the plan that produced it, before replanning.
-                    actual_violation = position_sfc_violation(previous_plan,
-                        self.state[:3], state_time)
+                    if self.options['sfc_constraint_mode'] == 'progress':
+                        # Progress is not MINCO clock time. Compare with the
+                        # executed MPC interval's selected original polytope.
+                        context = self.controller.last_observation
+                        k = min(max(int(np.ceil((state_time - previous_plan.start_time)
+                                                 / self.controller.config.dt)), 1),
+                                self.controller.config.cost_nodes - 1)
+                        faces = context['planes'][0, k, context['plane_mask'][0, k]].cpu().numpy()
+                        actual_violation = max(0., float(np.max(faces[:, :3] @ self.state[:3] + faces[:, 3])))
+                    else:
+                        actual_violation = position_sfc_violation(previous_plan,
+                            self.state[:3], state_time)
             if self.force_solve or self.solve_stamp_ns is None or stamp.nanoseconds - self.solve_stamp_ns >= 100_000_000:
                 if self.sequence == 0:
                     np.savez_compressed(self.directory / "frontend-input.npz", cloud=self.cloud,

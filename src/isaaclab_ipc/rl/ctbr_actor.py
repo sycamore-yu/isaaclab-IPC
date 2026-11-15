@@ -13,7 +13,6 @@ from isaaclab_ipc.turbompc.ctbr import CTBRConfig, CTBRQPBuilder
 from isaaclab_ipc.turbompc.native import _extension
 from isaaclab_ipc.turbompc.quadrotor import controls_to_actions
 
-
 DEFAULT_CTBR_QP_LINEAR_SOLVER = "cudss_inverse_chunk"
 
 
@@ -31,6 +30,7 @@ class CTBRMPCActor(MLPModel):
         model_config=None, compile_kernels=True, qp_iterations=4096, sqp_iterations=25,
         sqp_tolerance=1e-4, admm_tolerance=1e-5, sqp_linesearch="none",
         qp_linear_solver=DEFAULT_CTBR_QP_LINEAR_SOLVER,
+        progress_config=None,
     ):
         if output_dim != 4 or obs_normalization:
             raise ValueError("CTBRMPCActor requires four physical actions and fixed feature scaling")
@@ -44,7 +44,14 @@ class CTBRMPCActor(MLPModel):
             CTBRConfig(cost_nodes=cost_nodes, dt=prediction_dt, mass=MASS)
             if model_config is None else CTBRConfig(**model_config)
         )
-        self.ctbr_problem = CTBRQPBuilder(config, compile_kernels=compile_kernels)
+        self.progress_enabled = progress_config is not None
+        if self.progress_enabled:
+            from isaaclab_ipc.turbompc.progress import ProgressQPBuilder
+
+            self.ctbr_problem = ProgressQPBuilder(config, progress_config=progress_config,
+                                                   compile_kernels=compile_kernels)
+        else:
+            self.ctbr_problem = CTBRQPBuilder(config, compile_kernels=compile_kernels)
         self.mlp = MLP(self.obs_dim, config.cost_dim, hidden_dims, activation)
         torch.nn.init.zeros_(self.mlp[-1].weight)
         torch.nn.init.zeros_(self.mlp[-1].bias)
@@ -64,6 +71,7 @@ class CTBRMPCActor(MLPModel):
         )
         self.record_checkpoint_linear_solver(None, resolution="actor_configuration")
         self._model = self.ctbr_problem.dynamics()
+        self._physical_model = self._model.physical if self.progress_enabled else self._model
         if compile_kernels:
             self._action_postprocess = torch.compile(
                 self._action_postprocess, fullgraph=True, dynamic=False,
@@ -84,7 +92,7 @@ class CTBRMPCActor(MLPModel):
         return self._native_solver
 
     def get_extra_state(self):
-        return {
+        state = {
             "contract": "ctbr-node-costs-v2",
             "cost_outputs": self.ctbr_problem.config.cost_dim,
             "cost_layout": "all_node_diagonal14_then_all_node_linear14",
@@ -92,6 +100,10 @@ class CTBRMPCActor(MLPModel):
             "model": asdict(self.ctbr_problem.config),
             "sqp_linesearch": self.sqp_config.linesearch,
         }
+        if self.progress_enabled:
+            state.update(contract='ctbr-progress-costs-v1',
+                         progress=asdict(self.ctbr_problem.progress_config))
+        return state
 
     def set_extra_state(self, state):
         # Earlier node-cost checkpoints used merit and did not record this field.
@@ -115,8 +127,8 @@ class CTBRMPCActor(MLPModel):
             applied = mean.double().clone()
             applied[:, 0] *= mass
             current = torch.cat((initial_state, applied), -1)
-            predicted = self._model(current)
-            acceleration = self._model.acceleration(current)
+            predicted = self._physical_model(current)
+            acceleration = self._physical_model.acceleration(current)
         return mean, applied, predicted, acceleration
 
     def forward(self, obs, masks=None, hidden_state=None, stochastic_output=False):
@@ -125,19 +137,19 @@ class CTBRMPCActor(MLPModel):
         result = self.native_solver.solve(data, guess)
         self.last_native_result = result
         self.native_solve_calls += 1
-        controls = result.controls
+        controls = result.controls[..., :4]
         mean, applied, predicted, acceleration = self._action_postprocess(
-            controls, data.initial_state,
+            controls, data.initial_state[:, :10],
         )
         self.distribution.update(mean)
         valid = obs["sfc_valid"].flatten().bool()
         solved = (result.status == 0) & valid
         self.last_result = dict(
             model="ctbr",
-            state=data.initial_state.detach(),
+            state=data.initial_state[:, :10].detach(),
             solution=controls[:, :-1].flatten(1).detach(),
             controls=controls[:, :-1].detach(),
-            trajectory=result.trajectory.detach(),
+            trajectory=torch.cat((result.states[..., :10], controls), -1).detach(),
             prediction_positions=result.states[:, 1:, :3].detach(),
             predicted=predicted,
             applied_control=applied,
@@ -155,6 +167,12 @@ class CTBRMPCActor(MLPModel):
             mean=mean.detach(),
             sfc_valid=valid,
         )
+        if self.progress_enabled:
+            self.last_result.update(
+                optimized_progress=result.states[..., 10].detach(),
+                progress_speed=result.controls[..., 4].detach(),
+                optimization_trajectory=result.trajectory.detach(),
+            )
         return self.distribution.sample() if stochastic_output else mean
 
     def problem_snapshot(self, obs, costs):
@@ -189,7 +207,7 @@ class CTBRMPCActor(MLPModel):
 
     def solver_metadata(self):
         cfg = self.ctbr_problem.config
-        return {
+        metadata = {
             "backend": "turbompc-cuda",
             "implementation_file": __file__,
             "dynamics": "ac-mpc-ctbr",
@@ -212,6 +230,12 @@ class CTBRMPCActor(MLPModel):
             "linear_solver_selection": dict(self._linear_solver_selection),
             "polish": None,
         }
+        if self.progress_enabled:
+            metadata.update(progress=asdict(self.ctbr_problem.progress_config),
+                            optimization_state_dim=11, optimization_control_dim=5,
+                            progress_units='arc_length_m,virtual_speed_m_s')
+            metadata['hard_constraints'] += ['progress_interval', 'progress_speed_bounds']
+        return metadata
 
     def as_jit(self):
         raise NotImplementedError("The saved CTBR actor needs its native CUDA solver")

@@ -41,6 +41,7 @@ class SampledPlan:
     corridor_index: np.ndarray
     reference_violation: float
     source_reference_violation: float = 0.0
+    progress: np.ndarray | None = None
 
 
 def position_sfc_violation(plan, position, now):
@@ -109,7 +110,7 @@ class PathCoverNavigation:
     """One observed map per environment, one packed transfer per policy batch."""
 
     def __init__(self, num_envs, ctbr_config, frontend_config, *, device, max_planes=128,
-                 constraint_mode="polytope", section_half_length_m=0.5):
+                 constraint_mode="polytope", section_half_length_m=0.5, progress_config=None):
         from .pathcover_native import NativePathCoverFrontend
         from .rl.ctbr_observation import PackedCTBRObservation
         from .turbompc.quadrotor import CTBRDynamics
@@ -117,12 +118,13 @@ class PathCoverNavigation:
         self.config = ctbr_config
         self.device = torch.device(device)
         self.max_planes = int(max_planes)
-        if constraint_mode not in ("polytope", "section"):
-            raise ValueError("SFC constraint mode must be polytope or section")
+        if constraint_mode not in ("polytope", "section", "progress"):
+            raise ValueError("SFC constraint mode must be polytope, section or progress")
         if not np.isfinite(section_half_length_m) or section_half_length_m <= 0:
             raise ValueError("Section half-length must be positive and finite")
         self.constraint_mode = constraint_mode
         self.section_half_length_m = float(section_half_length_m)
+        self.progress_config = progress_config or {}
         self._dynamics = CTBRDynamics(dt=ctbr_config.dt, mass=ctbr_config.mass, gravity=ctbr_config.gravity)
         self._motion_seed = (torch.compile(self._initial_motion_seed, fullgraph=True, dynamic=False)
                              if self.device.type == "cuda" else self._initial_motion_seed)
@@ -281,10 +283,18 @@ class PathCoverNavigation:
             except PathCoverPlanningError as error:
                 return None, error, 1000 * (perf_counter() - started), None
             elapsed = 1000 * (perf_counter() - started)
-            snapshot = sample_plan(
-                plan, now, self.config.cost_nodes, self.config.dt, self.max_planes,
-                constraint_mode=self.constraint_mode, section_half_length_m=self.section_half_length_m,
-            )
+            if self.constraint_mode == 'progress':
+                from .ctbr_progress import sample_progress_plan
+
+                snapshot = sample_progress_plan(
+                    plan, values[:10], self.config.cost_nodes, self.config.dt, self.max_planes,
+                    max_speed=self.progress_config.get('max_speed', 6.0),
+                )
+            else:
+                snapshot = sample_plan(
+                    plan, now, self.config.cost_nodes, self.config.dt, self.max_planes,
+                    constraint_mode=self.constraint_mode, section_half_length_m=self.section_half_length_m,
+                )
             metrics = {
                 **plan.metrics,
                 "reference_sfc_violation_m": snapshot.reference_violation,
@@ -320,7 +330,8 @@ class PathCoverNavigation:
                 snapshot = SampledPlan(np.zeros((nodes, 9)), np.zeros(nodes),
                                        np.zeros((nodes, self.max_planes, 4)),
                                        np.zeros((nodes, self.max_planes), dtype=bool),
-                                       np.full(nodes, -1), 0.0)
+                                       np.full(nodes, -1), 0.0,
+                                       progress=np.zeros((nodes, 7)) if self.constraint_mode == 'progress' else None)
                 self.last_reference_metrics[index] = {"planning_failure": str(errors[index])}
             sampled.append(snapshot)
 
@@ -329,6 +340,12 @@ class PathCoverNavigation:
             valid=[index not in errors for index in ids],
             warm=warm_start_controls, device_ids=device_ids,
         )
+        if self.constraint_mode == 'progress':
+            from .rl.ctbr_observation import add_progress_observation
+
+            progress = torch.as_tensor(np.stack([item.progress for item in sampled]),
+                                       dtype=torch.float64, device=self.device)
+            observations = add_progress_observation(observations, progress)
         return (observations, errors) if allow_failures else observations
 
     def close(self):

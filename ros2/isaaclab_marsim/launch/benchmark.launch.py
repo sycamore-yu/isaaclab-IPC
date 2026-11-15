@@ -112,7 +112,7 @@ def generate_launch_description():
         DeclareLaunchArgument("reference_speed", default_value="3.0",
                               description="Native PathCover nominal reference speed in m/s"),
         DeclareLaunchArgument("sfc_constraint_mode", default_value="polytope",
-                              choices=["polytope", "section"]),
+                              choices=["polytope", "section", "progress"]),
         DeclareLaunchArgument("sfc_section_half_length_m", default_value="0.5",
                               description="Requested bounded section half-length in metres"),
         DeclareLaunchArgument("capture_reference_plans", default_value="false", choices=["true", "false"],
