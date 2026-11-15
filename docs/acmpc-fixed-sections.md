@@ -205,7 +205,7 @@ under their separate experiment directories.
 Runtime selection after building a relocated overlay:
 
 ```bash
-export IPC_MARSIM_RUNTIME="$PWD/build/marsim-relocated-20261115"
+export IPC_MARSIM_RUNTIME="$PWD/build/marsim_ros2_relocated"
 export TURBOMPC_NATIVE_BUILD_DIR="$PWD/build/turbompc/native-v35/cu130"
 source scripts/marsim_ros2_env.sh
 DISPLAY=:11 .venv/bin/python scripts/run_marsim_ros2.py \
@@ -215,6 +215,12 @@ DISPLAY=:11 .venv/bin/python scripts/run_marsim_ros2.py \
   --domain 156 --render-prefix 'vglrun -d egl0' \
   --output results/section-dense-repeat --timeout 180
 ```
+
+The `build/marsim_ros2_relocated` path is the independent ROS build in
+the canonical `isaaclab-IPC` main checkout. The feature worktree uses
+`build/marsim-relocated-20261115` for its separately validated build.
+Both contain the same source-derived mission, LiDAR and Flightmare nodes;
+their generated absolute paths differ with the build root.
 
 The same call with `--benchmark high_speed`, a distinct output directory
 and ROS domain reproduces the other evaluation. The compiled overlay,
