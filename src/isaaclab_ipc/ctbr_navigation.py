@@ -137,6 +137,7 @@ class PathCoverNavigation:
         self._workers = (ThreadPoolExecutor(max_workers=min(4, num_envs), thread_name_prefix="pathcover")
                          if num_envs > 1 else None)
         self.last_plans = [None] * num_envs
+        self.last_plan_goals = [None] * num_envs
         self.frontend_times_ms = []
         self.frontend_batch_times_ms = []
         self.last_reference_metrics = [None] * num_envs
@@ -227,11 +228,13 @@ class PathCoverNavigation:
         for index in ids:
             self.frontends[int(index)].reset()
             self.last_plans[int(index)] = None
+            self.last_plan_goals[int(index)] = None
             self.last_reference_metrics[int(index)] = None
 
     @torch.no_grad()
     def observe(self, ctbr_state, body_rates, acceleration, goals, clouds, time, *,
-                warm_start_controls=None, env_ids=None, allow_failures=False):
+                warm_start_controls=None, env_ids=None, allow_failures=False,
+                reuse_last_plan=False):
         """Plan selected environments and return snapshots in selection order.
 
         Inputs retain global environment indexing. With ``allow_failures``, return
@@ -276,6 +279,38 @@ class PathCoverNavigation:
                                    acceleration=values[10:13], yaw=float(yaw), time=float(now))
             points = clouds.get(index) if isinstance(clouds, dict) else clouds[index]
             started = perf_counter()
+            if (reuse_last_plan and self.constraint_mode == "progress"
+                    and self.last_plans[index] is not None
+                    and self.last_plan_goals[index] is not None
+                    and np.array_equal(values[13:16], self.last_plan_goals[index])):
+                from .ctbr_progress import sample_progress_plan
+
+                previous = self.last_plans[index]
+                snapshot = sample_progress_plan(
+                    previous, values[:10], self.config.cost_nodes, self.config.dt, self.max_planes,
+                    max_speed=self.progress_config.get("max_speed", 4.0),
+                    lateral_acceleration=self.progress_config.get("lateral_acceleration", 3.5),
+                    braking_acceleration=self.progress_config.get("braking_acceleration", 4.0),
+                    mission_goal=values[13:16], reanchor=True,
+                )
+                faces = snapshot.planes[0, snapshot.plane_mask[0]]
+                offset = float(np.linalg.norm(snapshot.pva[0, :3] - values[:3]))
+                physical_clearance = float(np.max(faces[:, :3] @ values[:3] + faces[:, 3]))
+                if (offset <= 0.5 and physical_clearance <= 0.0
+                        and snapshot.local_path_length_m > max(1.0, 0.3 * np.linalg.norm(values[7:10]))
+                        and np.all(snapshot.corridor_index == snapshot.corridor_index[0])
+                        and np.linalg.norm(snapshot.pva[:, 6:9], axis=-1).max() <= 2.0):
+                    metrics = {
+                        key: 0.0 if key.endswith("_ms") else value
+                        for key, value in self.last_reference_metrics[index].items()
+                    }
+                    metrics.update(
+                        plan_reused=True,
+                        local_path_length_m=snapshot.local_path_length_m,
+                        reference_sfc_violation_m=snapshot.reference_violation,
+                        source_reference_sfc_violation_m=snapshot.source_reference_violation,
+                    )
+                    return previous, snapshot, 1000 * (perf_counter() - started), metrics
             try:
                 motion = values[16:].reshape(5, 3)
                 plan = frontend.plan(points, state, values[13:16],
@@ -301,6 +336,7 @@ class PathCoverNavigation:
                 )
             metrics = {
                 **plan.metrics,
+                "plan_reused": False,
                 "reference_sfc_violation_m": snapshot.reference_violation,
                 "source_reference_sfc_violation_m": snapshot.source_reference_violation,
                 "corridor_count": len(plan.corridors),
@@ -321,16 +357,17 @@ class PathCoverNavigation:
         self.frontend_times_ms.extend(result[2] for result in results)
         self.frontend_batch_times_ms.append(1000 * (perf_counter() - batch_started))
         for plan, _, _, metrics in results:
-            if plan is not None:
+            if plan is not None and not metrics.get("plan_reused", False):
                 self._record_reference_quality(metrics)
         errors = {index: result[1] for index, result in zip(ids, results, strict=True) if result[0] is None}
         if errors and not allow_failures:
             raise next(iter(errors.values()))
         sampled = []
-        for index, (plan, snapshot, _, metrics) in zip(ids, results, strict=True):
+        for row, (index, (plan, snapshot, _, metrics)) in enumerate(zip(ids, results, strict=True)):
             if plan is not None:
                 self.last_plans[index] = plan
                 self.last_reference_metrics[index] = metrics
+                self.last_plan_goals[index] = physical[row, 13:16].copy()
             else:
                 nodes = self.config.cost_nodes
                 snapshot = SampledPlan(np.zeros((nodes, 9)), np.zeros(nodes),
@@ -359,3 +396,4 @@ class PathCoverNavigation:
             self._workers.shutdown(wait=True)
         self.frontends.clear()
         self.last_plans.clear()
+        self.last_plan_goals.clear()

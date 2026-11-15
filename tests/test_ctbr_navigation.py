@@ -53,6 +53,78 @@ def test_observed_position_uses_active_corridor_and_junction():
     assert position_sfc_violation(plan, [1.2, 0., 0.], 11.1) == 0.
 
 
+def test_free_progress_can_reuse_and_reanchor_previous_local_plan(monkeypatch):
+    from isaaclab_ipc import pathcover_native
+    from isaaclab_ipc.turbompc.ctbr import CTBRConfig
+
+    instances = []
+
+    class Frontend:
+        def __init__(self, config):
+            self.config = config
+            self.calls = 0
+            instances.append(self)
+
+        def plan(self, points, state, goal, **kwargs):
+            self.calls += 1
+            anchor = state.position.copy()
+
+            def sample(times):
+                t = np.asarray(times)
+                pva = np.zeros((len(t), 9))
+                pva[:, :3] = anchor
+                pva[:, 0] += 2. * t
+                pva[:, 3] = 2.
+                return SimpleNamespace(pva=pva, yaw=np.zeros(len(t)))
+
+            box = np.array([
+                [1., 0., 0., -12.], [-1., 0., 0., -1.],
+                [0., 1., 0., -4.], [0., -1., 0., -4.],
+                [0., 0., 1., -4.], [0., 0., -1., 0.],
+            ])
+            return SimpleNamespace(
+                start_time=state.time, valid_until=state.time + 5.,
+                trajectory=SimpleNamespace(sample=sample), local_goal=np.array([10., 0., 1.5]),
+                corridors=(box,),
+                segments=(SimpleNamespace(corridor_index=0, start=0., end=5., duration=5.),),
+                metrics={},
+            )
+
+        def reset(self):
+            pass
+
+    monkeypatch.setattr(pathcover_native, "NativePathCoverFrontend", Frontend)
+    cfg = pathcover_native.PathCoverConfig()
+    navigation = PathCoverNavigation(
+        1, CTBRConfig(cost_nodes=5), cfg, device="cpu", max_planes=16,
+        constraint_mode="progress", progress_config={"max_speed": 5.0},
+    )
+    navigation._record_reference_quality = lambda metrics: None
+    state = torch.zeros((1, 10), dtype=torch.float64)
+    state[:, 2], state[:, 3], state[:, 7] = 1.5, 1., 2.
+    rates = torch.zeros((1, 3), dtype=torch.float64)
+    goal = torch.tensor([[10., 0., 1.5]], dtype=torch.float64)
+
+    def observe(now, *, reuse=False):
+        return navigation.observe(state, rates, rates, goal, {0: None}, now, reuse_last_plan=reuse)
+
+    try:
+        observe(0.)
+        assert instances[0].calls == 1
+        state[:, 0] = .2
+        reused = observe(.1, reuse=True)
+        assert instances[0].calls == 1
+        assert navigation.last_reference_metrics[0]["plan_reused"] is True
+        assert reused["ctbr_reference"][0, 0, 0] == pytest.approx(.2)
+        assert reused["progress_reference"][0, 0, 0] == pytest.approx(0.)
+        state[:, 0] = .4
+        observe(.2)
+        assert instances[0].calls == 2
+        assert navigation.last_reference_metrics[0]["plan_reused"] is False
+    finally:
+        navigation.close()
+
+
 @pytest.mark.parametrize("separate_nominal_target", [False, True])
 @pytest.mark.parametrize("constraint_mode", ["polytope", "progress"])
 def test_batch_selection_planning_failure_and_snapshot_ownership(

@@ -185,6 +185,8 @@ class CTBRController:
         self.actor.fixed_cost = policy == "fixed-ctbr"
         self.actor.eval()
         self.warm_start = None
+        self._plan_sequence = 0
+        self._plan_reuse_interval = 2 if progress and benchmark == "high_speed" else 1
         self.last_valid_command = np.array([self.config.gravity, 0., 0., 0.])
         self.last_observation = None
         self.last_result = None
@@ -207,7 +209,9 @@ class CTBRController:
                 warm_start_controls=self.warm_start)
         else:
             context = self.navigation.observe(state_t, rates_t, acceleration_t, goal_t, {0: cloud}, now,
-                                              warm_start_controls=self.warm_start)
+                                              warm_start_controls=self.warm_start,
+                                              reuse_last_plan=(self._plan_sequence % self._plan_reuse_interval != 0))
+            self._plan_sequence += 1
         frontend_ms = 1000 * (perf_counter() - started)
         observation = TensorDict(context, batch_size=[1])
         solve_started = perf_counter()
@@ -316,12 +320,18 @@ def main(args=None):
             metadata = dict(parameters=p, solver=self.controller.actor.solver_metadata(),
                 frontend_config=asdict(self.controller.navigation.frontends[0].config)
                     if self.controller.navigation is not None else None,
+                progress_plan_reuse_interval=self.controller._plan_reuse_interval,
                 checkpoint_sha256=checkpoint_sha, startup_ms=self.controller.startup_ms,
                 sfc_face_capacity=self.controller.max_planes,
                 pipeline="native-pathcover-ctbr" if p["frontend"] == "pathcover" else "acmpc-ctbr-a0",
                 command_step_s=.01, mpc_prediction_step_s=self.controller.config.dt,
-                scheduling="100 Hz actuation; replan every 10 simulation ticks" if p["simulated_time"]
-                    else "100 Hz ROS timer; synchronous 10 Hz MPC, measured wall cadence",
+                scheduling=(
+                    "100 Hz actuation; 10 Hz MPC, selective alternating local-plan reuse"
+                    if p["simulated_time"] and self.controller._plan_reuse_interval > 1 else
+                    "100 Hz actuation; 10 Hz MPC and PathCover replanning"
+                    if p["simulated_time"] else
+                    "100 Hz ROS timer; synchronous 10 Hz MPC, measured wall cadence"
+                ),
                 state_order="world position, quaternion WXYZ, world velocity",
                 control_units="collective specific thrust m/s^2, body angular rates rad/s",
                 reference_archive_scope="Returned CPU plans retained after solve timing; serialized at shutdown; no extra integration"

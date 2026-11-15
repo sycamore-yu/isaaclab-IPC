@@ -5,7 +5,8 @@ import numpy as np
 
 def sample_progress_plan(plan, state, cost_nodes, dt, max_planes=128, *,
                          max_speed=4.0, lateral_acceleration=3.5,
-                         braking_acceleration=4.0, mission_goal=None):
+                         braking_acceleration=4.0, mission_goal=None,
+                         reanchor=False):
     """Sample a local geometric model; MINCO time only parameterizes its curve.
 
     Each row is [s_bar, tangent_xyz, s_lower, s_upper, nu_guess, nu_limit].
@@ -28,12 +29,20 @@ def sample_progress_plan(plan, state, cost_nodes, dt, max_planes=128, *,
     boundaries = np.interp(np.r_[0., ends], times, arc)
     keep = np.r_[True, distances > 1e-10]
     positions, arc, times = positions[keep], arc[keep], times[keep]
+    start_arc = 0.0
+    if reanchor and len(arc) > 1:
+        spans = np.diff(positions, axis=0)
+        fractions = np.clip(np.einsum("ij,ij->i", state[:3] - positions[:-1], spans)
+                            / np.maximum(np.einsum("ij,ij->i", spans, spans), 1e-12), 0., 1.)
+        closest = positions[:-1] + fractions[:, None] * spans
+        nearest = int(np.argmin(np.sum((closest - state[:3]) ** 2, axis=1)))
+        start_arc = float(arc[nearest] + fractions[nearest] * (arc[nearest + 1] - arc[nearest]))
     speed = min(float(np.linalg.norm(state[7:10])), max_speed)
     # At standstill, repeated s=0 tangents can extrapolate a tiny initial
     # vertical bend across the whole horizon. Preview at least 0.1 m per
     # 0.1 s node; this initializes geometry, not progress state or its bounds.
     preview_speed = max(speed, 1.0)
-    seed = np.minimum(np.arange(cost_nodes) * dt * preview_speed, boundaries[-1])
+    seed = np.minimum(start_arc + np.arange(cost_nodes) * dt * preview_speed, boundaries[-1])
 
     if len(arc) > 1:
         def path_sample(s):
@@ -75,7 +84,7 @@ def sample_progress_plan(plan, state, cost_nodes, dt, max_planes=128, *,
             speed_cap = np.interp(seed, arc, path_cap)
             preview = np.minimum(speed_cap[:-1],
                                  np.maximum(speed, 1.) + braking_acceleration * dt * np.arange(cost_nodes - 1))
-            seed = np.minimum(np.r_[0., np.cumsum(preview * dt)], arc[-1])
+            seed = np.minimum(start_arc + np.r_[0., np.cumsum(preview * dt)], arc[-1])
         points, tangent, curvature, _ = local_geometry(seed)
         speed_cap = np.interp(seed, arc, path_cap)
     else:
@@ -93,7 +102,9 @@ def sample_progress_plan(plan, state, cost_nodes, dt, max_planes=128, *,
     ownership = np.searchsorted(boundaries[1:], seed, side="right").clip(0, len(ends) - 1)
     planes = np.zeros((cost_nodes, max_planes, 4))
     masks = np.zeros((cost_nodes, max_planes), dtype=bool)
-    progress = np.column_stack((seed, tangent, boundaries[ownership], boundaries[ownership + 1],
+    progress = np.column_stack((seed - start_arc, tangent,
+                                boundaries[ownership] - start_arc,
+                                boundaries[ownership + 1] - start_arc,
                                 np.full(cost_nodes, speed), speed_cap))
     violation = 0.0
     corridor_ids = np.zeros(cost_nodes, dtype=np.int64)
@@ -111,4 +122,4 @@ def sample_progress_plan(plan, state, cost_nodes, dt, max_planes=128, *,
         if len(faces):
             violation = max(violation, float(np.max(faces[:, :3] @ points[k] + faces[:, 3])))
     return SampledPlan(pva, yaw, planes, masks, corridor_ids, violation, violation, progress,
-                       float(arc[-1]))
+                       float(arc[-1] - start_arc))

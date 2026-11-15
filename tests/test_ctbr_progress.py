@@ -64,6 +64,19 @@ def test_path_progress_uses_geometry_not_minco_clock():
     assert fast.local_path_length_m == pytest.approx(10.)
 
 
+def test_reused_progress_reanchors_to_measured_position():
+    from isaaclab_ipc.ctbr_progress import sample_progress_plan
+
+    state = np.array([2., 0., 1.5, 1., 0., 0., 0., 2., 0., 0.])
+    snapshot = sample_progress_plan(straight_plan(), state, 5, .1, 16, reanchor=True)
+    assert snapshot.pva[0, 0] == pytest.approx(2.)
+    assert snapshot.progress[0, 0] == pytest.approx(0.)
+    np.testing.assert_allclose(snapshot.progress[:, 4], -2.)
+    np.testing.assert_allclose(snapshot.progress[:, 5], 8.)
+    assert snapshot.local_path_length_m == pytest.approx(8.)
+    assert np.all(np.diff(snapshot.progress[:, 0]) >= 0.)
+
+
 def test_marsim_progress_limit_matches_native_super_scene():
     from isaaclab_ipc.benchmark_config import load_case
     from isaaclab_ipc.ros_ctbr_policy import (
