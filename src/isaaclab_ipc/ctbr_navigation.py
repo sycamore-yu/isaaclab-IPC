@@ -60,8 +60,8 @@ def sample_plan(plan, now, cost_nodes, dt, max_planes=128, *,
     """Sample t0+k*dt; keep adjacent corridor faces at an exact junction.
 
     Polynomials and their corridor ownership use the frontend's own segment
-    times. Section mode replaces each node's polytope by a bounded sweep of
-    its normal-plane section, with fixed progress from this reference clock.
+    times. Section mode adds two longitudinal caps to the original SFC at
+    each fixed-clock reference node, leaving lateral faces unchanged.
     After the final segment the reference holds its endpoint.
     """
     if constraint_mode not in ("polytope", "section"):

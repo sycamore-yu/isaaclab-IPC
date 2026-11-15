@@ -349,8 +349,8 @@ class CTBRMPCEnv(IPCEnv):
             (actions < self._action_lower - 1e-5) | (actions > self._action_upper + 1e-5)
         ).any(-1)
         self.qp_failures += active & ~result["solved"]
-        self.qp_residual_max = torch.maximum(
-            self.qp_residual_max, torch.where(active, result["primal"], 0.0)
+        self.qp_residual_max.copy_(
+            torch.maximum(self.qp_residual_max, torch.where(active, result["primal"], 0.0))
         )
         # Recede only the initializer; every new problem integrates from measurement.
         shift = self.step_dt / self.ctbr_config.dt
@@ -365,7 +365,7 @@ class CTBRMPCEnv(IPCEnv):
     def _get_dones(self):
         term, trunc = super()._get_dones()
         pose, twist = self.body_state()
-        self.speed_max = torch.maximum(self.speed_max, twist[:, :3].double().norm(dim=-1))
+        self.speed_max.copy_(torch.maximum(self.speed_max, twist[:, :3].double().norm(dim=-1)))
         if self.current_context is not None and self.current_context["planes"].shape[-2]:
             index = min(round(self.step_dt / self.ctbr_config.dt), self.ctbr_config.cost_nodes - 1)
             planes = self.current_context["planes"][:, index]
@@ -373,7 +373,7 @@ class CTBRMPCEnv(IPCEnv):
             position = pose[:, :3] - self.scene.env_origins
             violation = (planes[..., :3] * position[:, None]).sum(-1) + planes[..., 3]
             violation = violation.masked_fill(~mask, 0).clamp_min(0).amax(-1)
-            self.sfc_violation_max = torch.maximum(self.sfc_violation_max, violation)
+            self.sfc_violation_max.copy_(torch.maximum(self.sfc_violation_max, violation))
         self.frontend_failure.zero_()
         self._frontend_errors = {}
         if self.navigation is not None and self.cfg.automatic_reset:

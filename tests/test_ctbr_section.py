@@ -1,11 +1,10 @@
-"""CMPCC-style fixed-progress sections are bounded, safe, and use native CTBR rows."""
+"""Fixed-progress SFC slabs retain original faces and use native CTBR rows."""
 
 from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import torch
-from scipy.optimize import linprog
 
 from isaaclab_ipc.ctbr_navigation import sample_plan
 from isaaclab_ipc.ctbr_section import reference_tangent, section_tube_planes
@@ -32,35 +31,33 @@ def test_fixed_progress_section_is_a_bounded_subset():
     assert inside(source, [1.6, 0., 0.])
     assert not inside(section, [1.6, 0., 0.])
     assert not inside(section, [1., 1.1, 0.])
-    assert section.shape == (6, 4)
+    assert section.shape == (8, 4)
+    np.testing.assert_array_equal(section[:-2], source)
     assert np.isfinite(section).all()
 
 
-def test_skewed_original_face_tightens_lateral_section():
+def test_skewed_original_face_keeps_lateral_clearance():
     source = np.vstack((box_faces(), [1., 1., 0., -1.5]))
     section = section_tube_planes(source, [0.5, 0., 0.], [1., 0., 0.], 0.4)
     assert inside(section, [0.9, 0.6, 0.])
     assert inside(source, [0.5, 0.95, 0.])
-    assert not inside(section, [0.5, 0.95, 0.])
+    assert inside(section, [0.5, 0.95, 0.])
+    assert not inside(section, [0.8, 0.95, 0.])
     assert not inside(section, [1., 0., 0.])
 
 
-def test_random_tilted_sections_are_contained_in_source_sfc():
-    # Maximize each original plane over each new tube with an independent LP.
+def test_oblique_tangent_adds_unit_caps_without_altering_source_faces():
     source = box_faces()
     rng = np.random.default_rng(11)
     for _ in range(12):
         center = np.array([1., 0., 0.]) + rng.uniform(-0.3, 0.3, size=3)
         direction = rng.normal(size=3)
         tube = section_tube_planes(source, center, direction, 0.5)
+        np.testing.assert_array_equal(tube[:-2], source)
+        direction /= np.linalg.norm(direction)
+        np.testing.assert_allclose(tube[-2:, :3], [direction, -direction], atol=1e-14)
+        np.testing.assert_allclose(tube[-2:, :3] @ center + tube[-2:, 3], [-.5, -.5], atol=1e-14)
         assert inside(tube, center)
-        for face in source:
-            result = linprog(
-                -face[:3], A_ub=tube[:, :3], b_ub=-tube[:, 3],
-                bounds=[(None, None)] * 3, method="highs",
-            )
-            assert result.success, result.message
-            assert -result.fun + face[3] <= 1e-8
 
 
 def test_reference_tangent_handles_hover_and_vertical_motion():
@@ -153,7 +150,7 @@ def test_section_capacity_is_explicit_and_mode_is_validated():
         start_time=0., trajectory=SimpleNamespace(sample=sample),
         corridors=(source,), segments=(SimpleNamespace(corridor_index=0, end=1.),),
     )
-    with pytest.raises(ValueError, match="requires 6 SFC faces"):
-        sample_plan(plan, 0., 2, .1, 5, constraint_mode="section")
+    with pytest.raises(ValueError, match="requires 8 SFC faces"):
+        sample_plan(plan, 0., 2, .1, 7, constraint_mode="section")
     with pytest.raises(ValueError, match="constraint mode"):
         sample_plan(plan, 0., 2, .1, 8, constraint_mode="invalid")
